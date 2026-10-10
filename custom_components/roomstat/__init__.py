@@ -13,7 +13,8 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .card import async_register_card
-from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, DOMAIN
+from .climate_controllers import read_trv_state
+from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, CONF_FALLBACK_ENTITY_ID, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "room_temp_ts": None,
             "tado_internal_temp": None,
             "tado_setpoint": None,
+            "fallback_internal_temp": None,
+            "fallback_setpoint": None,
         }
 
         # Get Room Temp from External Sensor
@@ -79,43 +82,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         external_sensor_id, state.state,
                     )
 
-        # Get Tado Internal Temp & Setpoint from Source Entity
-        if source_entity_id:
-            state = hass.states.get(source_entity_id)
-            if state:
-                # Try to get internal temperature attribute (device dependent)
-                if state.attributes.get("current_temperature") is not None:
-                    try:
-                        value = float(state.attributes["current_temperature"])
-                        if math.isfinite(value):
-                            data["tado_internal_temp"] = value
-                        else:
-                            _LOGGER.warning(
-                                "Tado internal temperature from %s is not finite: %s",
-                                source_entity_id, value,
-                            )
-                    except (ValueError, TypeError):
-                        _LOGGER.warning(
-                            "Cannot parse tado internal temperature from %s: %r",
-                            source_entity_id, state.attributes.get("current_temperature"),
-                        )
-
-                # Get current Setpoint
-                if state.attributes.get("temperature") is not None:
-                    try:
-                        value = float(state.attributes["temperature"])
-                        if math.isfinite(value):
-                            data["tado_setpoint"] = value
-                        else:
-                            _LOGGER.warning(
-                                "Tado setpoint from %s is not finite: %s",
-                                source_entity_id, value,
-                            )
-                    except (ValueError, TypeError):
-                        _LOGGER.warning(
-                            "Cannot parse tado setpoint from %s: %r",
-                            source_entity_id, state.attributes.get("temperature"),
-                        )
+        # TRV's own reading and setpoint: the source entity, and the optional
+        # fallback for the same room (used only while the source is
+        # unavailable, see climate_controllers.choose_trv).
+        for entity_id, internal_key, setpoint_key in (
+            (source_entity_id, "tado_internal_temp", "tado_setpoint"),
+            (
+                entry.options.get(CONF_FALLBACK_ENTITY_ID),
+                "fallback_internal_temp",
+                "fallback_setpoint",
+            ),
+        ):
+            state = hass.states.get(entity_id) if entity_id else None
+            if state is not None:
+                data[internal_key], data[setpoint_key] = read_trv_state(
+                    state.state, state.attributes
+                )
 
         return data
 

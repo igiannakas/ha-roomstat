@@ -10,8 +10,25 @@ from homeassistant.components.climate import PRESET_BOOST, HVACMode
 from homeassistant.exceptions import HomeAssistantError
 
 from .autotune import AutotuneSample
+from .climate_controllers import CommandPacer, trv_setpoint_drifted
+from .parameters import (
+    FALLBACK_DRIFT_GRACE_S,
+    TRV_COMMAND_SPACING_S,
+    TRV_DRIFT_GRACE_S,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# One pacer for every Roomstat room: commands to the TRVs (which share one
+# Tado bridge) go out at least TRV_COMMAND_SPACING_S apart.
+COMMAND_PACER = CommandPacer(TRV_COMMAND_SPACING_S)
+
+
+async def _wait_for_command_slot() -> None:
+    """Wait for this command's turn (see CommandPacer)."""
+    delay = COMMAND_PACER.reserve(time.monotonic())
+    if delay > 0:
+        await asyncio.sleep(delay)
 
 
 class RegulationMixin:
@@ -118,9 +135,12 @@ class RegulationMixin:
             self._write_state_with_binary_sensor()
             return
 
-        # 1. Gather sensor data from coordinator
+        # 1. Gather sensor data from coordinator.  The TRV is the configured
+        # one, or its fallback while the configured one is unavailable.
         room_temp = self.coordinator.data.get("room_temp")
-        tado_internal = self.coordinator.data.get("tado_internal_temp")
+        trv = self._active_trv()
+        self._note_trv_source(trv)
+        tado_internal = trv.internal_c
 
         # Sensor resilience: bridge short gaps with last-valid value
         if room_temp is not None:
@@ -190,12 +210,28 @@ class RegulationMixin:
         # for realistic temperatures, so a needed fast cooldown would be
         # suppressed.  Instead, skip rate limiting entirely when no baseline
         # is known (e.g. after a quick HVAC OFF → HEAT cycle).
+        time_since_last = now - self._last_command_sent_ts
+        # A TRV that no longer holds our last command (lost on the way, or a
+        # Tado schedule block ended the override) is compared with what it
+        # actually holds, so the command goes out again.
+        if trv_setpoint_drifted(
+            self._last_sent_setpoint,
+            trv.setpoint_c,
+            time_since_last,
+            FALLBACK_DRIFT_GRACE_S if trv.is_fallback else TRV_DRIFT_GRACE_S,
+            self._config.min_change_threshold_c,
+        ):
+            _LOGGER.info(
+                "%s: %s holds %.1f °C, not the %.1f °C sent; sending again",
+                self._config_entry.title, trv.entity_id,
+                trv.setpoint_c, self._last_sent_setpoint,
+            )
+            self._last_sent_setpoint = None
         current_tado_setpoint = (
             self._last_sent_setpoint
             if self._last_sent_setpoint is not None
-            else self.coordinator.data.get("tado_setpoint")  # None if Tado is off/unavailable
+            else trv.setpoint_c  # None if the TRV is off/unavailable
         )
-        time_since_last = now - self._last_command_sent_ts
         is_rate_limited = time_since_last < self._config.min_command_interval_s
 
         should_send = False
@@ -245,7 +281,7 @@ class RegulationMixin:
 
         # 6. Send command to Tado
         if should_send:
-            await self._async_send_to_tado(result.target_for_tado_c)
+            await self._async_send_to_tado(result.target_for_tado_c, trv.entity_id)
             self._last_command_sent_ts = now
             self._last_reason = f"sent({reason})"
         else:
@@ -253,19 +289,52 @@ class RegulationMixin:
 
         # 7. Background auto-tune (no-op when disabled).  Runs after the
         # send so it sees the command the TRV now holds; any new values take
-        # effect from the next cycle.
-        self._feed_autotune(now, setpoint, room_temp, tado_internal, result)
+        # effect from the next cycle.  On a fallback it keeps learning from
+        # the room sensor, but without the TRV's own reading: that comes from
+        # cloud polling and can be minutes old, so the TRV demand is unknown
+        # for those cycles (no demand crossing is detected from it).
+        self._feed_autotune(
+            now, setpoint, room_temp,
+            None if trv.is_fallback else tado_internal,
+            result,
+        )
 
         self._write_state_with_binary_sensor()
 
+    def _note_trv_source(self, trv) -> None:
+        """Log a switch to or from the fallback TRV entity.
+
+        The last sent setpoint is forgotten on a switch, so the next cycle
+        compares its command with what the newly used entity reports (a
+        command sent just before the switch may never have arrived).
+        """
+        if trv.is_fallback == self._trv_fallback_active:
+            return
+        self._trv_fallback_active = trv.is_fallback
+        self._last_sent_setpoint = None
+        if trv.is_fallback:
+            _LOGGER.warning(
+                "%s: %s unavailable, using fallback %s",
+                self._config_entry.title,
+                self._config_entry.data.get("source_entity_id"),
+                trv.entity_id,
+            )
+        else:
+            _LOGGER.info(
+                "%s: %s available again, leaving the fallback",
+                self._config_entry.title,
+                trv.entity_id,
+            )
+
     async def _async_send_hvac_mode_to_tado(self, mode: HVACMode) -> None:
-        """Forward an HVAC mode change to the source Tado entity."""
-        source_entity = self._config_entry.data.get("source_entity_id")
+        """Forward an HVAC mode change to the TRV (or its active fallback)."""
+        source_entity = self._active_trv().entity_id
         if not source_entity:
             _LOGGER.warning("No source_entity_id configured – cannot send HVAC mode to Tado")
             return
 
         _LOGGER.debug("Sending HVAC mode %s to %s", mode, source_entity)
+        await _wait_for_command_slot()
 
         try:
             async with asyncio.timeout(10):
@@ -284,14 +353,15 @@ class RegulationMixin:
             _LOGGER.exception("Failed to send HVAC mode to Tado")
             raise
 
-    async def _async_send_to_tado(self, target_c: float) -> None:
-        """Send a temperature command to the source Tado entity."""
-        source_entity = self._config_entry.data.get("source_entity_id")
+    async def _async_send_to_tado(self, target_c: float, entity_id: str | None = None) -> None:
+        """Send a temperature command to the TRV (default: the configured one)."""
+        source_entity = entity_id or self._config_entry.data.get("source_entity_id")
         if not source_entity:
             _LOGGER.warning("No source_entity_id configured – cannot send command to Tado")
             return
 
         _LOGGER.debug("Sending %.1f°C to %s", target_c, source_entity)
+        await _wait_for_command_slot()
 
         try:
             async with asyncio.timeout(10):

@@ -15,6 +15,7 @@ from .const import (
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
+    CONF_FALLBACK_ENTITY_ID,
     CONF_GAIN_FINE_MULTIPLIER,
     CONF_GAIN_FINE_THRESHOLD_C,
     CONF_GAIN_SCHEDULING,
@@ -115,6 +116,7 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 CONF_PRESENCE_SENSOR_ID,
                 CONF_SUMMER_MODE_ENTITY_ID,
                 CONF_SCHEDULE_ENTITY_ID,
+                CONF_FALLBACK_ENTITY_ID,
             ):
                 if key not in cleaned:
                     merged.pop(key, None)
@@ -230,6 +232,56 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         if schedule_entity:
             schedule_section_schema = self.add_suggested_values_to_schema(
                 schedule_section_schema, {CONF_SCHEDULE_ENTITY_ID: schedule_entity}
+            )
+
+        # --- Build TRV communication section schema ---
+        source_entity = data.get(CONF_SOURCE_ENTITY_ID)
+        trv_section_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_MIN_COMMAND_INTERVAL_S,
+                    default=opts.get(CONF_MIN_COMMAND_INTERVAL_S, defaults.min_command_interval_s),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=60, max=600, step=30,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="s",
+                    )
+                ),
+                vol.Required(
+                    CONF_MIN_CHANGE_THRESHOLD_C,
+                    default=opts.get(CONF_MIN_CHANGE_THRESHOLD_C, defaults.min_change_threshold_c),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.1, max=1.0, step=0.1,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="°C",
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERLAY_REFRESH_S,
+                    default=opts.get(CONF_OVERLAY_REFRESH_S, 0),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=3600, step=60,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="s",
+                    )
+                ),
+                # Another climate entity for the same room (e.g. the Tado
+                # cloud thermostat), used only while the TRV is unavailable.
+                vol.Optional(CONF_FALLBACK_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="climate",
+                        exclude_entities=[source_entity] if source_entity else [],
+                    )
+                ),
+            }
+        )
+        fallback_entity = opts.get(CONF_FALLBACK_ENTITY_ID)
+        if fallback_entity:
+            trv_section_schema = self.add_suggested_values_to_schema(
+                trv_section_schema, {CONF_FALLBACK_ENTITY_ID: fallback_entity}
             )
 
         # --- Main options schema with sections ---
@@ -395,40 +447,7 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
 
                 # Section: TRV Communication
                 vol.Required("trv_communication"): section(
-                    vol.Schema(
-                        {
-                            vol.Required(
-                                CONF_MIN_COMMAND_INTERVAL_S,
-                                default=opts.get(CONF_MIN_COMMAND_INTERVAL_S, defaults.min_command_interval_s),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=60, max=600, step=30,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                    unit_of_measurement="s",
-                                )
-                            ),
-                            vol.Required(
-                                CONF_MIN_CHANGE_THRESHOLD_C,
-                                default=opts.get(CONF_MIN_CHANGE_THRESHOLD_C, defaults.min_change_threshold_c),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=0.1, max=1.0, step=0.1,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                    unit_of_measurement="°C",
-                                )
-                            ),
-                            vol.Required(
-                                CONF_OVERLAY_REFRESH_S,
-                                default=opts.get(CONF_OVERLAY_REFRESH_S, 0),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=0, max=3600, step=60,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                    unit_of_measurement="s",
-                                )
-                            ),
-                        }
-                    ),
+                    trv_section_schema,
                     {"collapsed": True},
                 ),
 

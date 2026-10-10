@@ -179,7 +179,8 @@ class SummerMixin:
 
     async def _async_summer_enforce(self, now: float) -> None:
         """Hold the TRV at the summer target (called by the regulation cycle)."""
-        source = self._config_entry.data.get("source_entity_id")
+        # The configured TRV, or its fallback while it is unavailable.
+        source = self._active_trv().entity_id
         st = self.hass.states.get(source) if source else None
         trv_state = st.state if st is not None else None
         trv_setpoint = safe_float(st.attributes.get("temperature")) if st is not None else None
@@ -206,7 +207,7 @@ class SummerMixin:
             reason = "summer_locked"
 
         if send:
-            await self._async_send_to_tado(SUMMER_TARGET_C)
+            await self._async_send_to_tado(SUMMER_TARGET_C, source)
             self._last_command_sent_ts = now
             self._summer_bypass_rate_limit = False
             self._last_reason = f"sent({reason})"

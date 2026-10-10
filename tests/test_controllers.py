@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Module loading (HA-free)
 # ---------------------------------------------------------------------------
@@ -627,3 +629,108 @@ class TestSavedState:
         assert s.preset == "eco"
         assert s.temp == 19.5
 
+
+
+# ---------------------------------------------------------------------------
+# TRV source: configured valve or cloud fallback
+# ---------------------------------------------------------------------------
+
+TrvReading = _ctrl_mod.TrvReading
+choose_trv = _ctrl_mod.choose_trv
+read_trv_state = _ctrl_mod.read_trv_state
+
+HOMEKIT = "climate.valve_homekit"
+CLOUD = "climate.room_cloud"
+
+
+class TestTrvSource:
+
+    def test_reads_reading_and_setpoint(self):
+        assert read_trv_state("heat", {"current_temperature": 20.4,
+                                       "temperature": "21.5"}) == (20.4, 21.5)
+
+    @pytest.mark.parametrize("state", [None, "unavailable", "unknown"])
+    def test_unavailable_gives_nothing_even_with_stale_attributes(self, state):
+        assert read_trv_state(state, {"current_temperature": 20.4,
+                                      "temperature": 21.5}) == (None, None)
+
+    @pytest.mark.parametrize("bad", ["x", float("nan"), float("inf"), True, None])
+    def test_bad_values_are_none(self, bad):
+        assert read_trv_state("heat", {"current_temperature": bad,
+                                       "temperature": bad}) == (None, None)
+
+    def test_off_still_reads(self):
+        assert read_trv_state("off", {"current_temperature": 19.0}) == (19.0, None)
+
+    def test_primary_wins_when_usable(self):
+        p = TrvReading(HOMEKIT, 20.0, 21.0)
+        f = TrvReading(CLOUD, 19.5, 21.0)
+        assert choose_trv(p, f) is p
+
+    def test_fallback_while_primary_unavailable(self):
+        p = TrvReading(HOMEKIT)
+        chosen = choose_trv(p, TrvReading(CLOUD, 19.5, 21.0))
+        assert chosen == TrvReading(CLOUD, 19.5, 21.0, is_fallback=True)
+
+    def test_no_fallback_configured_waits_for_primary(self):
+        p = TrvReading(HOMEKIT)
+        assert choose_trv(p, None) is p
+
+    def test_unusable_fallback_waits_for_primary(self):
+        p = TrvReading(HOMEKIT)
+        assert choose_trv(p, TrvReading(CLOUD)) is p
+
+    def test_fallback_equal_to_primary_is_ignored(self):
+        p = TrvReading(HOMEKIT)
+        assert choose_trv(p, TrvReading(HOMEKIT, 19.5, 21.0)) is p
+
+
+# ---------------------------------------------------------------------------
+# Lost commands and command spacing
+# ---------------------------------------------------------------------------
+
+trv_setpoint_drifted = _ctrl_mod.trv_setpoint_drifted
+CommandPacer = _ctrl_mod.CommandPacer
+
+
+class TestTrvDrift:
+
+    def test_holds_the_command(self):
+        assert not trv_setpoint_drifted(20.0, 20.0, 600, 120, 0.3)
+
+    def test_lost_or_overridden_command(self):
+        assert trv_setpoint_drifted(20.0, 17.0, 600, 120, 0.3)
+
+    def test_not_checked_before_the_grace(self):
+        assert not trv_setpoint_drifted(20.0, 17.0, 60, 120, 0.3)
+
+    def test_small_difference_ignored(self):
+        assert not trv_setpoint_drifted(20.0, 20.2, 600, 120, 0.3)
+
+    @pytest.mark.parametrize("sent, held", [(None, 17.0), (20.0, None)])
+    def test_unknown_is_not_drift(self, sent, held):
+        assert not trv_setpoint_drifted(sent, held, 600, 120, 0.3)
+
+
+class TestCommandPacer:
+
+    def test_first_command_goes_at_once(self):
+        assert CommandPacer(5.0).reserve(100.0) == 0.0
+
+    def test_commands_at_the_same_moment_are_spaced(self):
+        p = CommandPacer(5.0)
+        assert [p.reserve(100.0) for _ in range(4)] == [0.0, 5.0, 10.0, 15.0]
+
+    def test_no_wait_once_the_gap_has_passed(self):
+        p = CommandPacer(5.0)
+        p.reserve(100.0)
+        assert p.reserve(106.0) == 0.0
+
+    def test_partial_wait(self):
+        p = CommandPacer(5.0)
+        p.reserve(100.0)
+        assert p.reserve(102.0) == pytest.approx(3.0)
+
+    def test_zero_spacing_never_waits(self):
+        p = CommandPacer(0.0)
+        assert [p.reserve(100.0) for _ in range(3)] == [0.0, 0.0, 0.0]

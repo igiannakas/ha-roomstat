@@ -51,7 +51,8 @@ the HA modules.
 - `regulation.py`: feedforward + PI engine and the one-sided derivative brake.
 - `autotune.py`: background tuning of Kp, Ki and the braking time Td.
 - `climate_controllers.py`: window, presence, summer and schedule state
-  machines, restart persistence helpers.
+  machines, restart persistence helpers, and `choose_trv` (configured TRV or
+  its fallback).
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
   feeding the auto-tuner.
@@ -101,6 +102,24 @@ Read this before changing `regulation.py` or `parameters.py`.
   two-sided.**
 - **Rate limit:** default 180 s between commands to save TRV batteries. Don't
   lower the default.
+- **TRV fallback** (option `fallback_entity_id`): a second climate entity for
+  the same room, typically the Tado cloud thermostat behind a HomeKit valve.
+  Each cycle uses the configured TRV whenever it gives a reading, otherwise
+  the fallback (`choose_trv`); readings, commands, HVAC on/off and the summer
+  lock all go through the one chosen. On a switch the last sent setpoint is
+  forgotten, so the next command is compared with what the newly used entity
+  holds. On the fallback the auto-tuner keeps learning from the room sensor,
+  but gets no TRV reading (it can be minutes old from cloud polling), so the
+  TRV demand is unknown for those cycles. Each cloud command costs Tado API
+  calls, so the fallback is never the default path.
+- **Command spacing:** one `CommandPacer` for all rooms keeps TRV commands at
+  least `TRV_COMMAND_SPACING_S` (5 s) apart. All rooms run their cycle on the
+  same minute after a restart, and all V3+ valves share one bridge.
+- **Lost commands:** if the TRV still reports a different setpoint
+  `TRV_DRIFT_GRACE_S` (2 min; 6 min on a fallback) after a command, the
+  command is sent again (`trv_setpoint_drifted`). This covers a command lost
+  on the way and a Tado schedule block that ended the override, so blind
+  overlay refreshes are not needed with HomeKit (`overlay_refresh_s` 0).
 
 ## Auto-tune
 

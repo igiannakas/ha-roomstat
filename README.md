@@ -23,6 +23,14 @@ changes.
 - **Commands stay at 25 °C or below**, the highest value V3+ accepts. The
   original sent up to 30 °C. V3+ refused those commands, so the room didn't
   heat.
+- **Cloud fallback.** A valve sometimes drops off HomeKit for a few minutes
+  or longer. Pick the room's Tado cloud thermostat under **Configure → TRV
+  Communication → Fallback thermostat**, and Roomstat controls the room
+  through it until the valve is back. Auto-tune keeps learning meanwhile.
+- **Gentle on the bridge.** Commands from different rooms go out at least
+  5 seconds apart. Roomstat checks every minute that each valve still holds
+  its last command, and sends it again only if it doesn't, so you can set
+  **Overlay refresh interval** to 0.
 
 **Control**
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the

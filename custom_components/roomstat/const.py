@@ -58,6 +58,10 @@ CONF_SENSOR_GRACE_S = "sensor_grace_s"
 # Overlay refresh (for cloud-API integrations with timer-based overlays)
 CONF_OVERLAY_REFRESH_S = "overlay_refresh_s"
 
+# Optional second climate entity for the same room (e.g. the Tado cloud
+# thermostat), read and commanded only while the source TRV is unavailable
+CONF_FALLBACK_ENTITY_ID = "fallback_entity_id"
+
 # PI controller tuning keys (stored in options)
 CONF_CORRECTION_KP = "correction_kp"
 CONF_CORRECTION_KI = "correction_ki"

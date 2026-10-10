@@ -15,6 +15,10 @@ Architecture
   ``window_startup_action`` / ``presence_startup_action`` – pure startup
   decisions used by ``async_added_to_hass``
 - ``resolve_summer_state`` / ``summer_enforcement_needed`` – summer-mode lock
+- ``TrvReading`` / ``read_trv_state`` / ``choose_trv`` – read the configured
+  TRV, or a fallback entity for the same room while it is unavailable
+- ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
+  not take, and keep commands from all rooms apart
 - ``ScheduleController`` / ``parse_schedule_preset`` – follow an external
   schedule helper, with manual overrides that end at the next schedule change
   or after a configurable time (whichever comes first)
@@ -580,6 +584,93 @@ def summer_enforcement_needed(
     if trv_setpoint is None:
         return True
     return abs(trv_setpoint - target_c) >= tolerance_c
+
+
+# ---------------------------------------------------------------------------
+# TRV source: the configured valve, or a fallback entity for the same room
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TrvReading:
+    """What one TRV climate entity tells us this cycle."""
+
+    entity_id: str | None
+    internal_c: float | None = None   # the TRV's own temperature reading
+    setpoint_c: float | None = None   # the setpoint it currently holds
+    is_fallback: bool = False
+
+    @property
+    def usable(self) -> bool:
+        return self.entity_id is not None and self.internal_c is not None
+
+
+def read_trv_state(
+    state: str | None, attributes: Mapping[str, Any] | None
+) -> tuple[float | None, float | None]:
+    """(own reading, setpoint) from a climate entity, or Nones when it is
+    missing or unavailable (an unavailable entity may keep stale attributes)."""
+    if state is None or state in _UNAVAILABLE_STATES:
+        return None, None
+    attrs = attributes or {}
+    return (
+        _as_opt_float(attrs.get("current_temperature")),
+        _as_opt_float(attrs.get("temperature")),
+    )
+
+
+def choose_trv(primary: TrvReading, fallback: TrvReading | None) -> TrvReading:
+    """The TRV to read and command this cycle.
+
+    The configured valve whenever it gives a reading.  When it does not
+    (e.g. its HomeKit link dropped) and the fallback does (e.g. the room's
+    Tado cloud thermostat, which reaches the same valve another way), the
+    fallback.  Otherwise the configured valve, so the cycle waits for it as
+    before.  A fallback that is the configured valve itself is ignored.
+    """
+    if (
+        primary.usable
+        or fallback is None
+        or not fallback.usable
+        or fallback.entity_id == primary.entity_id
+    ):
+        return primary
+    return TrvReading(fallback.entity_id, fallback.internal_c, fallback.setpoint_c, True)
+
+
+def trv_setpoint_drifted(
+    last_sent_c: float | None,
+    trv_setpoint_c: float | None,
+    since_sent_s: float,
+    grace_s: float,
+    threshold_c: float,
+) -> bool:
+    """True when the TRV no longer holds the last command.
+
+    Only checked once ``grace_s`` has passed since the command, so the TRV's
+    state has had time to report it.  A difference below ``threshold_c`` is
+    not worth a command.
+    """
+    if last_sent_c is None or trv_setpoint_c is None or since_sent_s < grace_s:
+        return False
+    return abs(trv_setpoint_c - last_sent_c) >= threshold_c
+
+
+class CommandPacer:
+    """Keeps TRV commands from all rooms at least ``spacing_s`` apart.
+
+    ``reserve(now)`` books the next free slot and returns how long the caller
+    must wait for it.  It never awaits, so callers running at the same moment
+    in one event loop each get their own slot.
+    """
+
+    def __init__(self, spacing_s: float) -> None:
+        self.spacing_s = spacing_s
+        self._next_free = -math.inf
+
+    def reserve(self, now: float) -> float:
+        slot = max(now, self._next_free)
+        self._next_free = slot + self.spacing_s
+        return slot - now
 
 
 # ---------------------------------------------------------------------------

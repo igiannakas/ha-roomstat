@@ -151,6 +151,9 @@ def _load_entity_package():
 if not _HA_INSTALLED:
     _install_ha_stubs()
     _climate = _load_entity_package()
+    # Commands are spaced in real time in production; tests send many in a
+    # row and must not wait (test_trv_fallback.py covers the spacing).
+    sys.modules["roomstat_e2e.climate_regulation"].COMMAND_PACER.spacing_s = 0.0
 else:  # pragma: no cover
     _climate = None
 

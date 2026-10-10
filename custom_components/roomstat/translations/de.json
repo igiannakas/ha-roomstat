@@ -128,16 +128,18 @@
           },
           "trv_communication": {
             "name": "TRV-Kommunikation",
-            "description": "Befehlsintervalle und Batterieschonung.",
+            "description": "Befehlsintervalle, Batterieschonung und ein Ersatz, wenn das TRV nicht erreichbar ist.",
             "data": {
               "min_command_interval_s": "Mindest-Befehlsintervall",
               "min_change_threshold_c": "Mindest-Änderungsschwelle",
-              "overlay_refresh_s": "Overlay-Refresh-Intervall"
+              "overlay_refresh_s": "Overlay-Refresh-Intervall",
+              "fallback_entity_id": "Ersatz-Thermostat"
             },
             "data_description": {
               "min_command_interval_s": "Mindestzeit zwischen Befehlen an das TRV (Batterieschonung).",
               "min_change_threshold_c": "Mindestdifferenz zum aktuellen Tado-Sollwert, bevor ein neuer Befehl gesendet wird.",
-              "overlay_refresh_s": "Sollwert periodisch erneut an das TRV senden, um Cloud-API-Overlays aktiv zu halten. 0 = aus."
+              "overlay_refresh_s": "Sollwert periodisch erneut an das TRV senden, um Cloud-API-Overlays aktiv zu halten. 0 = aus. Mit HomeKit nicht nötig: Roomstat prüft jede Minute, ob das TRV seinen Befehl noch hält, und sendet ihn sonst erneut.",
+              "fallback_entity_id": "Optional. Eine weitere Klima-Entität für denselben Raum, zum Beispiel das Tado-Cloud-Thermostat des Raums. Solange das TRV oben nicht erreichbar ist (etwa bei einem HomeKit-Aussetzer), liest und steuert Roomstat den Raum über diese Entität und wechselt danach von selbst zurück. Die automatische Abstimmung lernt dabei über den Raumsensor weiter."
             }
           },
           "behaviour": {

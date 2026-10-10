@@ -28,6 +28,19 @@ DEFAULT_CONTROL_INTERVAL_S: int = 60   # seconds between regulation cycles
 FROST_PROTECT_C: float = 5.0           # target temperature when HVAC is OFF
 DEFAULT_SENSOR_GRACE_S: int = 300      # seconds to use last-valid room_temp when sensor is unavailable
 
+# Minimum time between any two TRV commands, across all rooms.  Every room
+# runs its cycle on the same minute after a restart, and all Tado V3+ valves
+# share one bridge; spacing the commands means it never gets a burst.
+TRV_COMMAND_SPACING_S: float = 5.0
+
+# A TRV whose setpoint still differs from the last command this long after it
+# was sent did not take it (lost on the way, or a Tado schedule block ended
+# the override): the command is sent again.  This replaces blind periodic
+# re-sends.  Longer for a fallback entity, whose readings come from cloud
+# polling (about every 5 min).
+TRV_DRIFT_GRACE_S: float = 120.0
+FALLBACK_DRIFT_GRACE_S: float = 360.0
+
 
 # ---------------------------------------------------------------------------
 # Correction tuning  (PI layer on top of feedforward)

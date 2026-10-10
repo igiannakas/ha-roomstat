@@ -50,7 +50,9 @@ from .climate_controllers import (
     PresenceAutomationController,
     SavedState,
     ScheduleController,
+    TrvReading,
     WindowAutomationController,
+    choose_trv,
     normalize_restored_preset,
     presence_startup_action,
     resolve_boost_restore,
@@ -70,6 +72,7 @@ from .const import (
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
     CONF_ECO_TARGET,
+    CONF_FALLBACK_ENTITY_ID,
     CONF_FROST_PROTECTION_TARGET,
     CONF_GAIN_FINE_MULTIPLIER,
     CONF_GAIN_FINE_THRESHOLD_C,
@@ -249,6 +252,10 @@ class RoomstatClimate(
         self._overlay_refresh_s: int = config_entry.options.get(
             CONF_OVERLAY_REFRESH_S, 0
         )
+
+        # True while the configured TRV is unavailable and the fallback
+        # entity (e.g. the room's Tado cloud thermostat) is used instead.
+        self._trv_fallback_active: bool = False
 
         # State-machine controllers (hold their own timer + saved-state)
         self._window_ctrl = WindowAutomationController()
@@ -486,14 +493,21 @@ class RoomstatClimate(
             self._config_entry.add_update_listener(self._async_config_entry_updated)
         )
 
-        # State change listener on the source TRV (summer mode pushes a dial
-        # change back to 5 °C straight away)
-        source_entity = self._config_entry.data.get("source_entity_id")
-        if source_entity:
+        # State change listener on the source TRV and its fallback (summer
+        # mode pushes a dial change back to 5 °C straight away)
+        trv_entities = [
+            eid
+            for eid in (
+                self._config_entry.data.get("source_entity_id"),
+                self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID),
+            )
+            if eid
+        ]
+        if trv_entities:
             self.async_on_remove(
                 async_track_state_change_event(
                     self.hass,
-                    [source_entity],
+                    trv_entities,
                     self._async_tado_state_changed,
                 )
             )
@@ -890,14 +904,33 @@ class RoomstatClimate(
         if self._hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
 
-        tado_internal = self.coordinator.data.get("tado_internal_temp")
-        tado_setpoint = self.coordinator.data.get("tado_setpoint")
-
-        if tado_internal is not None and tado_setpoint is not None:
-            if tado_setpoint > tado_internal + 0.05:
+        trv = self._active_trv()
+        if trv.internal_c is not None and trv.setpoint_c is not None:
+            if trv.setpoint_c > trv.internal_c + 0.05:
                 return HVACAction.HEATING
 
         return HVACAction.IDLE
+
+    def _active_trv(self) -> TrvReading:
+        """The TRV to read and command now: the configured one, or the
+        fallback entity while the configured one is unavailable."""
+        data = self.coordinator.data or {}
+        primary = TrvReading(
+            self._config_entry.data.get("source_entity_id"),
+            data.get("tado_internal_temp"),
+            data.get("tado_setpoint"),
+        )
+        fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
+        fallback = (
+            TrvReading(
+                fallback_id,
+                data.get("fallback_internal_temp"),
+                data.get("fallback_setpoint"),
+            )
+            if fallback_id
+            else None
+        )
+        return choose_trv(primary, fallback)
 
     @property
     def icon(self) -> str:
@@ -923,9 +956,12 @@ class RoomstatClimate(
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return diagnostic attributes visible in HA Developer Tools."""
+        trv = self._active_trv()
         attrs: dict[str, Any] = {
             "regulation_reason": self._last_reason,
-            "tado_internal_temp_c": self.coordinator.data.get("tado_internal_temp"),
+            "tado_internal_temp_c": trv.internal_c,
+            "trv_fallback_active": trv.is_fallback,
+            "active_trv_entity_id": trv.entity_id,
             "correction_kp": self._config.tuning.kp,
             "correction_ki": self._config.tuning.ki,
             "correction_td_min": round(self._config.tuning.td_s / 60.0, 1),

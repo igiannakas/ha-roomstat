@@ -128,16 +128,18 @@
           },
           "trv_communication": {
             "name": "TRV Communication",
-            "description": "Command timing and battery conservation.",
+            "description": "Command timing, battery conservation, and a fallback for when the TRV is unavailable.",
             "data": {
               "min_command_interval_s": "Minimum command interval",
               "min_change_threshold_c": "Minimum change threshold",
-              "overlay_refresh_s": "Overlay refresh interval"
+              "overlay_refresh_s": "Overlay refresh interval",
+              "fallback_entity_id": "Fallback thermostat"
             },
             "data_description": {
               "min_command_interval_s": "Minimum time between commands sent to the TRV (battery conservation).",
               "min_change_threshold_c": "Minimum difference to the current Tado setpoint before a new command is sent.",
-              "overlay_refresh_s": "Periodically resend the setpoint to the TRV to keep cloud-API overlays alive. 0 = off."
+              "overlay_refresh_s": "Periodically resend the setpoint to the TRV to keep cloud-API overlays alive. 0 = off. Not needed with HomeKit: Roomstat checks every minute that the TRV still holds its command and sends it again if not.",
+              "fallback_entity_id": "Optional. Another climate entity for the same room, for example the room's Tado cloud thermostat. While the TRV above is unavailable (such as a HomeKit dropout), Roomstat reads and commands the room through this one instead, and switches back on its own. Auto-tune keeps learning from the room sensor meanwhile."
             }
           },
           "behaviour": {
