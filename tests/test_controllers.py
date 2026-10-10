@@ -637,7 +637,9 @@ class TestSavedState:
 
 TrvReading = _ctrl_mod.TrvReading
 choose_trv = _ctrl_mod.choose_trv
-read_trv_state = _ctrl_mod.read_trv_state
+read_trv = _ctrl_mod.read_trv
+command_limits = _ctrl_mod.command_limits
+plausible_c = _ctrl_mod.plausible_c
 
 HOMEKIT = "climate.valve_homekit"
 CLOUD = "climate.room_cloud"
@@ -645,22 +647,35 @@ CLOUD = "climate.room_cloud"
 
 class TestTrvSource:
 
-    def test_reads_reading_and_setpoint(self):
-        assert read_trv_state("heat", {"current_temperature": 20.4,
-                                       "temperature": "21.5"}) == (20.4, 21.5)
+    def test_reads_reading_setpoint_and_range(self):
+        assert read_trv("heat", {"current_temperature": 20.4, "temperature": "21.5",
+                                 "min_temp": 5, "max_temp": 25}) == {
+            "internal": 20.4, "setpoint": 21.5, "min": 5.0, "max": 25.0, "off": False,
+        }
 
     @pytest.mark.parametrize("state", [None, "unavailable", "unknown"])
     def test_unavailable_gives_nothing_even_with_stale_attributes(self, state):
-        assert read_trv_state(state, {"current_temperature": 20.4,
-                                      "temperature": 21.5}) == (None, None)
+        r = read_trv(state, {"current_temperature": 20.4, "temperature": 21.5,
+                             "min_temp": 5, "max_temp": 25})
+        assert r == {"internal": None, "setpoint": None, "min": None, "max": None,
+                     "off": False}
 
     @pytest.mark.parametrize("bad", ["x", float("nan"), float("inf"), True, None])
     def test_bad_values_are_none(self, bad):
-        assert read_trv_state("heat", {"current_temperature": bad,
-                                       "temperature": bad}) == (None, None)
+        r = read_trv("heat", {"current_temperature": bad, "temperature": bad})
+        assert r["internal"] is None and r["setpoint"] is None
+
+    @pytest.mark.parametrize("fault", [0.0 - 40, 85.0, 127.5])
+    def test_implausible_reading_is_none(self, fault):
+        assert read_trv("heat", {"current_temperature": fault})["internal"] is None
 
     def test_off_still_reads(self):
-        assert read_trv_state("off", {"current_temperature": 19.0}) == (19.0, None)
+        """A HomeKit Tado valve that is off: no setpoint, and HA accepts only
+        7-35 °C for it until it heats again."""
+        r = read_trv("off", {"current_temperature": 19.0, "min_temp": 7,
+                             "max_temp": 35})
+        assert r == {"internal": 19.0, "setpoint": None, "min": 7.0, "max": 35.0,
+                     "off": True}
 
     def test_primary_wins_when_usable(self):
         p = TrvReading(HOMEKIT, 20.0, 21.0)
@@ -683,6 +698,30 @@ class TestTrvSource:
     def test_fallback_equal_to_primary_is_ignored(self):
         p = TrvReading(HOMEKIT)
         assert choose_trv(p, TrvReading(HOMEKIT, 19.5, 21.0)) is p
+
+
+class TestCommandLimits:
+
+    def test_own_range_without_trv_limits(self):
+        assert command_limits(5.0, 25.0, None, None) == (5.0, 25.0)
+
+    def test_narrowed_to_what_the_trv_accepts(self):
+        assert command_limits(5.0, 25.0, 7.0, 35.0) == (7.0, 25.0)
+        assert command_limits(5.0, 25.0, 5.0, 22.0) == (5.0, 22.0)
+
+    def test_nonsense_trv_range_is_ignored(self):
+        assert command_limits(5.0, 25.0, 30.0, 35.0) == (5.0, 25.0)
+
+
+class TestPlausible:
+
+    @pytest.mark.parametrize("value, expected", [
+        (21.3, 21.3), ("19.5", 19.5), (-5.0, -5.0),
+        (0.0 - 31, None), (61.0, None), ("unknown", None), (None, None),
+        (float("nan"), None),
+    ])
+    def test_plausible(self, value, expected):
+        assert plausible_c(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +750,18 @@ class TestTrvDrift:
     def test_unknown_is_not_drift(self, sent, held):
         assert not trv_setpoint_drifted(sent, held, 600, 120, 0.3)
 
+    def test_switched_off_while_asked_to_heat(self):
+        """Turned off from the Tado app: an off valve has no setpoint."""
+        assert trv_setpoint_drifted(20.0, None, 600, 120, 0.3, trv_off=True)
+
+    def test_off_after_a_frost_command_holds_it(self):
+        """Tado shows its 5 °C frost setpoint as off."""
+        assert not trv_setpoint_drifted(5.0, None, 600, 120, 0.3, trv_off=True,
+                                        floor_c=5.0)
+
+    def test_off_not_checked_before_the_grace(self):
+        assert not trv_setpoint_drifted(20.0, None, 60, 120, 0.3, trv_off=True)
+
 
 class TestCommandPacer:
 
@@ -734,3 +785,133 @@ class TestCommandPacer:
     def test_zero_spacing_never_waits(self):
         p = CommandPacer(0.0)
         assert [p.reserve(100.0) for _ in range(3)] == [0.0, 0.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# Pauses and a lost room sensor
+# ---------------------------------------------------------------------------
+
+integration_step = _ctrl_mod.integration_step
+update_hold_offset = _ctrl_mod.update_hold_offset
+sensor_lost_target = _ctrl_mod.sensor_lost_target
+
+
+class TestIntegrationStep:
+
+    def test_first_cycle(self):
+        assert integration_step(1000.0, 0.0, 120.0) == 0.0
+
+    def test_normal_cycle(self):
+        assert integration_step(1060.0, 1000.0, 120.0) == 60.0
+
+    def test_long_pause_is_capped(self):
+        assert integration_step(8200.0, 1000.0, 120.0) == 120.0
+
+    def test_clock_went_back(self):
+        assert integration_step(900.0, 1000.0, 120.0) == 0.0
+
+
+class TestHoldOffset:
+
+    def test_first_sample(self):
+        assert update_hold_offset(None, 1.6, 60, 3600, 3.0) == 1.6
+
+    def test_slow_average(self):
+        assert update_hold_offset(1.0, 2.0, 360, 3600, 3.0) == pytest.approx(1.1)
+
+    def test_long_gap_takes_the_sample(self):
+        assert update_hold_offset(1.0, 2.0, 7200, 3600, 3.0) == 2.0
+
+    def test_faulty_sample_is_limited(self):
+        assert update_hold_offset(None, 15.0, 60, 3600, 3.0) == 3.0
+        assert update_hold_offset(None, -9.0, 60, 3600, 3.0) == -3.0
+
+
+class TestSensorLostTarget:
+
+    def test_target_plus_offset(self):
+        assert sensor_lost_target(20.0, 1.53, 5.0, 25.0) == 21.5
+
+    def test_unknown_offset_holds_the_target(self):
+        assert sensor_lost_target(20.0, None, 5.0, 25.0) == 20.0
+
+    def test_clamped(self):
+        assert sensor_lost_target(24.0, 3.0, 5.0, 25.0) == 25.0
+        assert sensor_lost_target(5.0, -2.0, 5.0, 25.0) == 5.0
+
+
+# ---------------------------------------------------------------------------
+# Configured entities that disappear
+# ---------------------------------------------------------------------------
+
+entity_problem = _ctrl_mod.entity_problem
+MissingEntityWatch = _ctrl_mod.MissingEntityWatch
+replace_entity_setting = _ctrl_mod.replace_entity_setting
+
+
+class TestEntityProblem:
+
+    @pytest.mark.parametrize("has_state, registered, disabled, expected", [
+        (True, True, False, None),      # fine (also when unavailable)
+        (False, True, False, None),     # registered, integration still loading
+        (True, False, False, None),     # YAML entity without a unique id
+        (False, False, False, "missing"),
+        (False, True, True, "disabled"),
+    ])
+    def test_problem(self, has_state, registered, disabled, expected):
+        assert entity_problem(has_state, registered, disabled) == expected
+
+
+class TestMissingEntityWatch:
+
+    def test_reported_only_after_the_delay(self):
+        w = MissingEntityWatch(300)
+        assert w.update(1000, {"trv": "missing"}) == {}
+        assert w.update(1299, {"trv": "missing"}) == {}
+        assert w.update(1300, {"trv": "missing"}) == {"trv": "missing"}
+        assert w.update(1360, {"trv": "missing"}) == {"trv": "missing"}
+
+    def test_back_in_between_starts_again(self):
+        w = MissingEntityWatch(300)
+        w.update(1000, {"trv": "missing"})
+        w.update(1200, {"trv": None})
+        assert w.update(1400, {"trv": "missing"}) == {}
+        assert w.update(1700, {"trv": "missing"}) == {"trv": "missing"}
+
+    def test_no_longer_configured_is_forgotten(self):
+        w = MissingEntityWatch(300)
+        w.update(1000, {"window": "missing"})
+        w.update(1100, {})
+        assert w.update(1400, {"window": "missing"}) == {}
+
+
+class TestReplaceEntitySetting:
+
+    def test_trv_lives_in_the_data(self):
+        data, opts = replace_entity_setting(
+            {"source_entity_id": "climate.old", "name": "x"}, {"a": 1},
+            "source_entity_id", "climate.new", in_data=True)
+        assert data == {"source_entity_id": "climate.new", "name": "x"}
+        assert opts == {"a": 1}
+
+    def test_room_sensor_set_in_the_options(self):
+        data, opts = replace_entity_setting(
+            {"external_temperature_entity_id": "sensor.old"}, {},
+            "external_temperature_entity_id", "sensor.new", in_data=False)
+        assert data == {"external_temperature_entity_id": "sensor.old"}
+        assert opts == {"external_temperature_entity_id": "sensor.new"}
+
+    def test_optional_setting_removed(self):
+        _, opts = replace_entity_setting(
+            {}, {"window_sensor_id": "binary_sensor.old", "b": 2},
+            "window_sensor_id", None, in_data=False)
+        assert opts == {"b": 2}
+
+    def test_trv_cannot_be_removed(self):
+        with pytest.raises(ValueError):
+            replace_entity_setting({}, {}, "source_entity_id", None, in_data=True)
+
+    def test_inputs_are_not_changed(self):
+        data, opts = {"source_entity_id": "climate.old"}, {"window_sensor_id": "b.x"}
+        replace_entity_setting(data, opts, "window_sensor_id", None, in_data=False)
+        assert opts == {"window_sensor_id": "b.x"}

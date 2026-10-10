@@ -262,5 +262,53 @@
     "no_schedule": {
       "message": "Für dieses Thermostat ist kein Zeitplan-Helfer konfiguriert."
     }
+  },
+  "issues": {
+    "entity_missing": {
+      "title": "{room}: {entity_id} existiert nicht mehr",
+      "fix_flow": {
+        "step": {
+          "replace": {
+            "title": "{entity_id} ersetzen",
+            "description": "Der Roomstat-Raum **{room}** verwendet `{entity_id}`, aber Home Assistant kennt diese Entität nicht mehr. Sie wurde vermutlich gelöscht oder umbenannt.\n\nWähle die Entität, die stattdessen verwendet werden soll. Eine optionale Einstellung kann leer bleiben, dann wird sie nicht mehr verwendet. Der Raum wird danach mit der neuen Einstellung neu geladen.",
+            "data": {
+              "source_entity_id": "Tado-Heizkörperthermostat (TRV)",
+              "external_temperature_entity_id": "Externer Temperatursensor",
+              "fallback_entity_id": "Ersatz-Thermostat",
+              "window_sensor_id": "Fenstersensor",
+              "presence_sensor_id": "Präsenzsensor",
+              "summer_mode_entity_id": "Sommermodus-Schalter",
+              "schedule_entity_id": "Zeitplan-Helfer"
+            }
+          }
+        },
+        "abort": {
+          "entry_removed": "Dieser Roomstat-Raum existiert nicht mehr."
+        }
+      }
+    },
+    "entity_disabled": {
+      "title": "{room}: {entity_id} ist deaktiviert",
+      "fix_flow": {
+        "step": {
+          "replace": {
+            "title": "{entity_id} ersetzen",
+            "description": "Der Roomstat-Raum **{room}** verwendet `{entity_id}`, aber diese Entität ist deaktiviert und liefert keine Werte.\n\nAktiviere sie wieder unter Einstellungen → Geräte & Dienste → Entitäten, oder wähle die Entität, die stattdessen verwendet werden soll. Eine optionale Einstellung kann leer bleiben, dann wird sie nicht mehr verwendet. Der Raum wird danach mit der neuen Einstellung neu geladen.",
+            "data": {
+              "source_entity_id": "Tado-Heizkörperthermostat (TRV)",
+              "external_temperature_entity_id": "Externer Temperatursensor",
+              "fallback_entity_id": "Ersatz-Thermostat",
+              "window_sensor_id": "Fenstersensor",
+              "presence_sensor_id": "Präsenzsensor",
+              "summer_mode_entity_id": "Sommermodus-Schalter",
+              "schedule_entity_id": "Zeitplan-Helfer"
+            }
+          }
+        },
+        "abort": {
+          "entry_removed": "Dieser Roomstat-Raum existiert nicht mehr."
+        }
+      }
+    }
   }
 }

@@ -15,10 +15,17 @@ Architecture
   ``window_startup_action`` / ``presence_startup_action`` – pure startup
   decisions used by ``async_added_to_hass``
 - ``resolve_summer_state`` / ``summer_enforcement_needed`` – summer-mode lock
-- ``TrvReading`` / ``read_trv_state`` / ``choose_trv`` – read the configured
-  TRV, or a fallback entity for the same room while it is unavailable
+- ``TrvReading`` / ``read_trv`` / ``choose_trv`` / ``command_limits`` – read
+  the configured TRV, or a fallback entity for the same room while it is
+  unavailable, and keep commands inside the range it accepts right now
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
+- ``plausible_c`` / ``integration_step`` / ``update_hold_offset`` /
+  ``sensor_lost_target`` – guards against faulty readings, pauses and a room
+  sensor that stays away
+- ``entity_problem`` / ``MissingEntityWatch`` / ``replace_entity_setting`` –
+  notice a configured entity that was deleted, renamed or disabled, and
+  replace it (the repair in repairs.py)
 - ``ScheduleController`` / ``parse_schedule_preset`` – follow an external
   schedule helper, with manual overrides that end at the next schedule change
   or after a configurable time (whichever comes first)
@@ -28,7 +35,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -574,10 +581,15 @@ def summer_enforcement_needed(
 ) -> bool:
     """Return True when the TRV must be commanded back to the summer target.
 
-    The TRV must be in ``heat`` mode at ``target_c``.  Nothing is sent while
-    the TRV is missing or unavailable (the command could not be delivered).
+    The TRV must be in ``heat`` mode at ``target_c``, or ``off``: Tado shows
+    its 5 °C frost setpoint as off, and Home Assistant refuses a setpoint
+    below 7 °C for a valve that is off, so off counts as locked.  Nothing is
+    sent while the TRV is missing or unavailable (the command could not be
+    delivered).
     """
     if trv_state is None or trv_state in _UNAVAILABLE_STATES:
+        return False
+    if trv_state == "off":
         return False
     if trv_state != "heat":
         return True
@@ -598,24 +610,57 @@ class TrvReading:
     internal_c: float | None = None   # the TRV's own temperature reading
     setpoint_c: float | None = None   # the setpoint it currently holds
     is_fallback: bool = False
+    # The setpoint range the entity accepts right now.  Home Assistant checks
+    # a command against it, and it can depend on the mode: a HomeKit Tado
+    # valve accepts 5-25 °C in heat mode but 7-35 °C while it is off.
+    min_c: float | None = None
+    max_c: float | None = None
+    off: bool = False                 # the entity is in hvac mode "off"
 
     @property
     def usable(self) -> bool:
         return self.entity_id is not None and self.internal_c is not None
 
 
-def read_trv_state(
+# Readings outside this range are sensor faults (a reboot reporting 0 °C, an
+# error code), never a real room or radiator: they are treated as missing.
+_PLAUSIBLE_C = (-30.0, 60.0)
+
+
+def plausible_c(value: Any) -> float | None:
+    """A finite temperature inside the plausible range, else None."""
+    v = _as_opt_float(value)
+    if v is None or not _PLAUSIBLE_C[0] <= v <= _PLAUSIBLE_C[1]:
+        return None
+    return v
+
+
+def read_trv(
     state: str | None, attributes: Mapping[str, Any] | None
-) -> tuple[float | None, float | None]:
-    """(own reading, setpoint) from a climate entity, or Nones when it is
-    missing or unavailable (an unavailable entity may keep stale attributes)."""
+) -> dict[str, Any]:
+    """Everything Roomstat uses from a TRV climate entity: own reading,
+    setpoint, accepted range and whether it is off.  Missing or unavailable
+    gives no values (an unavailable entity may keep stale attributes)."""
     if state is None or state in _UNAVAILABLE_STATES:
-        return None, None
+        return {"internal": None, "setpoint": None, "min": None, "max": None, "off": False}
     attrs = attributes or {}
-    return (
-        _as_opt_float(attrs.get("current_temperature")),
-        _as_opt_float(attrs.get("temperature")),
-    )
+    return {
+        "internal": plausible_c(attrs.get("current_temperature")),
+        "setpoint": _as_opt_float(attrs.get("temperature")),
+        "min": _as_opt_float(attrs.get("min_temp")),
+        "max": _as_opt_float(attrs.get("max_temp")),
+        "off": state == "off",
+    }
+
+
+def command_limits(
+    cfg_min: float, cfg_max: float, trv_min: float | None, trv_max: float | None
+) -> tuple[float, float]:
+    """The range a command may use: Roomstat's own, narrowed to what the TRV
+    accepts right now (anything outside it is refused before it is sent)."""
+    lo = max(cfg_min, trv_min) if trv_min is not None else cfg_min
+    hi = min(cfg_max, trv_max) if trv_max is not None else cfg_max
+    return (lo, hi) if lo <= hi else (cfg_min, cfg_max)
 
 
 def choose_trv(primary: TrvReading, fallback: TrvReading | None) -> TrvReading:
@@ -634,7 +679,7 @@ def choose_trv(primary: TrvReading, fallback: TrvReading | None) -> TrvReading:
         or fallback.entity_id == primary.entity_id
     ):
         return primary
-    return TrvReading(fallback.entity_id, fallback.internal_c, fallback.setpoint_c, True)
+    return replace(fallback, is_fallback=True)
 
 
 def trv_setpoint_drifted(
@@ -643,14 +688,23 @@ def trv_setpoint_drifted(
     since_sent_s: float,
     grace_s: float,
     threshold_c: float,
+    *,
+    trv_off: bool = False,
+    floor_c: float = 5.0,
 ) -> bool:
     """True when the TRV no longer holds the last command.
 
     Only checked once ``grace_s`` has passed since the command, so the TRV's
     state has had time to report it.  A difference below ``threshold_c`` is
-    not worth a command.
+    not worth a command.  A TRV that is off while the last command asked for
+    heat (above ``floor_c``, the frost level Tado shows as off) was switched
+    off from outside, e.g. in the Tado app.
     """
-    if last_sent_c is None or trv_setpoint_c is None or since_sent_s < grace_s:
+    if last_sent_c is None or since_sent_s < grace_s:
+        return False
+    if trv_off:
+        return last_sent_c > floor_c + 0.05
+    if trv_setpoint_c is None:
         return False
     return abs(trv_setpoint_c - last_sent_c) >= threshold_c
 
@@ -815,6 +869,127 @@ class ScheduleController:
         )
         self.override_sticky = self.override_active and persisted.schedule_override_sticky
 
+
+
+# ---------------------------------------------------------------------------
+# Resilience helpers
+# ---------------------------------------------------------------------------
+
+def integration_step(now: float, last_ts: float, max_s: float) -> float:
+    """Seconds the integral may cover this cycle.
+
+    0 on the first cycle and when the clock went backwards.  At most
+    ``max_s`` after a pause (sensor gap, HA busy or restarting), so a long
+    gap cannot add a large step to the integral in one cycle.
+    """
+    if last_ts <= 0 or now <= last_ts:
+        return 0.0
+    return min(now - last_ts, max_s)
+
+
+def update_hold_offset(
+    prev: float | None,
+    sample_c: float,
+    dt_s: float,
+    tau_s: float,
+    limit_c: float,
+) -> float:
+    """Slow average of (TRV reading - room) while the room holds its target.
+
+    Used only when the room sensor stays away: the TRV is then told the
+    target plus this offset, so it holds the room on its own reading.
+    Clamped to +-``limit_c``, so a faulty sample cannot ask for much heat.
+    """
+    sample = max(-limit_c, min(limit_c, sample_c))
+    if prev is None or tau_s <= 0:
+        return sample
+    alpha = min(1.0, max(0.0, dt_s) / tau_s)
+    return prev + alpha * (sample - prev)
+
+
+def sensor_lost_target(
+    setpoint_c: float, hold_offset_c: float | None, lo: float, hi: float
+) -> float:
+    """TRV command while the room sensor is gone: the target plus the usual
+    offset between the TRV and the room (none when it was never learned, so
+    the TRV simply holds the target on its own reading)."""
+    target = setpoint_c + (hold_offset_c or 0.0)
+    return round(max(lo, min(hi, target)), 1)
+
+
+# ---------------------------------------------------------------------------
+# Configured entities that disappear
+# ---------------------------------------------------------------------------
+
+def entity_problem(has_state: bool, registered: bool, disabled: bool) -> str | None:
+    """Why a configured entity can't be used any more, or None.
+
+    ``"disabled"``: disabled in the entity registry, so it never reports.
+    ``"missing"``: neither a state nor a registry entry, so it was deleted or
+    renamed.  An entity that is registered but unavailable, or has no state
+    yet because its integration is still loading, is not a problem here: the
+    regulation cycle copes with that, and it comes back by itself.
+    """
+    if disabled:
+        return "disabled"
+    if has_state or registered:
+        return None
+    return "missing"
+
+
+class MissingEntityWatch:
+    """Report a configured entity only once it has been a problem for
+    ``delay_s``: after a restart, integrations load in any order."""
+
+    def __init__(self, delay_s: float) -> None:
+        self.delay_s = delay_s
+        self._since: dict[str, float] = {}
+
+    def update(self, now: float, problems: Mapping[str, str | None]) -> dict[str, str]:
+        """Settings to report now (setting key -> problem).
+
+        ``problems`` holds every configured entity's setting key and its
+        problem (None when fine).  A setting that is fine again, or no longer
+        configured, starts from zero next time.
+        """
+        report: dict[str, str] = {}
+        for key, problem in problems.items():
+            if problem is None:
+                self._since.pop(key, None)
+                continue
+            since = self._since.setdefault(key, now)
+            if now - since >= self.delay_s:
+                report[key] = problem
+        for key in [k for k in self._since if k not in problems]:
+            del self._since[key]
+        return report
+
+
+def replace_entity_setting(
+    data: Mapping[str, Any],
+    options: Mapping[str, Any],
+    key: str,
+    new_entity_id: str | None,
+    *,
+    in_data: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """New (data, options) of a config entry with setting *key* pointing at
+    *new_entity_id*.
+
+    The TRV lives in the entry data (``in_data``); everything else in the
+    options, which win over the data (the room sensor starts in the data).
+    ``None`` removes an optional setting.
+    """
+    new_data, new_options = dict(data), dict(options)
+    if in_data:
+        if not new_entity_id:
+            raise ValueError(f"{key} is required")
+        new_data[key] = new_entity_id
+    elif new_entity_id:
+        new_options[key] = new_entity_id
+    else:
+        new_options.pop(key, None)
+    return new_data, new_options
 
 # ---------------------------------------------------------------------------
 # Internal helper

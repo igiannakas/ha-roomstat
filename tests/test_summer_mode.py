@@ -35,6 +35,9 @@ from tests.ha_harness import (
 )
 
 _ROOT = Path(__file__).parent.parent / "custom_components" / "roomstat"
+_HAError = getattr(
+    sys.modules.get("homeassistant.exceptions"), "HomeAssistantError", Exception
+)
 
 
 def _load(name: str):
@@ -86,7 +89,10 @@ class TestSummerEnforcementNeeded:
             ("heat", 5.05, False),
             ("heat", 20.0, True),
             ("heat", None, True),
-            ("off", 5.0, True),
+            # Off counts as locked: Tado shows its 5 °C setpoint as off, and
+            # HA refuses a setpoint below 7 °C for a HomeKit valve that is off.
+            ("off", None, False),
+            ("off", 5.0, False),
             ("auto", 5.0, True),
             ("unavailable", 20.0, False),
             ("unknown", 20.0, False),
@@ -162,7 +168,9 @@ class TestSummerOn:
         assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
         assert ent._last_reason == "sent(summer_enforce)"
 
-    def test_turns_on_a_trv_that_was_off(self):
+    def test_leaves_a_trv_that_is_off_alone(self):
+        """An off valve is already at the summer level; a 5 °C command to it
+        would only be refused (HomeKit valves accept 7-35 °C while off)."""
         ent = _summer_entity()
         _run(ent.async_set_hvac_mode(_climate.HVACMode.OFF))
         ent.hass.service_calls.clear()
@@ -170,7 +178,8 @@ class TestSummerOn:
         _turn_summer(ent, "on")
         assert ent.hvac_mode == _climate.HVACMode.HEAT
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == []
+        assert ent._last_reason == "summer_locked"
 
     def test_cancels_boost_window_and_presence(self):
         ent = _summer_entity(presence=True)
@@ -300,12 +309,38 @@ class TestSummerEnforcement:
         _cycle(ent)
         assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
 
-    def test_trv_turned_off_pushed_back_to_heat(self):
+    def test_trv_turned_off_counts_as_locked(self):
         ent = self._locked()
         ent.hass.set(TRV, "off", {"temperature": None})
         ent._last_command_sent_ts = 0.0
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == []
+        assert ent._last_reason == "summer_locked"
+
+    def test_overlay_refresh_skips_a_trv_that_is_off(self):
+        ent = _summer_entity(options={"overlay_refresh_s": 600})
+        _turn_summer(ent, "on")
+        ent.hass.set(TRV, "off", {"temperature": None})
+        ent._last_command_sent_ts = 0.0
+        ent._summer_bypass_rate_limit = False
+        ent.hass.service_calls.clear()
+        _cycle(ent)
+        assert _sent_temps(ent) == []
+
+    def test_failed_command_is_reported_and_rate_limited(self):
+        ent = self._locked()
+        ent.hass.set(TRV, "heat", {"temperature": 22.0})
+        ent._last_command_sent_ts = 0.0
+
+        async def refuse(*_a, **_k):
+            raise _HAError("Provided temperature 5.0 is not valid")
+
+        ent.hass.services.async_call = refuse
+        _cycle(ent)
+        assert ent._last_reason == "send_failed(summer_enforce)"
+        assert "not valid" in ent.extra_state_attributes["last_command_error"]
+        _cycle(ent)
+        assert ent._last_reason.startswith("summer_rate_limited(")
 
     def test_enforcement_honours_rate_limit(self):
         ent = self._locked()

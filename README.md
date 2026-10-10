@@ -31,6 +31,18 @@ changes.
   5 seconds apart. Roomstat checks every minute that each valve still holds
   its last command, and sends it again only if it doesn't, so you can set
   **Overlay refresh interval** to 0.
+- **Handles failures.** A valve that is off isn't sent temperatures it would
+  refuse. A failed command is tried again a few minutes later and logged
+  once, not every time; the thermostat's `last_command_error` attribute shows
+  it. **Off** stays off and is sent again if the valve doesn't take it.
+- **Room sensor lost.** If the room sensor is gone for longer than its grace
+  period, the valve holds the target on its own reading (corrected by the
+  usual difference between valve and room) instead of keeping its last
+  command, until the sensor is back.
+- **Repairs for lost entities.** If the valve, the room sensor or any helper
+  a room uses is deleted, renamed or disabled, a repair appears under
+  **Settings → Repairs** after 5 minutes. **Fix** lets you pick the entity to
+  use instead.
 
 **Control**
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the

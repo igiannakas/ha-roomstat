@@ -3,7 +3,7 @@
 Summer mode is driven by an optional on/off helper (usually an
 ``input_boolean`` shared by every thermostat).  While it is on:
 
-- the TRV is held at a fixed 5 °C in heat mode (no regulation),
+- the TRV is held at a fixed 5 °C in heat mode, or off (no regulation),
 - window and presence automations are ignored,
 - boost is cancelled,
 - every change through Home Assistant (preset, temperature, HVAC mode) is
@@ -199,7 +199,7 @@ class SummerMixin:
         elif needed:
             remaining = int(self._config.min_command_interval_s - time_since_last)
             reason = f"summer_rate_limited({remaining}s)"
-        elif overlay_refresh_due and trv_available:
+        elif overlay_refresh_due and trv_available and trv_state != "off":
             send, reason = True, "summer_overlay_refresh"
         elif not trv_available:
             reason = "summer_trv_unavailable"
@@ -207,10 +207,12 @@ class SummerMixin:
             reason = "summer_locked"
 
         if send:
-            await self._async_send_to_tado(SUMMER_TARGET_C, source)
+            # A failed command still counts for the rate limit: the next try
+            # comes one interval later, not every cycle.
+            sent = await self._async_send_to_tado(SUMMER_TARGET_C, source)
             self._last_command_sent_ts = now
             self._summer_bypass_rate_limit = False
-            self._last_reason = f"sent({reason})"
+            self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
         else:
             self._last_reason = reason
         self._write_state_with_binary_sensor()

@@ -64,6 +64,8 @@ the HA modules.
   override remaining, auto-tune sensors. `button.py`: resume schedule, reset
   auto-tune. `binary_sensor.py`: sensor degraded.
 - `config_flow.py`: setup and the options flow (sections).
+- `repairs.py`: repairs for entity settings whose entity was deleted, renamed
+  or disabled, with a fix flow to pick a replacement.
 - `card.py` + `www/roomstat-card.js`: the dashboard card
   (`custom:roomstat-card`). Served by `async_setup` and added as a dashboard
   resource (a frontend module when resources are in YAML). It registers only
@@ -120,6 +122,56 @@ Read this before changing `regulation.py` or `parameters.py`.
   command is sent again (`trv_setpoint_drifted`). This covers a command lost
   on the way and a Tado schedule block that ended the override, so blind
   overlay refreshes are not needed with HomeKit (`overlay_refresh_s` 0).
+  A valve that is off while the last command asked for heat (switched off in
+  the Tado app) counts as drifted too.
+
+## Failure handling
+
+Read this before changing the send path or the cycle's early returns. The
+loop must keep running, and the TRV must never be left on a command nobody
+is updating.
+
+- **Valve off:** a HomeKit Tado valve that is off has no setpoint, and HA
+  accepts only 7–35 °C for it (5–25 °C in heat); a lower command is refused.
+  A frost-level command (≤ `min_target_c`) to an off valve counts as already
+  at target, and every command is clamped to the TRV's current
+  `min_temp`/`max_temp` (`command_limits`). In summer mode off counts as
+  locked. The coordinator reads min/max/off with `read_trv`.
+- **Commands never raise:** `_async_call_trv` catches everything except
+  cancellation. A failure is logged once per distinct error (an unexpected
+  exception type keeps its traceback), shown as `last_command_error`, and
+  the reason becomes `send_failed(…)`. A failed command still counts for the
+  rate limit, so an outage costs one attempt per interval. The baseline stays
+  at what the TRV last took, so the next cycle sends again.
+- **Off stays off:** a failed OFF keeps Roomstat off (no revert). While off,
+  the cycle sends OFF again if the TRV is not off, at most once per rate-limit
+  interval. OFF → HEAT runs the regulation even if the mode change fails;
+  `set_temperature` carries `hvac_mode: heat` anyway.
+- **Room sensor lost:** a gap is bridged with the last value for the sensor
+  grace period, counted from the first cycle without a reading. After that
+  the TRV is told the target plus the hold offset (`sensor_lost_target`), so
+  it holds the room on its own reading instead of keeping its last command
+  (possibly 25 °C mid heat-up). The hold offset is a slow average (1 h) of
+  TRV − room, learned only within 0.5 °C of the target, limited to ±3 °C, and
+  saved in the restore data (`hold_offset_c`). Unknown → 0. PI state and the
+  tuner are left alone.
+- **Pauses and the clock:** the integral covers at most
+  `MAX_INTEGRATION_STEP_S` (2 cycles) per cycle (`integration_step`). A last
+  command time in the future (clock went back) is reset, so commands are not
+  blocked until the clock catches up.
+- **Faulty readings:** room and TRV readings outside −30…60 °C are treated as
+  missing (`plausible_c`).
+- **Entity gone:** every coordinator update checks the entity settings (TRV,
+  room sensor, fallback, window, presence, summer, schedule). One with
+  neither a state nor a registry entry (deleted, renamed), or disabled in the
+  registry, for `ENTITY_MISSING_REPORT_S` (5 min, only once HA is running)
+  becomes a repair (`repairs.py`; error for the TRV and room sensor, warning
+  otherwise). A registered entity without a state (still loading,
+  unavailable) is not a problem. The fix flow writes the replacement (the
+  TRV into the entry data, the rest into the options; empty removes an
+  optional setting), and the update listener reloads the room. Repairs are
+  not persistent, clear themselves when the entity is back, and are removed
+  with the room.
 
 ## Auto-tune
 

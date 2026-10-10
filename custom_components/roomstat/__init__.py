@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-import math
+import time
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -13,8 +13,10 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .card import async_register_card
-from .climate_controllers import read_trv_state
+from .climate_controllers import MissingEntityWatch, plausible_c, read_trv
 from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, CONF_FALLBACK_ENTITY_ID, DOMAIN
+from .parameters import ENTITY_MISSING_REPORT_S
+from .repairs import async_check_entities, async_delete_entity_issues
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +44,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 1. Ensure DOMAIN dict exists in hass.data
     hass.data.setdefault(DOMAIN, {})
 
+    # A deleted, renamed or disabled entity becomes a repair (repairs.py).
+    missing_watch = MissingEntityWatch(ENTITY_MISSING_REPORT_S)
+
     # 2. Define the data update method
     async def async_update_data():
         """Fetch data from entities (Source & External Sensor)."""
@@ -56,49 +61,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         data = {
             "room_temp": None,
             "room_temp_ts": None,
-            "tado_internal_temp": None,
-            "tado_setpoint": None,
-            "fallback_internal_temp": None,
-            "fallback_setpoint": None,
         }
 
-        # Get Room Temp from External Sensor
+        # Get Room Temp from External Sensor.  A value outside -30..60 °C is a
+        # sensor fault (e.g. 0 after a reboot), never a real room: treated as
+        # missing, so the sensor grace period and the hold below apply.
         if external_sensor_id:
             state = hass.states.get(external_sensor_id)
             if state and state.state not in ("unknown", "unavailable"):
-                try:
-                    value = float(state.state)
-                    if math.isfinite(value):
-                        data["room_temp"] = value
-                        data["room_temp_ts"] = state.last_updated.timestamp()
-                    else:
-                        _LOGGER.warning(
-                            "Room temperature from %s is not finite: %s",
-                            external_sensor_id, value,
-                        )
-                except (ValueError, TypeError):
-                    _LOGGER.warning(
-                        "Cannot parse room temperature from sensor %s: %r",
-                        external_sensor_id, state.state,
+                value = plausible_c(state.state)
+                if value is not None:
+                    data["room_temp"] = value
+                    data["room_temp_ts"] = state.last_updated.timestamp()
+                else:
+                    _LOGGER.debug(
+                        "Ignoring room temperature %r from %s",
+                        state.state, external_sensor_id,
                     )
 
-        # TRV's own reading and setpoint: the source entity, and the optional
-        # fallback for the same room (used only while the source is
-        # unavailable, see climate_controllers.choose_trv).
-        for entity_id, internal_key, setpoint_key in (
-            (source_entity_id, "tado_internal_temp", "tado_setpoint"),
-            (
-                entry.options.get(CONF_FALLBACK_ENTITY_ID),
-                "fallback_internal_temp",
-                "fallback_setpoint",
-            ),
+        # TRV's own reading, setpoint, accepted range and off state: the
+        # source entity, and the optional fallback for the same room (used
+        # only while the source is unavailable, see
+        # climate_controllers.choose_trv).
+        for entity_id, prefix in (
+            (source_entity_id, "tado"),
+            (entry.options.get(CONF_FALLBACK_ENTITY_ID), "fallback"),
         ):
             state = hass.states.get(entity_id) if entity_id else None
-            if state is not None:
-                data[internal_key], data[setpoint_key] = read_trv_state(
-                    state.state, state.attributes
-                )
+            trv = read_trv(
+                state.state if state is not None else None,
+                state.attributes if state is not None else None,
+            )
+            data[f"{prefix}_internal_temp"] = trv["internal"]
+            data[f"{prefix}_setpoint"] = trv["setpoint"]
+            data[f"{prefix}_min_temp"] = trv["min"]
+            data[f"{prefix}_max_temp"] = trv["max"]
+            data[f"{prefix}_off"] = trv["off"]
 
+        async_check_entities(hass, entry, missing_watch, time.time())
         return data
 
     # 3. Create the Coordinator
@@ -138,5 +138,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
+    # A disabled room no longer needs its entities.  (A plain reload keeps
+    # its repairs: the check needs a few minutes to report them again.)
+    if entry.disabled_by is not None:
+        async_delete_entity_issues(hass, entry.entry_id)
 
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the repairs of a deleted room."""
+    async_delete_entity_issues(hass, entry.entry_id)

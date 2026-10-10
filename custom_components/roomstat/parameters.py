@@ -41,6 +41,28 @@ TRV_COMMAND_SPACING_S: float = 5.0
 TRV_DRIFT_GRACE_S: float = 120.0
 FALLBACK_DRIFT_GRACE_S: float = 360.0
 
+# A TRV command that takes longer than this has failed (it may still arrive;
+# the drift check above then sees it).
+TRV_COMMAND_TIMEOUT_S: float = 10.0
+
+# The integral never covers more than this per cycle, so a pause (a sensor
+# gap, HA busy or restarting) cannot add a large step in one go.
+MAX_INTEGRATION_STEP_S: float = 2 * DEFAULT_CONTROL_INTERVAL_S
+
+# Room sensor gone for longer than the grace period: the TRV is told the
+# target plus the usual offset between its own reading and the room, so it
+# holds the room by itself instead of keeping whatever it was last sent
+# (possibly 25 °C mid heat-up).  The offset is a slow average, taken only
+# while the room is near its target, and limited to +-3 °C.
+HOLD_OFFSET_TAU_S: float = 3600.0
+HOLD_OFFSET_NEAR_TARGET_C: float = 0.5
+HOLD_OFFSET_LIMIT_C: float = 3.0
+
+# A configured entity (TRV, room sensor, helpers) that was deleted, renamed or
+# disabled is reported as a Home Assistant repair after this long, counted
+# only once HA has started (integrations load in any order).
+ENTITY_MISSING_REPORT_S: float = 300.0
+
 
 # ---------------------------------------------------------------------------
 # Correction tuning  (PI layer on top of feedforward)

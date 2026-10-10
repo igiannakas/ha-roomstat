@@ -26,7 +26,6 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
@@ -100,6 +99,7 @@ from .const import (
 from .parameters import (
     DEFAULT_CONTROL_INTERVAL_S,
     DEFAULT_SENSOR_GRACE_S,
+    HOLD_OFFSET_LIMIT_C,
     AutotuneConfig,
     BehaviourConfig,
     CorrectionTuning,
@@ -120,16 +120,22 @@ class _AutomationExtraData(ExtraStoredData):
     """
 
     def __init__(
-        self, state: PersistedAutomationState, autotune: dict[str, Any] | None = None
+        self,
+        state: PersistedAutomationState,
+        autotune: dict[str, Any] | None = None,
+        hold_offset_c: float | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
+        self._hold_offset_c = hold_offset_c
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
         data = self._state.as_dict()
         if self._autotune is not None:
             data["autotune"] = self._autotune
+        if self._hold_offset_c is not None:
+            data["hold_offset_c"] = round(self._hold_offset_c, 2)
         return data
 
 
@@ -256,6 +262,14 @@ class RoomstatClimate(
         # True while the configured TRV is unavailable and the fallback
         # entity (e.g. the room's Tado cloud thermostat) is used instead.
         self._trv_fallback_active: bool = False
+
+        # Failure handling (see climate_regulation.py): the current command
+        # error (logged once, not every attempt), when the room sensor went
+        # missing, and the TRV-vs-room offset used while it stays away.
+        self._last_command_error: str | None = None
+        self._room_missing_since: float | None = None
+        self._room_sensor_lost_logged: bool = False
+        self._hold_offset_c: float | None = None
 
         # State-machine controllers (hold their own timer + saved-state)
         self._window_ctrl = WindowAutomationController()
@@ -422,6 +436,9 @@ class RoomstatClimate(
             if isinstance(extra_dict, dict):
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
+                offset = safe_float(extra_dict.get("hold_offset_c"))
+                if offset is not None and abs(offset) <= HOLD_OFFSET_LIMIT_C:
+                    self._hold_offset_c = offset
 
         if last_state:
             if last_state.state in (HVACMode.HEAT, HVACMode.OFF):
@@ -657,7 +674,7 @@ class RoomstatClimate(
     def extra_restore_state_data(self) -> ExtraStoredData:
         """Persist automation and auto-tune state across restart/reload."""
         return _AutomationExtraData(
-            self._automation_snapshot(), self._autotuner.as_dict()
+            self._automation_snapshot(), self._autotuner.as_dict(), self._hold_offset_c
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -780,16 +797,11 @@ class RoomstatClimate(
 
         # Forward HVAC mode to the source TRV entity
         if hvac_mode == HVACMode.OFF:
-            try:
-                await self._async_send_hvac_mode_to_tado(HVACMode.OFF)
-            except (TimeoutError, HomeAssistantError):
-                # Command failed – revert local state so the proxy stays in sync
-                # with the TRV (which may still be heating).
-                self._hvac_mode = previous_mode
-                self._last_reason = "hvac_off_failed"
-                self.async_write_ha_state()
-                return
-            self._last_reason = "sent(hvac_off)"
+            # Off stays off even when the TRV can't be reached right now: the
+            # regulation cycle sends it again until the TRV is off.
+            sent = await self._async_send_hvac_mode_to_tado(HVACMode.OFF)
+            self._last_command_sent_ts = time.time()
+            self._last_reason = "sent(hvac_off)" if sent else "send_failed(hvac_off)"
             self.async_write_ha_state()
         elif hvac_mode == HVACMode.HEAT and previous_mode == HVACMode.OFF:
             # Returning from OFF → reset timestamp so the first HEAT cycle uses
@@ -814,7 +826,9 @@ class RoomstatClimate(
                         "HVAC OFF→HEAT: window still open, frost action in %ds",
                         delay,
                     )
-            # Reactivate the TRV, then run regulation to send the correct setpoint.
+            # Reactivate the TRV, then run regulation to send the correct
+            # setpoint.  If the mode change fails, the regulation still runs:
+            # its set_temperature carries hvac_mode heat as well.
             await self._async_send_hvac_mode_to_tado(HVACMode.HEAT)
             await self._async_regulation_cycle(trigger="hvac_mode_change")
         else:
@@ -915,21 +929,20 @@ class RoomstatClimate(
         """The TRV to read and command now: the configured one, or the
         fallback entity while the configured one is unavailable."""
         data = self.coordinator.data or {}
-        primary = TrvReading(
-            self._config_entry.data.get("source_entity_id"),
-            data.get("tado_internal_temp"),
-            data.get("tado_setpoint"),
-        )
-        fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
-        fallback = (
-            TrvReading(
-                fallback_id,
-                data.get("fallback_internal_temp"),
-                data.get("fallback_setpoint"),
+
+        def reading(entity_id: str | None, prefix: str) -> TrvReading:
+            return TrvReading(
+                entity_id,
+                data.get(f"{prefix}_internal_temp"),
+                data.get(f"{prefix}_setpoint"),
+                min_c=data.get(f"{prefix}_min_temp"),
+                max_c=data.get(f"{prefix}_max_temp"),
+                off=bool(data.get(f"{prefix}_off")),
             )
-            if fallback_id
-            else None
-        )
+
+        primary = reading(self._config_entry.data.get("source_entity_id"), "tado")
+        fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
+        fallback = reading(fallback_id, "fallback") if fallback_id else None
         return choose_trv(primary, fallback)
 
     @property
@@ -962,6 +975,10 @@ class RoomstatClimate(
             "tado_internal_temp_c": trv.internal_c,
             "trv_fallback_active": trv.is_fallback,
             "active_trv_entity_id": trv.entity_id,
+            "last_command_error": self._last_command_error,
+            "hold_offset_c": (
+                round(self._hold_offset_c, 1) if self._hold_offset_c is not None else None
+            ),
             "correction_kp": self._config.tuning.kp,
             "correction_ki": self._config.tuning.ki,
             "correction_td_min": round(self._config.tuning.td_s / 60.0, 1),

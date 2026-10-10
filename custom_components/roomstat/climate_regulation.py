@@ -10,10 +10,23 @@ from homeassistant.components.climate import PRESET_BOOST, HVACMode
 from homeassistant.exceptions import HomeAssistantError
 
 from .autotune import AutotuneSample
-from .climate_controllers import CommandPacer, trv_setpoint_drifted
+from .climate_controllers import (
+    CommandPacer,
+    TrvReading,
+    command_limits,
+    integration_step,
+    sensor_lost_target,
+    trv_setpoint_drifted,
+    update_hold_offset,
+)
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
+    HOLD_OFFSET_LIMIT_C,
+    HOLD_OFFSET_NEAR_TARGET_C,
+    HOLD_OFFSET_TAU_S,
+    MAX_INTEGRATION_STEP_S,
     TRV_COMMAND_SPACING_S,
+    TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
 )
 
@@ -115,17 +128,20 @@ class RegulationMixin:
     async def _async_regulation_cycle_locked(self, trigger: str) -> None:
         """Inner regulation cycle body, protected by _regulation_lock."""
         now = time.time()
+        # The wall clock went back (NTP correction, restored VM snapshot): a
+        # command "sent in the future" would block every command until the
+        # clock caught up again.
+        if self._last_command_sent_ts > now:
+            self._last_command_sent_ts = now - self._config.min_command_interval_s
 
         # Summer mode: no regulation, hold the TRV at a fixed 5 °C.
         if self._summer_active:
             await self._async_summer_enforce(now)
             return
 
-        # Guard: skip when HVAC is OFF – the TRV has been turned off directly,
-        # no regulation needed.
+        # Off: no regulation, but make sure the TRV is off too.
         if self._hvac_mode == HVACMode.OFF:
-            self._last_reason = "hvac_off"
-            self._write_state_with_binary_sensor()
+            await self._async_keep_trv_off(now)
             return
 
         # Guard: skip when coordinator data is stale (update method raised an exception).
@@ -143,41 +159,55 @@ class RegulationMixin:
         tado_internal = trv.internal_c
 
         # Sensor resilience: bridge short gaps with last-valid value
+        sensor_lost = False
         if room_temp is not None:
+            if self._room_sensor_lost_logged:
+                _LOGGER.info("%s: room sensor is back", self._config_entry.title)
+            self._room_sensor_lost_logged = False
+            self._room_missing_since = None
             self._last_valid_room_temp = room_temp
             self._last_valid_room_temp_ts = self.coordinator.data.get("room_temp_ts") or now
             self._sensor_degraded = False
-        elif (
-            self._last_valid_room_temp is not None
-            and (now - self._last_valid_room_temp_ts) <= self._sensor_grace_s
-        ):
-            room_temp = self._last_valid_room_temp
-            self._sensor_degraded = True
-            age = int(now - self._last_valid_room_temp_ts)
-            _LOGGER.debug(
-                "Room temp unavailable – using last valid %.1f°C (age %ds, grace %ds)",
-                room_temp, age, self._sensor_grace_s,
-            )
         else:
-            if room_temp is None and self._last_valid_room_temp is not None:
+            if self._room_missing_since is None:
+                self._room_missing_since = now
+            missing_for = now - self._room_missing_since
+            if missing_for > self._sensor_grace_s:
+                # Gone for longer than the grace period (also a sensor that
+                # never reported after a restart): see the hold below.
+                sensor_lost = True
                 self._sensor_degraded = True
-                _LOGGER.warning(
-                    "Room sensor unavailable and grace period expired "
-                    "(last valid: %.1f°C, %ds ago, grace: %ds)",
-                    self._last_valid_room_temp,
-                    int(now - self._last_valid_room_temp_ts),
-                    self._sensor_grace_s,
+            elif self._last_valid_room_temp is not None:
+                # A short gap: bridged with the last valid value.  Counted
+                # from when the reading went missing, not from its last
+                # change, so a sensor that only reports changes is bridged
+                # as well.
+                room_temp = self._last_valid_room_temp
+                self._sensor_degraded = True
+                _LOGGER.debug(
+                    "Room temp unavailable – using last valid %.1f°C "
+                    "(missing for %ds, grace %ds)",
+                    room_temp, int(missing_for), self._sensor_grace_s,
                 )
             else:
                 self._sensor_degraded = False
 
-        if room_temp is None or tado_internal is None:
+        if tado_internal is None:
             self._last_reason = "waiting_for_sensors"
             self._write_state_with_binary_sensor()
             return
 
-        # 2. Time delta
-        dt = (now - self._last_regulation_ts) if self._last_regulation_ts > 0 else 0.0
+        if sensor_lost:
+            await self._async_hold_without_room_sensor(now, trv, missing_for)
+            return
+
+        if room_temp is None:
+            self._last_reason = "waiting_for_sensors"
+            self._write_state_with_binary_sensor()
+            return
+
+        # 2. Time delta, capped so a pause cannot add a large integral step.
+        dt = integration_step(now, self._last_regulation_ts, MAX_INTEGRATION_STEP_S)
         self._last_regulation_ts = now
 
         # 3. Effective setpoint (considers HVAC mode + preset)
@@ -185,10 +215,17 @@ class RegulationMixin:
 
         # 3b. Robust room slope for the derivative brake (only on fresh
         # readings; a bridged/stale value must not look like a flat room).
+        # Fresh readings near the target also teach the offset used while the
+        # room sensor is lost.
         slope = None
         if not self._sensor_degraded:
             self._slope.add(now, room_temp, self.coordinator.data.get("room_temp_ts"))
             slope = self._slope.slope_c_per_s()
+            if abs(setpoint - room_temp) <= HOLD_OFFSET_NEAR_TARGET_C:
+                self._hold_offset_c = update_hold_offset(
+                    self._hold_offset_c, tado_internal - room_temp,
+                    dt, HOLD_OFFSET_TAU_S, HOLD_OFFSET_LIMIT_C,
+                )
 
         # 4. Compute regulation
         result = self._regulator.compute(
@@ -202,7 +239,59 @@ class RegulationMixin:
         self._reg_state = result.new_state
         self._last_result = result
 
-        # 5. Rate limiting & send decision
+        # 5-6. Send decision and command
+        await self._async_decide_and_send(now, trv, result.target_for_tado_c)
+
+        # 7. Background auto-tune (no-op when disabled).  Runs after the
+        # send so it sees the command the TRV now holds; any new values take
+        # effect from the next cycle.  On a fallback it keeps learning from
+        # the room sensor, but without the TRV's own reading: that comes from
+        # cloud polling and can be minutes old, so the TRV demand is unknown
+        # for those cycles (no demand crossing is detected from it).
+        self._feed_autotune(
+            now, setpoint, room_temp,
+            None if trv.is_fallback else tado_internal,
+            result,
+        )
+
+        self._write_state_with_binary_sensor()
+
+    async def _async_hold_without_room_sensor(
+        self, now: float, trv: TrvReading, missing_for: float
+    ) -> None:
+        """The room sensor is gone for longer than the grace period.
+
+        Rather than leave the TRV on whatever it was last sent (possibly
+        25 °C in the middle of a heat-up, for hours), tell it the target plus
+        the usual offset between its own reading and the room, so it holds
+        the room by itself until the sensor is back.  The PI state and the
+        auto-tuner are left alone; regulation resumes where it was.
+        """
+        if not self._room_sensor_lost_logged:
+            self._room_sensor_lost_logged = True
+            _LOGGER.warning(
+                "%s: room sensor unavailable for %d min; the TRV holds the "
+                "target on its own reading (offset %+.1f °C) until it is back",
+                self._config_entry.title,
+                int(missing_for / 60),
+                self._hold_offset_c or 0.0,
+            )
+        self._last_result = None
+        target = sensor_lost_target(
+            self._effective_setpoint(), self._hold_offset_c,
+            self._config.min_target_c, self._config.max_target_c,
+        )
+        await self._async_decide_and_send(now, trv, target, prefix="sensor_lost:")
+        self._write_state_with_binary_sensor()
+
+    async def _async_decide_and_send(
+        self, now: float, trv: TrvReading, target: float, prefix: str = ""
+    ) -> None:
+        """Decide whether *target* goes to the TRV this cycle, and send it.
+
+        Sets ``_last_reason``.  Rate limiting: at most one command per
+        ``min_command_interval_s``, except an urgent decrease.
+        """
         # Prefer our own last-sent value (always fresh) over coordinator data
         # (which may be up to 60s stale from the polling interval).
         # NOTE: do NOT fall back to 0.0 – an unknown baseline makes the
@@ -211,22 +300,41 @@ class RegulationMixin:
         # suppressed.  Instead, skip rate limiting entirely when no baseline
         # is known (e.g. after a quick HVAC OFF → HEAT cycle).
         time_since_last = now - self._last_command_sent_ts
-        # A TRV that no longer holds our last command (lost on the way, or a
-        # Tado schedule block ended the override) is compared with what it
-        # actually holds, so the command goes out again.
+        # A TRV that no longer holds our last command (lost on the way, a
+        # Tado schedule block ended the override, or it was switched off in
+        # the Tado app) is compared with what it actually holds, so the
+        # command goes out again.
         if trv_setpoint_drifted(
             self._last_sent_setpoint,
             trv.setpoint_c,
             time_since_last,
             FALLBACK_DRIFT_GRACE_S if trv.is_fallback else TRV_DRIFT_GRACE_S,
             self._config.min_change_threshold_c,
+            trv_off=trv.off,
+            floor_c=self._config.min_target_c,
         ):
             _LOGGER.info(
-                "%s: %s holds %.1f °C, not the %.1f °C sent; sending again",
+                "%s: %s holds %s, not the %.1f °C sent; sending again",
                 self._config_entry.title, trv.entity_id,
-                trv.setpoint_c, self._last_sent_setpoint,
+                "off" if trv.off else f"{trv.setpoint_c:.1f} °C",
+                self._last_sent_setpoint,
             )
             self._last_sent_setpoint = None
+
+        # A valve that is off already does what a frost-level command asks
+        # (Tado shows its 5 °C setpoint as off), and Home Assistant refuses a
+        # setpoint below 7 °C for a HomeKit valve that is off.
+        if trv.off and target <= self._config.min_target_c + 0.05:
+            self._last_reason = f"{prefix}already_at_target"
+            return
+
+        # Keep the command inside what the TRV accepts right now (anything
+        # else is refused before it is sent).
+        lo, hi = command_limits(
+            self._config.min_target_c, self._config.max_target_c, trv.min_c, trv.max_c
+        )
+        target = max(lo, min(hi, target))
+
         current_tado_setpoint = (
             self._last_sent_setpoint
             if self._last_sent_setpoint is not None
@@ -250,7 +358,7 @@ class RegulationMixin:
                 should_send = True
                 reason = "no_baseline"
         else:
-            diff = abs(result.target_for_tado_c - current_tado_setpoint)
+            diff = abs(target - current_tado_setpoint)
 
             # Overlay refresh: resend the same setpoint if overlay_refresh_s has
             # elapsed, keeping timer-based overlays alive (cloud-API integrations).
@@ -266,7 +374,7 @@ class RegulationMixin:
                 reason = "overlay_refresh"
             elif is_rate_limited:
                 is_urgent_decrease = (
-                    result.target_for_tado_c
+                    target
                     < current_tado_setpoint - self._behaviour.urgent_decrease_threshold_c
                 )
                 if is_urgent_decrease:
@@ -279,26 +387,41 @@ class RegulationMixin:
                 should_send = True
                 reason = "normal_update"
 
-        # 6. Send command to Tado
-        if should_send:
-            await self._async_send_to_tado(result.target_for_tado_c, trv.entity_id)
+        if not should_send:
+            self._last_reason = f"{prefix}{reason}"
+            return
+        # A failed command still counts for the rate limit, so an outage
+        # costs one attempt per interval, not one per cycle.
+        sent = await self._async_send_to_tado(target, trv.entity_id)
+        self._last_command_sent_ts = now
+        self._last_reason = f"{prefix}{'sent' if sent else 'send_failed'}({reason})"
+
+    async def _async_keep_trv_off(self, now: float) -> None:
+        """Roomstat is off: keep the TRV off as well.
+
+        An OFF command that failed (valve unreachable) or did not stick
+        (turned back on from the Tado app or by a Tado schedule block) is sent
+        again, at most once per rate-limit interval.
+        """
+        trv = self._active_trv()
+        self._note_trv_source(trv)
+        grace = FALLBACK_DRIFT_GRACE_S if trv.is_fallback else TRV_DRIFT_GRACE_S
+        since = now - self._last_command_sent_ts
+        reason = "hvac_off"
+        if (
+            self.coordinator.last_update_success
+            and trv.usable
+            and not trv.off
+            and since >= max(grace, self._config.min_command_interval_s)
+        ):
+            _LOGGER.info(
+                "%s: %s is not off; sending off again",
+                self._config_entry.title, trv.entity_id,
+            )
+            sent = await self._async_send_hvac_mode_to_tado(HVACMode.OFF)
             self._last_command_sent_ts = now
-            self._last_reason = f"sent({reason})"
-        else:
-            self._last_reason = reason
-
-        # 7. Background auto-tune (no-op when disabled).  Runs after the
-        # send so it sees the command the TRV now holds; any new values take
-        # effect from the next cycle.  On a fallback it keeps learning from
-        # the room sensor, but without the TRV's own reading: that comes from
-        # cloud polling and can be minutes old, so the TRV demand is unknown
-        # for those cycles (no demand crossing is detected from it).
-        self._feed_autotune(
-            now, setpoint, room_temp,
-            None if trv.is_fallback else tado_internal,
-            result,
-        )
-
+            reason = "sent(hvac_off)" if sent else "send_failed(hvac_off)"
+        self._last_reason = reason
         self._write_state_with_binary_sensor()
 
     def _note_trv_source(self, trv) -> None:
@@ -326,55 +449,86 @@ class RegulationMixin:
                 trv.entity_id,
             )
 
-    async def _async_send_hvac_mode_to_tado(self, mode: HVACMode) -> None:
-        """Forward an HVAC mode change to the TRV (or its active fallback)."""
+    def _note_command_result(self, entity_id: str, what: str, err: BaseException | None) -> None:
+        """Log command failures once per distinct error, not every attempt.
+
+        An unreachable valve would otherwise put a traceback in the log every
+        few minutes for as long as it is away.  The current error is kept for
+        the ``last_command_error`` attribute.
+        """
+        title = self._config_entry.title
+        if err is None:
+            if self._last_command_error is not None:
+                _LOGGER.info("%s: commands to %s work again", title, entity_id)
+            self._last_command_error = None
+            return
+        text = str(err) or type(err).__name__
+        if isinstance(err, TimeoutError):
+            text = f"no answer within {TRV_COMMAND_TIMEOUT_S:.0f} s"
+        message = f"{what} to {entity_id} failed: {text}"
+        if message == self._last_command_error:
+            _LOGGER.debug("%s: %s", title, message)
+        elif isinstance(err, (TimeoutError, HomeAssistantError)):
+            _LOGGER.warning("%s: %s", title, message)
+        else:
+            # Not an expected outcome of a service call: keep the traceback.
+            _LOGGER.error("%s: %s", title, message, exc_info=err)
+        self._last_command_error = message
+
+    async def _async_call_trv(self, entity_id: str, service: str, data: dict) -> bool:
+        """Call a climate service on the TRV.  Never raises (except when the
+        task is cancelled): a failed command must not stop the cycle."""
+        await _wait_for_command_slot()
+        try:
+            async with asyncio.timeout(TRV_COMMAND_TIMEOUT_S):
+                await self.hass.services.async_call(
+                    domain="climate",
+                    service=service,
+                    service_data={"entity_id": entity_id, **data},
+                    blocking=True,
+                )
+        except Exception as err:  # noqa: BLE001 - any failure is reported, never raised
+            self._note_command_result(entity_id, service, err)
+            return False
+        self._note_command_result(entity_id, service, None)
+        return True
+
+    async def _async_send_hvac_mode_to_tado(self, mode: HVACMode) -> bool:
+        """Forward an HVAC mode change to the TRV (or its active fallback).
+
+        Returns whether the TRV took it.  An OFF that fails is sent again by
+        the regulation cycle (see _async_keep_trv_off).
+        """
         source_entity = self._active_trv().entity_id
         if not source_entity:
             _LOGGER.warning("No source_entity_id configured – cannot send HVAC mode to Tado")
-            return
+            return False
 
         _LOGGER.debug("Sending HVAC mode %s to %s", mode, source_entity)
-        await _wait_for_command_slot()
+        if mode == HVACMode.OFF:
+            # Whatever happens, the TRV no longer holds a known setpoint.
+            self._last_sent_setpoint = None
+        return await self._async_call_trv(
+            source_entity, "set_hvac_mode", {"hvac_mode": mode}
+        )
 
-        try:
-            async with asyncio.timeout(10):
-                await self.hass.services.async_call(
-                    domain="climate",
-                    service="set_hvac_mode",
-                    service_data={
-                        "entity_id": source_entity,
-                        "hvac_mode": mode,
-                    },
-                    blocking=True,
-                )
-            if mode == HVACMode.OFF:
-                self._last_sent_setpoint = None
-        except (TimeoutError, HomeAssistantError):
-            _LOGGER.exception("Failed to send HVAC mode to Tado")
-            raise
+    async def _async_send_to_tado(self, target_c: float, entity_id: str | None = None) -> bool:
+        """Send a temperature command to the TRV (default: the configured one).
 
-    async def _async_send_to_tado(self, target_c: float, entity_id: str | None = None) -> None:
-        """Send a temperature command to the TRV (default: the configured one)."""
+        Returns whether the TRV took it.  A failed command is retried by the
+        next cycle once the rate limit allows (no baseline, or the drift check).
+        """
         source_entity = entity_id or self._config_entry.data.get("source_entity_id")
         if not source_entity:
             _LOGGER.warning("No source_entity_id configured – cannot send command to Tado")
-            return
+            return False
 
         _LOGGER.debug("Sending %.1f°C to %s", target_c, source_entity)
-        await _wait_for_command_slot()
-
-        try:
-            async with asyncio.timeout(10):
-                await self.hass.services.async_call(
-                    domain="climate",
-                    service="set_temperature",
-                    service_data={
-                        "entity_id": source_entity,
-                        "temperature": target_c,
-                        "hvac_mode": HVACMode.HEAT,
-                    },
-                    blocking=True,
-                )
+        sent = await self._async_call_trv(
+            source_entity,
+            "set_temperature",
+            {"temperature": target_c, "hvac_mode": HVACMode.HEAT},
+        )
+        if sent:
             self._last_sent_setpoint = target_c
-        except (TimeoutError, HomeAssistantError):
-            _LOGGER.exception("Failed to send command to Tado")
+        return sent

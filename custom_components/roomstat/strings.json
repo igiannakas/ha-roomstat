@@ -262,5 +262,53 @@
     "no_schedule": {
       "message": "No schedule helper is configured for this thermostat."
     }
+  },
+  "issues": {
+    "entity_missing": {
+      "title": "{room}: {entity_id} no longer exists",
+      "fix_flow": {
+        "step": {
+          "replace": {
+            "title": "Replace {entity_id}",
+            "description": "The Roomstat room **{room}** uses `{entity_id}`, but Home Assistant no longer has it. It was probably deleted or renamed.\n\nPick the entity to use instead. An optional setting can be left empty to stop using it. The room then reloads with the new setting.",
+            "data": {
+              "source_entity_id": "Tado radiator thermostat (TRV)",
+              "external_temperature_entity_id": "External temperature sensor",
+              "fallback_entity_id": "Fallback thermostat",
+              "window_sensor_id": "Window sensor",
+              "presence_sensor_id": "Presence sensor",
+              "summer_mode_entity_id": "Summer mode switch",
+              "schedule_entity_id": "Schedule helper"
+            }
+          }
+        },
+        "abort": {
+          "entry_removed": "This Roomstat room no longer exists."
+        }
+      }
+    },
+    "entity_disabled": {
+      "title": "{room}: {entity_id} is disabled",
+      "fix_flow": {
+        "step": {
+          "replace": {
+            "title": "Replace {entity_id}",
+            "description": "The Roomstat room **{room}** uses `{entity_id}`, but it is disabled, so it never reports.\n\nEnable it again under Settings → Devices & services → Entities, or pick the entity to use instead. An optional setting can be left empty to stop using it. The room then reloads with the new setting.",
+            "data": {
+              "source_entity_id": "Tado radiator thermostat (TRV)",
+              "external_temperature_entity_id": "External temperature sensor",
+              "fallback_entity_id": "Fallback thermostat",
+              "window_sensor_id": "Window sensor",
+              "presence_sensor_id": "Presence sensor",
+              "summer_mode_entity_id": "Summer mode switch",
+              "schedule_entity_id": "Schedule helper"
+            }
+          }
+        },
+        "abort": {
+          "entry_removed": "This Roomstat room no longer exists."
+        }
+      }
+    }
   }
 }
