@@ -140,8 +140,11 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   reload the integration.
 - A heat-up in progress and the previous cycle's setpoint are saved there too
   (`episode`), because changing a preset temperature reloads the entry. A
-  restart is then just a gap between cycles: longer than `max_gap_s`
-  (10 min) ends the heat-up, as any gap does. Hold windows are not saved.
+  restart is then just a gap between cycles. A gap longer than `max_gap_s`
+  (10 min: a long restart, or a HomeKit valve that drops off, which stops the
+  cycle feeding the tuner) ends the heat-up early like a schedule change: what
+  came before is kept as a cut-short episode, which can only ever argue for
+  more braking. Hold windows are not saved.
 - All limits live in `AutotuneConfig` (`parameters.py`). `tests/plant_sim.py`
   simulates room + radiator + Tado TRV (with its own PI) + proxy in closed
   loop. Check control or auto-tune changes against it.

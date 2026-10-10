@@ -282,3 +282,35 @@ def test_heatup_survives_reload_and_restart(monkeypatch):
     assert ent3._autotuner.phase == "heat_up"
     assert ent3._autotuner._heatup.start_ts == started
     assert len(ent3._autotuner._heatup.samples) == 7
+
+
+def test_valve_dropout_ends_heatup_but_keeps_it(monkeypatch):
+    """The valve's HomeKit link drops for 16 min mid heat-up.  Regulation
+    waits for it; when it is back the heat-up is kept as cut short instead
+    of being thrown away."""
+    clock = _Clock(monkeypatch)
+    ent = _make_entity(dict(AUTOTUNE_ON))            # comfort 20.5, night 18.5
+    _run(_start(ent))
+    _run(ent.async_set_preset_mode("eco"))
+    for _ in range(3):
+        _feed(ent, room=18.5, tado=18.5)
+        _run(ent._async_regulation_cycle("timer"))
+        clock.tick(60)
+    _run(ent.async_set_preset_mode("comfort"))
+    room = 18.5
+    for _ in range(60):                              # 1.8 °C/h towards 20.5
+        _feed(ent, room=room, tado=room - 1.0)
+        _run(ent._async_regulation_cycle("timer"))
+        clock.tick(60)
+        room += 0.03
+    assert ent._autotuner.phase == "heat_up"
+    for _ in range(16):                              # valve unavailable
+        _feed(ent, room=room, tado=None)
+        _run(ent._async_regulation_cycle("timer"))
+        assert ent._last_reason == "waiting_for_sensors"
+        clock.tick(60)
+    _feed(ent, room=room, tado=room - 1.0)          # valve back
+    _run(ent._async_regulation_cycle("timer"))
+    summary = ent.autotune_summary()
+    assert summary["heatups_analysed"] == 1
+    assert summary["last_event"].startswith("heat-up (cut short)")

@@ -517,7 +517,9 @@ class _HeatupTracker:
         """End early.  Keep what is valid: the rising phase (dead time, rate)
         once it ran long enough, and the coast once the TRV had been told to
         stop for a while.  Short schedule slots (e.g. 06:00-08:00 comfort)
-        are the norm, so discarding them would leave nothing to learn from."""
+        are the norm, so discarding them would leave nothing to learn from.
+        A gap in the data (a TRV that drops off, a long restart) ends the
+        episode the same way, at the last cycle before the gap."""
         self.abort_reason = reason
         if (self.cross_ts is not None
                 and ts - self.cross_ts >= self.cfg.truncated_min_after_cross_s):
@@ -587,8 +589,7 @@ class _HeatupTracker:
             return self._stop("setpoint_changed", s.ts)
         gap = s.ts - self._last_cycle_ts
         if gap > self.cfg.max_gap_s or gap < 0:
-            self.abort_reason = "data_gap"
-            return _ABORT
+            return self._stop("data_gap", self._last_cycle_ts)
         self._last_cycle_ts = s.ts
         d = s.demand_c
         if d is not None:

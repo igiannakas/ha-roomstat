@@ -793,13 +793,35 @@ class TestEpisodeAcrossRestart:
             # still well below target, heating "resumes" with a new one.
             assert (b._heatup.start_ts == 60.0) is continued
 
-    def test_long_downtime_discards_the_heatup(self):
+    def test_long_downtime_discards_a_short_heatup(self):
         t = _tuner()
-        last = _heating(t)
+        last = _heating(t)                           # 28 min, never told to stop
         t = _restart(t)
         _feed(t, last + 1200.0, 20.0, 19.9)         # room close to target now
         assert t.phase != A.PHASE_HEATUP
         assert t.last_event == "heat-up discarded (data_gap)"
+        assert t._counters["heatups"] == 0
+
+    @pytest.mark.parametrize("restart", [False, True])
+    def test_gap_ends_a_long_heatup_but_keeps_it(self, restart):
+        """A TRV that drops off for 20 min (or a long restart) ends the
+        heat-up like a schedule change would: what came before is kept."""
+        t = _tuner()
+        _feed(t, 0.0, 18.0, 18.5)
+        for k in range(1, 70):                       # 1.8 °C/h, target reached at 50 min
+            room = min(18.5 + 0.03 * k, 20.1)
+            _feed(t, k * 60.0, 20.0, room, demand=1.0 if room < 19.95 else -0.5)
+        last = 69 * 60.0
+        if restart:
+            t = _restart(t)
+        _feed(t, last + 1200.0, 20.0, 20.1, demand=-0.5)
+        assert t.phase != A.PHASE_HEATUP
+        assert t._counters["heatups"] == 1
+        m = t._heatups[-1]
+        assert m.truncated and m.crossed
+        assert m.ts == pytest.approx(last, abs=1.0)  # ends before the gap
+        assert m.rate_c_per_h == pytest.approx(1.8, rel=0.15)
+        assert t.last_event.startswith("heat-up (cut short)")
 
     def test_clock_jumping_back_discards_the_heatup(self):
         t = _tuner()
