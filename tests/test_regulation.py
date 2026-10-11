@@ -255,6 +255,23 @@ class TestModes:
         res, _ = step(reg, RegulationState(), 19.95, slope_c_per_h=0.0)
         assert res.mode == "hold"
 
+    def test_firm_stop_looks_as_far_ahead_as_the_braking_time(self):
+        """11 Oct, living room: a 0.6 °C step went through hold, and the
+        radiator coasted 19 min.  0.2 °C short and rising 1.0 °C/h: 10 min
+        ahead is 0.05 short (hold); 30 min ahead is 0.25 over (stop)."""
+        res, _ = step(make_regulator(), RegulationState(), 19.8, slope_c_per_h=1.0)
+        assert res.mode == "hold"
+        reg = make_regulator(tuning=CorrectionTuning(td_s=1800.0))
+        res, _ = step(reg, RegulationState(), 19.8, slope_c_per_h=1.0)
+        assert res.mode == "stop"
+
+    def test_firm_stop_looks_at_least_10_min_ahead(self):
+        """A short (or no) braking time does not shorten the stop's view."""
+        for td in (0.0, 120.0):
+            reg = make_regulator(tuning=CorrectionTuning(td_s=td))
+            res, _ = step(reg, RegulationState(), 19.95, slope_c_per_h=1.2)
+            assert res.mode == "stop"
+
     def test_firm_stop_lasts_until_the_room_heads_back_to_the_target(self):
         reg = make_regulator()
         stop = RegulationState(mode="stop")

@@ -39,7 +39,9 @@ Strong commands where they matter, fine ones near the target:
 * ``hold``: near the target, the feedforward + PI command above.  A Tado
   answers small pushes late and partly, so kp is high (4 by default).
 * ``stop``: the minimum, ahead of an overshoot: once the room is predicted
-  to be ``stop_over_c`` over the target within ``stop_lead_s``.  Released
+  to be ``stop_over_c`` over the target within the braking time Td (at
+  least ``stop_lead_s``), the radiator's coast being the same however the
+  heat got there.  Released
   (back to hold) once it is predicted to fall back within ``release_c`` of
   the target in ``release_lead_s``, so the radiator is warm again by the
   time the room needs it.
@@ -157,7 +159,10 @@ class FeedforwardPiRegulator:
             return MODE_COAST
         # Near the target: fine adjustments, with a firm stop ahead of an
         # overshoot that lasts until the room is heading back to the target.
-        if error_c - config.stop_lead_s * rising <= -config.stop_over_c:
+        # It looks at least as far ahead as a heat-up: the radiator's coast
+        # (Td) is the same however the heat got there.
+        stop_lead_s = max(config.stop_lead_s, lead_s)
+        if error_c - stop_lead_s * rising <= -config.stop_over_c:
             return MODE_STOP
         if (
             mode == MODE_STOP

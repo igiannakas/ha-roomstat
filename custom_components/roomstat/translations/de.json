@@ -93,7 +93,7 @@
               "correction_kp": "Wie kräftig das Ventil nahe am Ziel nachgestellt wird: um (1 + Kp) × die Abweichung des Raums. Ein Tado reagiert auf kleine Änderungen spät und nur teilweise, daher ist der Wert hoch. Typisch 3–6.",
               "correction_ki": "Gleicht eine anhaltende Abweichung nahe am Ziel aus. Höhere Werte gleichen sie schneller aus.",
               "integral_deadband_c": "Das Integral sammelt nur, wenn der Raum so nah am Ziel ist, damit es sich beim Aufheizen nie aufschaukelt.",
-              "derivative_time_min": "Wie weit das Aufheizen vorausschaut, wohin die Restwärme des Heizkörpers den Raum noch trägt, und damit, wie früh es endet. 0 = keine Vorausschau. Wenn die Selbstoptimierung die Bremszeit lernt, ist dies nur der Startwert."
+              "derivative_time_min": "Wie weit Roomstat vorausschaut, wohin die Restwärme des Heizkörpers den Raum noch trägt, und damit, wie früh das Heizen endet – beim Aufheizen und nahe am Ziel (dort mindestens 10 min). 0 = keine Vorausschau beim Aufheizen. Wenn die Selbstoptimierung die Bremszeit lernt, ist dies nur der Startwert."
             }
           },
           "autotune": {

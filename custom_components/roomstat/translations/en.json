@@ -93,7 +93,7 @@
               "correction_kp": "How firmly the valve is pushed near the target: by (1 + Kp) × the room's error. A Tado reacts late and only partly to small changes, so this is high. Typical 3–6.",
               "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster.",
               "integral_deadband_c": "The integral only builds up when the room is this close to the target, so heat-ups never wind it up.",
-              "derivative_time_min": "How far ahead a heat-up predicts where the radiator's leftover heat will carry the room, and so how early it stops. 0 = no anticipation. When auto-tune learns braking, this is only its starting value."
+              "derivative_time_min": "How far ahead Roomstat predicts where the radiator's leftover heat will carry the room, and so how early heating stops, in heat-ups and near the target (there at least 10 min). 0 = no anticipation in heat-ups. When auto-tune learns braking, this is only its starting value."
             }
           },
           "autotune": {

@@ -103,7 +103,10 @@ Read this before changing `regulation.py` or `parameters.py`.
     high (default 4) because a Tado answers small pushes late and partly.
     The integral only moves in hold.
   - `stop` (minimum): a firm stop ahead of an overshoot, once error −
-    `stop_lead_s` (10 min) × rise ≤ −`stop_over_c` (0.1 °C). Released once
+    max(`stop_lead_s` (10 min), Td) × rise ≤ −`stop_over_c` (0.1 °C): the
+    radiator's coast is the same however the heat got there (11 Oct: a
+    0.6 °C step handled by hold got a 10-min look-ahead while the coast was
+    19 min, +0.5 °C peak). Released once
     error + `release_lead_s` (20 min) × fall ≥ −`release_c` (0.02 °C), so
     the radiator is warm again in time.
 

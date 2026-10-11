@@ -290,8 +290,9 @@ class RegulationConfig:
     heatup_enter_c: float = 1.0
     heatup_exit_c: float = 0.1
     # Near the target, a firm stop (the minimum) once the room is predicted
-    # to be stop_over_c over the target within stop_lead_s, so the
-    # radiator's leftover heat lands at most there.  Released once the room
+    # to be stop_over_c over the target within the braking time Td, but at
+    # least stop_lead_s, so the radiator's leftover heat lands at most
+    # there (the coast is the same however the heat got there).  Released once the room
     # is predicted to fall back within release_c of the target in
     # release_lead_s, so the radiator is warm again when needed.  Without
     # the firm stop the valve keeps heating just below its reading

@@ -51,9 +51,10 @@ changes.
   little ahead of an overshoot. Rooms hold within about 0.05 °C. Settings
   under **Configure → Controller**.
 - **Heat-up braking.** **Heat-up braking time** (10 minutes by default) is
-  how far ahead a heat-up predicts where the radiator's leftover heat will
-  carry the room, so it stops before the target rather than after it. 0 =
-  no anticipation. Auto-tune can learn it.
+  how far ahead Roomstat predicts where the radiator's leftover heat will
+  carry the room, so heating stops before the target rather than after it.
+  Near the target the valve is shut at least 10 minutes ahead. 0 = no
+  anticipation in heat-ups. Auto-tune can learn it.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
 
