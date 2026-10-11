@@ -6,7 +6,7 @@ heating when it should not:
 - a HomeKit Tado valve that is off refuses setpoints below 7 °C;
 - a valve switched off from the Tado app while Roomstat asks for heat;
 - a command that fails (refused, timed out, unexpected error);
-- a room sensor that stays away (the TRV kept its last command, maybe 25 °C);
+- a room sensor that stays away (reported, nothing sent meanwhile);
 - a long pause or a clock that goes back;
 - an OFF that does not reach the valve.
 """
@@ -21,7 +21,6 @@ from tests.ha_harness import (
     TRV,
     _climate,
     _make_entity,
-    _restart_from,
     _run,
     _start,
     e2e,
@@ -148,8 +147,9 @@ class TestValveOff:
         assert ent.extra_state_attributes["last_command_error"] is None
 
     def test_heat_wanted_is_kept_inside_what_the_off_valve_accepts(self, monkeypatch):
+        """PI commands (deliberate control off) between 5 and 7 °C."""
         clock = _Clock(monkeypatch)
-        ent = _entity()
+        ent = _entity({"stepped_heating_enabled": False})
         _validating_trv(ent)
         # A warm room: the command lands between 5 and 7 °C.
         ent._target_temp = 6.0
@@ -157,7 +157,7 @@ class TestValveOff:
         ent.hass.service_calls.clear()
         ent._last_command_sent_ts = 0.0
         clock.tick(300)
-        _feed_off(ent, room=6.4, internal=6.0)
+        _feed_off(ent, room=6.0, internal=6.0)
         _cycle(ent)
         assert _sent(ent) == [7.0]
         assert ent._last_reason.startswith("sent(")
@@ -286,113 +286,90 @@ class TestFailedCommands:
 # ---------------------------------------------------------------------------
 
 class TestRoomSensorLost:
+    """The room sensor is expected to be reliable: a long outage is reported
+    (a repair, see test_repairs.py), and the radiator keeps its last setting.
+    """
 
-    def _learn_offset(self, ent, clock, cycles=5):
-        """Room at its 20.5 °C target, TRV reading 1.5 °C higher."""
-        for _ in range(cycles):
-            _feed(ent, room=20.4, internal=21.9, setpoint=22.0)
-            _cycle(ent)
-            clock.tick(60)
-
-    def test_trv_holds_target_plus_offset(self, monkeypatch):
+    def test_short_gap_is_bridged(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity()
-        self._learn_offset(ent, clock)
-        assert ent._hold_offset_c == pytest.approx(1.5, abs=0.01)
-
-        # Mid heat-up the TRV was told 25 °C, then the sensor disappears.
-        _feed(ent, room=18.0, internal=19.0, setpoint=25.0)
+        _feed(ent, room=19.0)
         _cycle(ent)
-        ent._last_sent_setpoint = 25.0
-        ent.hass.service_calls.clear()
-
-        # Within the grace period (5 min from the first cycle without a
-        # reading) the last value bridges the gap.
-        for _ in range(6):
-            clock.tick(60)
-            _feed(ent, room=None, internal=21.0, setpoint=25.0)
-            _cycle(ent)
-            assert ent._sensor_degraded and not _sent(ent)
-
-        # After it: target + offset, not 25 °C for hours.
-        clock.tick(60)
-        _feed(ent, room=None, internal=21.0, setpoint=25.0)
-        _cycle(ent)
-        assert _sent(ent) == [22.0]
-        assert ent._last_reason.startswith("sensor_lost:sent(")
-        assert ent.extra_state_attributes["sensor_degraded"] is True
-
-        # Held: no further commands while nothing changes.
         ent.hass.service_calls.clear()
         for _ in range(5):
             clock.tick(60)
-            _feed(ent, room=None, internal=21.5, setpoint=22.0)
+            _feed(ent, room=None)
             _cycle(ent)
-        assert _sent(ent) == []
-        assert ent._last_reason == "sensor_lost:already_at_target"
+            assert ent._sensor_degraded
+            assert ent._last_reason != "waiting_for_sensors"
 
-    def test_follows_preset_changes_while_lost(self, monkeypatch):
+    def test_long_outage_sends_nothing(self, monkeypatch, caplog):
+        """Holding the target, then the sensor disappears: nothing more is
+        sent, the TRV keeps what it has."""
         clock = _Clock(monkeypatch)
         ent = _entity()
-        self._learn_offset(ent, clock)
-        for _ in range(7):
-            _feed(ent, room=None, internal=21.0, setpoint=22.0)
+        caplog.set_level(logging.INFO)
+        _feed(ent, room=20.6, internal=19.0)
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop"
+        held = ent._last_sent_setpoint
+        ent.hass.service_calls.clear()
+        for _ in range(30):
+            clock.tick(60)
+            _feed(ent, room=None, internal=19.0, setpoint=held)
+            _cycle(ent)
+        assert ent.hass.service_calls == []
+        assert ent._last_reason == "waiting_for_sensors"
+        assert ent.extra_state_attributes["sensor_degraded"] is True
+        lost = [r for r in caplog.records if "room sensor unavailable" in r.getMessage()]
+        assert len(lost) == 1 and lost[0].levelno == logging.WARNING
+
+    def test_heat_up_is_ended_when_the_sensor_is_lost(self, monkeypatch):
+        """A heat-up's maximum command is never left in place without a room
+        reading: it is ended with one minimum command (coast), then nothing
+        more."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        _feed(ent, room=17.0, internal=18.0)
+        _cycle(ent)
+        assert ent._reg_state.mode == "heat"
+        assert _sent(ent) == [25.0]
+        ent.hass.service_calls.clear()
+        for _ in range(30):
+            clock.tick(60)
+            _feed(ent, room=None, internal=19.0, setpoint=25.0)
+            _cycle(ent)
+        assert _sent(ent) == [5.0]
+        assert ent._reg_state.mode == "coast"
+        assert ent._last_reason == "waiting_for_sensors"
+
+    def test_dead_sensor_after_restart_sends_nothing(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        for _ in range(10):
+            _feed(ent, room=None, internal=19.0, setpoint=25.0)
             _cycle(ent)
             clock.tick(60)
-        ent.hass.service_calls.clear()
-        _run(ent.async_set_preset_mode("eco"))     # Night, 18.5 °C
-        assert _sent(ent)[-1] == 20.0
-
-    def test_dead_sensor_after_restart_holds_the_plain_target(self, monkeypatch):
-        """No reading since the start and no offset learned: the TRV holds
-        the target on its own reading, after the grace period."""
-        clock = _Clock(monkeypatch)
-        ent = _entity()
-        _feed(ent, room=None, internal=19.0, setpoint=25.0)
-        _cycle(ent)
+        assert ent.hass.service_calls == []
         assert ent._last_reason == "waiting_for_sensors"
-        assert _sent(ent) == []
-        clock.tick(301)
-        _feed(ent, room=None, internal=19.0, setpoint=25.0)
-        _cycle(ent)
-        assert _sent(ent) == [20.5]
 
     def test_regulation_resumes_when_the_sensor_is_back(self, monkeypatch, caplog):
         clock = _Clock(monkeypatch)
         ent = _entity()
         caplog.set_level(logging.INFO)
-        self._learn_offset(ent, clock)
-        for _ in range(8):
-            _feed(ent, room=None, internal=21.0, setpoint=22.0)
-            _cycle(ent)
-            clock.tick(60)
-        lost = [r for r in caplog.records if "room sensor unavailable" in r.getMessage()]
-        assert len(lost) == 1                     # logged once, not every cycle
-        clock.tick(180)
-        _feed(ent, room=20.0, internal=21.0, setpoint=22.0)
+        _feed(ent, room=19.0)
         _cycle(ent)
-        assert not ent._last_reason.startswith("sensor_lost:")
+        for _ in range(8):
+            clock.tick(60)
+            _feed(ent, room=None)
+            _cycle(ent)
+        clock.tick(180)
+        _feed(ent, room=19.2, internal=18.0, setpoint=10.0)
+        ent._last_sent_setpoint = None
+        _cycle(ent)
+        assert ent._last_reason.startswith("sent(")
         assert ent._sensor_degraded is False
         assert any("room sensor is back" in r.getMessage() for r in caplog.records)
-
-    def test_offset_learned_only_near_the_target(self, monkeypatch):
-        """Mid heat-up the TRV reads far above the room (hot radiator):
-        that is not the offset to hold the room with."""
-        clock = _Clock(monkeypatch)
-        ent = _entity()
-        for _ in range(5):
-            _feed(ent, room=17.0, internal=23.0, setpoint=25.0)
-            _cycle(ent)
-            clock.tick(60)
-        assert ent._hold_offset_c is None
-
-    def test_offset_survives_a_restart(self, monkeypatch):
-        clock = _Clock(monkeypatch)
-        ent = _entity()
-        self._learn_offset(ent, clock)
-        new = _make_entity()
-        _restart_from(ent, new)
-        assert new._hold_offset_c == pytest.approx(ent._hold_offset_c, abs=0.01)
 
     def test_valve_away_too_waits(self, monkeypatch):
         clock = _Clock(monkeypatch)

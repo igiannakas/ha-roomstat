@@ -35,21 +35,28 @@ changes.
   refuse. A failed command is tried again a few minutes later and logged
   once, not every time; the thermostat's `last_command_error` attribute shows
   it. **Off** stays off and is sent again if the valve doesn't take it.
-- **Room sensor lost.** If the room sensor is gone for longer than its grace
-  period, the valve holds the target on its own reading (corrected by the
-  usual difference between valve and room) instead of keeping its last
-  command, until the sensor is back.
 - **Repairs for lost entities.** If the valve, the room sensor or any helper
   a room uses is deleted, renamed or disabled, a repair appears under
   **Settings → Repairs** after 5 minutes. **Fix** lets you pick the entity to
-  use instead.
+  use instead. A room sensor with no reading for 15 minutes is reported there
+  too; until it's back, the radiator keeps its last setting.
 
 **Control**
+- **Deliberate valve control.** A Tado valve has its own controller: it only
+  opens fully when asked for much more than it reads, only stays shut when
+  asked for much less, and in between reacts late and partly. So Roomstat
+  heats up at full power and shuts the valve early enough for the
+  radiator's leftover heat to reach the target. Near the target it adjusts
+  the valve firmly, and shuts it a little ahead of an overshoot. Rooms hold
+  within about 0.05 °C. On by default; **Configure → PI Controller →
+  Deliberate valve control**. Kp and gain scheduling only apply with it
+  off.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
 - **Heat-up braking.** Stops heating a little before the room reaches its
   target, so the heat still in the radiator doesn't push it past. It can only
-  ever reduce heating.
+  ever reduce heating. With deliberate valve control, the braking time
+  decides how early a heat-up stops (10 minutes ahead if it's 0).
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual

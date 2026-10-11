@@ -20,12 +20,11 @@ Architecture
   unavailable, and keep commands inside the range it accepts right now
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
-- ``plausible_c`` / ``integration_step`` / ``update_hold_offset`` /
-  ``sensor_lost_target`` – guards against faulty readings, pauses and a room
-  sensor that stays away
+- ``plausible_c`` / ``integration_step`` – guards against faulty readings and
+  pauses
 - ``entity_problem`` / ``MissingEntityWatch`` / ``replace_entity_setting`` –
-  notice a configured entity that was deleted, renamed or disabled, and
-  replace it (the repair in repairs.py)
+  notice a configured entity that was deleted, renamed or disabled (or a room
+  sensor that stays unavailable), and replace it (the repairs in repairs.py)
 - ``ScheduleController`` / ``parse_schedule_preset`` – follow an external
   schedule helper, with manual overrides that end at the next schedule change
   or after a configurable time (whichever comes first)
@@ -887,62 +886,39 @@ def integration_step(now: float, last_ts: float, max_s: float) -> float:
     return min(now - last_ts, max_s)
 
 
-def update_hold_offset(
-    prev: float | None,
-    sample_c: float,
-    dt_s: float,
-    tau_s: float,
-    limit_c: float,
-) -> float:
-    """Slow average of (TRV reading - room) while the room holds its target.
-
-    Used only when the room sensor stays away: the TRV is then told the
-    target plus this offset, so it holds the room on its own reading.
-    Clamped to +-``limit_c``, so a faulty sample cannot ask for much heat.
-    """
-    sample = max(-limit_c, min(limit_c, sample_c))
-    if prev is None or tau_s <= 0:
-        return sample
-    alpha = min(1.0, max(0.0, dt_s) / tau_s)
-    return prev + alpha * (sample - prev)
-
-
-def sensor_lost_target(
-    setpoint_c: float, hold_offset_c: float | None, lo: float, hi: float
-) -> float:
-    """TRV command while the room sensor is gone: the target plus the usual
-    offset between the TRV and the room (none when it was never learned, so
-    the TRV simply holds the target on its own reading)."""
-    target = setpoint_c + (hold_offset_c or 0.0)
-    return round(max(lo, min(hi, target)), 1)
-
-
 # ---------------------------------------------------------------------------
 # Configured entities that disappear
 # ---------------------------------------------------------------------------
 
-def entity_problem(has_state: bool, registered: bool, disabled: bool) -> str | None:
-    """Why a configured entity can't be used any more, or None.
+def entity_problem(
+    has_state: bool, registered: bool, disabled: bool, unavailable: bool = False
+) -> str | None:
+    """Why a configured entity can't be used, or None.
 
     ``"disabled"``: disabled in the entity registry, so it never reports.
     ``"missing"``: neither a state nor a registry entry, so it was deleted or
-    renamed.  An entity that is registered but unavailable, or has no state
-    yet because its integration is still loading, is not a problem here: the
-    regulation cycle copes with that, and it comes back by itself.
+    renamed.  ``"unavailable"``: it exists but gives no usable value (only
+    checked for the room sensor, see repairs.py).  An entity that is
+    registered but has no state yet (its integration is still loading) is
+    not a problem.
     """
     if disabled:
         return "disabled"
-    if has_state or registered:
-        return None
-    return "missing"
+    if not has_state and not registered:
+        return "missing"
+    if has_state and unavailable:
+        return "unavailable"
+    return None
 
 
 class MissingEntityWatch:
     """Report a configured entity only once it has been a problem for
-    ``delay_s``: after a restart, integrations load in any order."""
+    ``delay_s`` (after a restart, integrations load in any order), or for the
+    delay given per problem in ``delays``."""
 
-    def __init__(self, delay_s: float) -> None:
+    def __init__(self, delay_s: float, delays: Mapping[str, float] | None = None) -> None:
         self.delay_s = delay_s
+        self.delays = dict(delays or {})
         self._since: dict[str, float] = {}
 
     def update(self, now: float, problems: Mapping[str, str | None]) -> dict[str, str]:
@@ -958,7 +934,7 @@ class MissingEntityWatch:
                 self._since.pop(key, None)
                 continue
             since = self._since.setdefault(key, now)
-            if now - since >= self.delay_s:
+            if now - since >= self.delays.get(problem, self.delay_s):
                 report[key] = problem
         for key in [k for k in self._since if k not in problems]:
             del self._since[key]

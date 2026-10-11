@@ -1,4 +1,5 @@
-"""Repairs for configured entities that were deleted, renamed or disabled.
+"""Repairs for configured entities that were deleted, renamed or disabled,
+and for a room sensor that stays unavailable.
 
 A room set up with an entity that no longer exists would otherwise just wait
 ("waiting_for_sensors"), or silently lose a feature (window, presence,
@@ -6,8 +7,13 @@ schedule, summer, fallback), with nothing in the UI to say why.  The
 coordinator calls ``async_check_entities`` every update; an entity that has
 been a problem for ``ENTITY_MISSING_REPORT_S`` since HA started is reported
 as a repair under Settings → Repairs.  Its fix flow picks the entity to use
-instead (or, for an optional setting, none) and reloads the room.  The
-repair disappears by itself once the entity is back.
+instead (or, for an optional setting, none) and reloads the room.
+
+A room sensor without a usable reading for ``ROOM_SENSOR_UNAVAILABLE_REPORT_S``
+is reported as well (no fix flow: the sensor itself needs looking at).  The
+room is not regulated meanwhile; the radiator keeps its last setpoint.
+
+Every repair disappears by itself once the entity is back.
 """
 
 from __future__ import annotations
@@ -23,7 +29,12 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
-from .climate_controllers import MissingEntityWatch, entity_problem, replace_entity_setting
+from .climate_controllers import (
+    MissingEntityWatch,
+    entity_problem,
+    plausible_c,
+    replace_entity_setting,
+)
 from .const import (
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
@@ -45,13 +56,14 @@ class EntityRole:
     required: bool = False
     in_data: bool = False            # stored in the entry data, not options
     device_class: str | None = None
+    watch_unavailable: bool = False  # also report a long run without a value
 
 
 ROLES: tuple[EntityRole, ...] = (
     EntityRole(CONF_SOURCE_ENTITY_ID, ("climate",), required=True, in_data=True),
     EntityRole(
         CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, ("sensor",), required=True,
-        device_class="temperature",
+        device_class="temperature", watch_unavailable=True,
     ),
     EntityRole(CONF_FALLBACK_ENTITY_ID, ("climate",)),
     EntityRole(CONF_WINDOW_SENSOR_ID, ("binary_sensor",)),
@@ -80,7 +92,11 @@ def issue_id(entry_id: str, key: str) -> str:
 
 
 def async_check_entities(
-    hass: HomeAssistant, entry: ConfigEntry, watch: MissingEntityWatch, now: float
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    watch: MissingEntityWatch,
+    now: float,
+    unavailable_minutes: int = 15,
 ) -> None:
     """Raise or clear the repairs for this room's entity settings."""
     if not hass.is_running:
@@ -90,28 +106,37 @@ def async_check_entities(
     problems: dict[str, str | None] = {}
     for key, entity_id in configured.items():
         reg_entry = registry.async_get(entity_id)
+        state = hass.states.get(entity_id)
         problems[key] = entity_problem(
-            has_state=hass.states.get(entity_id) is not None,
+            has_state=state is not None,
             registered=reg_entry is not None,
             disabled=reg_entry is not None and reg_entry.disabled_by is not None,
+            unavailable=(
+                ROLE_BY_KEY[key].watch_unavailable
+                and state is not None
+                and plausible_c(state.state) is None
+            ),
         )
     report = watch.update(now, problems)
     for role in ROLES:
         iid = issue_id(entry.entry_id, role.key)
         if role.key in report:
+            problem = report[role.key]
             ir.async_create_issue(
                 hass,
                 DOMAIN,
                 iid,
-                is_fixable=True,
+                # A sensor that stops reporting needs looking at, not replacing.
+                is_fixable=problem != "unavailable",
                 is_persistent=False,
                 severity=(
                     ir.IssueSeverity.ERROR if role.required else ir.IssueSeverity.WARNING
                 ),
-                translation_key=f"entity_{report[role.key]}",
+                translation_key=f"entity_{problem}",
                 translation_placeholders={
                     "room": entry.title,
                     "entity_id": configured[role.key],
+                    "minutes": str(unavailable_minutes),
                 },
                 data={"entry_id": entry.entry_id, "key": role.key},
             )

@@ -84,12 +84,14 @@
             "name": "PI-Regler",
             "description": "Parameter für den Proportional-Integral-Regler.",
             "data": {
+              "stepped_heating_enabled": "Gezielte Ventilsteuerung",
               "correction_kp": "Proportionale Korrektur (Kp)",
               "correction_ki": "Integrale Korrektur (Ki)",
               "integral_deadband_c": "Integral-Präzisionszone",
               "derivative_time_min": "Bremszeit beim Aufheizen (D-Anteil)"
             },
             "data_description": {
+              "stepped_heating_enabled": "Roomstat heizt mit voller Leistung auf und schließt das Ventil so früh, dass die Restwärme des Heizkörpers das Ziel erreicht, weil ein Tado auf kleine Änderungen spät und nur teilweise reagiert. Nahe am Ziel stellt es das Ventil kräftig nach und schließt es kurz vor einem Überschwingen. Aus: Der PI-Regler unten passt den Sollwert des Ventils an (nur dann gelten Kp und die adaptive Verstärkung).",
               "correction_kp": "Proportionalanteil des PI-Reglers. Höhere Werte reagieren schneller auf Temperaturabweichungen.",
               "correction_ki": "Integralanteil des PI-Reglers. Höhere Werte korrigieren anhaltende Abweichungen aggressiver.",
               "integral_deadband_c": "Integral sammelt nur innerhalb dieser Zone. Verhindert Überschwingen bei großen Temperaturänderungen.",
@@ -309,6 +311,10 @@
           "entry_removed": "Dieser Roomstat-Raum existiert nicht mehr."
         }
       }
+    },
+    "entity_unavailable": {
+      "title": "{room}: keine Werte von {entity_id}",
+      "description": "Der Roomstat-Raum **{room}** hat seit {minutes} Minuten keinen gültigen Wert von seinem Raumsensor `{entity_id}` erhalten. Der Raum wird so lange nicht geregelt: Der Heizkörper behält seine letzte Einstellung.\n\nPrüfe den Sensor (Stromversorgung, Batterie, Netzwerk). Diese Reparatur verschwindet von selbst, sobald der Sensor wieder Werte liefert."
     }
   }
 }

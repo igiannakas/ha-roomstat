@@ -135,8 +135,11 @@ def test_options_update_keeps_learned_values_when_baseline_unchanged():
 
 
 def test_regulation_cycle_feeds_tuner_and_brake(monkeypatch):
+    """The brake belongs to the PI path (deliberate valve control off; with
+    it on, the firm stop anticipates instead)."""
     clock = _Clock(monkeypatch)
-    ent = _make_entity({**AUTOTUNE_ON, "derivative_time_min": 20})
+    ent = _make_entity({**AUTOTUNE_ON, "derivative_time_min": 20,
+                        "stepped_heating_enabled": False})
     _run(_start(ent))
     ent._autotuner.derivative_allowed = False   # keep the manual Td fixed
     ent._apply_active_tuning()

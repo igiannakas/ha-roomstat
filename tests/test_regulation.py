@@ -38,7 +38,14 @@ _reg = _load_module(
     os.path.join(_COMP_DIR, "regulation.py"),
 )
 
-RegulationConfig = _params.RegulationConfig
+def RegulationConfig(**overrides):  # noqa: N802 - stands in for the class
+    """The PI engine's config.  These tests check the feedforward + PI
+    arithmetic, so deliberate valve control is off unless a test turns it on
+    (TestDeliberateControl)."""
+    overrides.setdefault("stepped_enabled", False)
+    return _params.RegulationConfig(**overrides)
+
+
 CorrectionTuning = _params.CorrectionTuning
 PresetConfig = _params.PresetConfig
 FeedforwardPiRegulator = _reg.FeedforwardPiRegulator
@@ -978,3 +985,154 @@ class TestTemperatureRangeLimits:
             state=state,
         )
         assert result.target_for_tado_c <= cfg.max_target_c
+
+
+# -----------------------------------------------------------------------
+# Deliberate valve control
+# -----------------------------------------------------------------------
+
+class TestDeliberateControl:
+    """Heat-ups at the maximum, a coast at the minimum, fine PI adjustments
+    near the target and a firm stop (minimum) ahead of an overshoot
+    (regulation.py)."""
+
+    @staticmethod
+    def _reg(**kw):
+        kw.setdefault("stepped_enabled", True)
+        return FeedforwardPiRegulator(_params.RegulationConfig(**kw))
+
+    @staticmethod
+    def _step(reg, state, room, *, sp=20.0, trv=None, slope_c_per_h=0.0, dt=60.0):
+        res = reg.compute(
+            setpoint_c=sp, room_temp_c=room,
+            tado_internal_c=room if trv is None else trv,
+            time_delta_s=dt, state=state,
+            room_slope_c_per_s=slope_c_per_h / 3600.0,
+        )
+        return res, res.new_state
+
+    def test_large_deficit_heats_with_the_maximum(self):
+        res, st = self._step(self._reg(), RegulationState(), 18.5)
+        assert res.mode == "heat" and res.target_for_tado_c == 25.0
+        assert st.mode == "heat"
+
+    def test_small_deficit_is_a_fine_adjustment_with_the_hold_gain(self):
+        """0.3 °C below: setpoint + (TRV - room) + 4 x error, whatever Kp is
+        configured (it applies only with deliberate control off)."""
+        res, _ = self._step(self._reg(), RegulationState(), 19.7, trv=18.0)
+        assert res.mode == "hold"
+        assert res.target_for_tado_c == pytest.approx(20.0 + (18.0 - 19.7) + 4 * 0.3)
+
+    def test_heat_ends_when_the_coast_will_reach_the_target(self):
+        """Rising 1.5 °C/h with the default 10 min lead: the room coasts
+        another 0.23 °C; heating stops when that lands 0.1 °C short."""
+        reg = self._reg()
+        res, _ = self._step(reg, RegulationState(mode="heat"), 19.6, slope_c_per_h=1.5)
+        assert res.mode == "heat"
+        res, _ = self._step(reg, RegulationState(mode="heat"), 19.7, slope_c_per_h=1.5)
+        assert res.mode == "coast" and res.target_for_tado_c == 5.0
+
+    def test_braking_time_sets_the_lead(self):
+        st = RegulationState(mode="heat")
+        res, _ = self._step(self._reg(), st, 19.25, slope_c_per_h=1.5)
+        assert res.mode == "heat"             # default 10 min lead: 0.23 °C
+        reg = self._reg(tuning=CorrectionTuning(kp=0.8, ki=0.003, td_s=1800.0))
+        res, _ = self._step(reg, st, 19.25, slope_c_per_h=1.5)
+        assert res.mode == "coast"            # 30 min lead: 0.7 °C of coast
+
+    def test_coast_lasts_while_the_room_still_rises_below_target(self):
+        reg = self._reg()
+        res, _ = self._step(reg, RegulationState(mode="coast"), 19.8, slope_c_per_h=1.0)
+        assert res.mode == "coast" and res.target_for_tado_c == 5.0
+        res, _ = self._step(reg, RegulationState(mode="coast"), 19.8, trv=17.0)
+        assert res.mode == "hold"             # risen as far as it will
+        assert res.target_for_tado_c == pytest.approx(20.0 + (17.0 - 19.8) + 4 * 0.2)
+
+    def test_coast_into_the_target_becomes_a_firm_stop(self):
+        reg = self._reg()
+        res, _ = self._step(reg, RegulationState(mode="coast"), 20.0, slope_c_per_h=1.0)
+        assert res.mode == "stop"             # 0.15 °C over within 10 min
+        res, _ = self._step(reg, RegulationState(mode="coast"), 20.0, slope_c_per_h=0.3)
+        assert res.mode == "hold"             # only 0.03 °C more: fine control
+
+    def test_firm_stop_ahead_of_an_overshoot(self):
+        """Stopped while still 0.05 °C below the target, because at 1.2 °C/h
+        it would be 0.13 °C over within 10 min."""
+        reg = self._reg()
+        res, _ = self._step(reg, RegulationState(), 19.95, slope_c_per_h=1.2)
+        assert res.mode == "stop" and res.target_for_tado_c == 5.0
+        res, _ = self._step(reg, RegulationState(), 19.95, slope_c_per_h=0.0)
+        assert res.mode == "hold"
+
+    def test_firm_stop_lasts_until_the_room_heads_back_to_the_target(self):
+        reg = self._reg()
+        stop = RegulationState(mode="stop")
+        res, _ = self._step(reg, stop, 20.08)
+        assert res.mode == "stop"             # flat, 0.08 °C over
+        res, _ = self._step(reg, stop, 20.08, slope_c_per_h=-0.4)
+        assert res.mode == "hold"             # back at the target in 20 min
+        res, _ = self._step(reg, stop, 20.01)
+        assert res.mode == "hold"             # at the target
+
+    def test_rising_room_is_not_heated(self):
+        """Rising fast enough to get there anyway (e.g. sun): no heat-up."""
+        res, _ = self._step(self._reg(), RegulationState(), 18.9, slope_c_per_h=9.0)
+        assert res.mode != "heat"
+
+    @pytest.mark.parametrize("mode, room, trv", [
+        ("heat", 18.0, 18.0), ("coast", 19.9, 22.0), ("stop", 20.2, 22.0),
+    ])
+    def test_integral_only_moves_in_hold(self, mode, room, trv):
+        reg = self._reg(integral_deadband_c=5.0)
+        res, st = self._step(reg, RegulationState(integral_c=0.4, mode=mode),
+                             room, trv=trv, dt=600.0,
+                             slope_c_per_h=1.0 if mode == "coast" else 0.0)
+        assert res.mode == mode
+        assert st.integral_c == pytest.approx(0.4)
+        res, st = self._step(reg, RegulationState(integral_c=0.4), 19.9, dt=600.0)
+        assert res.mode == "hold" and st.integral_c > 0.4
+
+    def test_hold_uses_neither_gain_scheduling_nor_the_brake(self):
+        """The firm stop anticipates instead of the brake; Td is the
+        heat-up's lead."""
+        reg = self._reg(gain_scheduling_enabled=True,
+                        tuning=CorrectionTuning(kp=0.8, ki=0.003, td_s=1800.0))
+        res, _ = self._step(reg, RegulationState(), 19.6, slope_c_per_h=0.2)
+        assert res.mode == "hold"
+        assert res.d_correction_c == 0.0
+        assert res.p_correction_c == pytest.approx(4 * 0.4)
+
+    def test_off_means_pi_only(self):
+        reg = self._reg(stepped_enabled=False)
+        res, st = self._step(reg, RegulationState(mode="heat"), 18.0)
+        assert res.mode == "hold" and st.mode == "hold"
+        assert res.target_for_tado_c < 25.0
+
+    def test_unknown_stored_mode_starts_in_hold(self):
+        res, _ = self._step(self._reg(), RegulationState(mode="bogus"), 18.5)
+        assert res.mode == "heat"
+        res, _ = self._step(self._reg(), RegulationState(mode="bogus"), 19.9)
+        assert res.mode == "hold"
+
+    def test_bad_slope_is_ignored(self):
+        res, _ = self._step(self._reg(), RegulationState(mode="heat"), 19.0,
+                            slope_c_per_h=float("nan"))
+        assert res.mode == "heat"
+
+    def test_non_finite_input_keeps_the_mode(self):
+        res = self._reg().compute(setpoint_c=20.0, room_temp_c=float("nan"),
+                                  tado_internal_c=19.0, time_delta_s=60.0,
+                                  state=RegulationState(mode="heat"))
+        assert res.new_state.mode == "heat"
+
+
+class TestResumeMode:
+    @pytest.mark.parametrize("held, mode", [
+        (25.0, "heat"), (24.96, "heat"), (5.0, "coast"), (18.5, "hold"),
+        (None, "hold"), (float("nan"), "hold"),
+    ])
+    def test_from_what_the_trv_holds(self, held, mode):
+        assert _reg.resume_mode(held, _params.RegulationConfig()) == mode
+
+    def test_off_means_hold(self):
+        assert _reg.resume_mode(25.0, _params.RegulationConfig(stepped_enabled=False)) == "hold"

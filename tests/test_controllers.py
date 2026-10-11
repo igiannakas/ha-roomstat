@@ -788,12 +788,10 @@ class TestCommandPacer:
 
 
 # ---------------------------------------------------------------------------
-# Pauses and a lost room sensor
+# Pauses
 # ---------------------------------------------------------------------------
 
 integration_step = _ctrl_mod.integration_step
-update_hold_offset = _ctrl_mod.update_hold_offset
-sensor_lost_target = _ctrl_mod.sensor_lost_target
 
 
 class TestIntegrationStep:
@@ -811,35 +809,6 @@ class TestIntegrationStep:
         assert integration_step(900.0, 1000.0, 120.0) == 0.0
 
 
-class TestHoldOffset:
-
-    def test_first_sample(self):
-        assert update_hold_offset(None, 1.6, 60, 3600, 3.0) == 1.6
-
-    def test_slow_average(self):
-        assert update_hold_offset(1.0, 2.0, 360, 3600, 3.0) == pytest.approx(1.1)
-
-    def test_long_gap_takes_the_sample(self):
-        assert update_hold_offset(1.0, 2.0, 7200, 3600, 3.0) == 2.0
-
-    def test_faulty_sample_is_limited(self):
-        assert update_hold_offset(None, 15.0, 60, 3600, 3.0) == 3.0
-        assert update_hold_offset(None, -9.0, 60, 3600, 3.0) == -3.0
-
-
-class TestSensorLostTarget:
-
-    def test_target_plus_offset(self):
-        assert sensor_lost_target(20.0, 1.53, 5.0, 25.0) == 21.5
-
-    def test_unknown_offset_holds_the_target(self):
-        assert sensor_lost_target(20.0, None, 5.0, 25.0) == 20.0
-
-    def test_clamped(self):
-        assert sensor_lost_target(24.0, 3.0, 5.0, 25.0) == 25.0
-        assert sensor_lost_target(5.0, -2.0, 5.0, 25.0) == 5.0
-
-
 # ---------------------------------------------------------------------------
 # Configured entities that disappear
 # ---------------------------------------------------------------------------
@@ -851,15 +820,18 @@ replace_entity_setting = _ctrl_mod.replace_entity_setting
 
 class TestEntityProblem:
 
-    @pytest.mark.parametrize("has_state, registered, disabled, expected", [
-        (True, True, False, None),      # fine (also when unavailable)
-        (False, True, False, None),     # registered, integration still loading
-        (True, False, False, None),     # YAML entity without a unique id
-        (False, False, False, "missing"),
-        (False, True, True, "disabled"),
+    @pytest.mark.parametrize("has_state, registered, disabled, unavailable, expected", [
+        (True, True, False, False, None),
+        (False, True, False, False, None),     # registered, integration still loading
+        (True, False, False, False, None),     # YAML entity without a unique id
+        (False, False, False, False, "missing"),
+        (False, True, True, False, "disabled"),
+        (True, True, False, True, "unavailable"),
+        (False, True, False, True, None),      # no state yet: still loading
+        (False, False, False, True, "missing"),
     ])
-    def test_problem(self, has_state, registered, disabled, expected):
-        assert entity_problem(has_state, registered, disabled) == expected
+    def test_problem(self, has_state, registered, disabled, unavailable, expected):
+        assert entity_problem(has_state, registered, disabled, unavailable) == expected
 
 
 class TestMissingEntityWatch:
@@ -877,6 +849,14 @@ class TestMissingEntityWatch:
         w.update(1200, {"trv": None})
         assert w.update(1400, {"trv": "missing"}) == {}
         assert w.update(1700, {"trv": "missing"}) == {"trv": "missing"}
+
+    def test_delay_per_problem(self):
+        w = MissingEntityWatch(300, {"unavailable": 900})
+        assert w.update(1000, {"room": "unavailable", "trv": "missing"}) == {}
+        assert w.update(1300, {"room": "unavailable", "trv": "missing"}) == {
+            "trv": "missing"}
+        assert w.update(1900, {"room": "unavailable", "trv": "missing"}) == {
+            "room": "unavailable", "trv": "missing"}
 
     def test_no_longer_configured_is_forgotten(self):
         w = MissingEntityWatch(300)

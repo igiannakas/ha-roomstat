@@ -86,8 +86,10 @@ Read this before changing `regulation.py` or `parameters.py`.
 - **Loop gain is (1 + Kp).** The feedforward cancels the TRV's own reading, so
   the Tado controller acts on `(1 + Kp)·error + I + brake`. Kp = 0 does not
   mean "no proportional action".
-- **PI is deliberately small** (defaults Kp 0.8, Ki 0.003). Larger values
-  overshoot because of the radiator → room lag.
+- **PI is deliberately small** (defaults Kp 0.8, Ki 0.003) on the plain PI
+  path (deliberate valve control off). Larger values overshoot heat-ups
+  because of the radiator → room lag. Deliberate control handles heat-ups
+  separately and holds with a high gain instead, see below.
 - **Integral deadband (0.3 °C):** the integral only accumulates near the
   target, and decays outside it, so a cold start never winds it up.
 - **Anti-windup:** no integration while the command is saturated, plus the
@@ -95,13 +97,68 @@ Read this before changing `regulation.py` or `parameters.py`.
 - **Command clamp 5–25 °C.** Tado V3+ rejects anything above 25 (upstream
   sent up to 30, so V3+ rooms never heated). Clamp in the regulator, not at
   send time, so anti-windup stays honest.
-- **Gain scheduling** (optional) scales Kp by error size. It adds little with
-  Tado, because the valve is already fully open far from the target.
+- **The Tado needs strong signals.** Recorder data (Oct 2026, V3+ over
+  HomeKit, heating % from the cloud): the valve is fully open only when its
+  setpoint is ≥ ~5 °C above its own reading; at +1..+3 °C it throttles and
+  pulses (30–40 % average in the living room), because its controller
+  anticipates on its own reading, which climbs fast next to the radiator.
+  It stays shut only at ≤ ~−2 °C; just below its reading it re-opens as the
+  radiator cools. The PI push is only (1 + Kp)·error, i.e. weak.
+- **Deliberate valve control** (option `stepped_heating_enabled`, default
+  on; code and config keep the `stepped_*` names). Four modes:
+  - `heat` (maximum): a deficit ≥ `stepped_heat_enter_c` (1 °C). Ends when
+    the coast is predicted to land within `stepped_heat_exit_c` (0.1 °C):
+    error − lead × rise ≤ 0.1, lead = Td or `stepped_lead_s` (10 min).
+  - `coast` (minimum): after a heat-up, while the room is below the target
+    and still rising.
+  - `hold`: the feedforward + PI command with `stepped_hold_kp` (4), no
+    brake, no gain scheduling. The configured Kp only applies with the
+    option off (auto-tune's Kp moves are then moot; its Ki applies, and its
+    Td is the heat-up lead). The integral only moves in hold.
+  - `stop` (minimum): a firm stop ahead of an overshoot, once error −
+    `stepped_stop_lead_s` (10 min) × rise ≤ −`stepped_stop_c` (0.1 °C).
+    Released once error + `stepped_release_lead_s` (20 min) × fall ≥
+    −`stepped_release_c` (0.02 °C), so the radiator is warm again in time.
+
+  Everything but hold is a strong command: it skips the rate limit once
+  (not on retries). A reload resumes from what the TRV holds
+  (`resume_mode`: maximum → heat, minimum → coast). A heat-up is ended
+  (coast) when the room sensor is lost.
+  Why this shape (simulated in the fitted rooms below, valve modulating or
+  pulsing): only 25/5 (the first version) can't dose, so near the target
+  it is a relay (0.06–0.12 °C RMS); the high-gain hold with the firm stop
+  roughly halves that. Only the high-gain PI, without full-power heat-ups,
+  overshoots +0.6 °C in rooms with quicker radiators. Without the firm stop
+  the valve keeps heating just below its reading (+0.3 °C peaks). Tried
+  and dropped: heating at target + 1.5 °C instead of 25 (slower, not
+  tighter), stopping at the target itself (2–3× the commands), cancelling
+  the Tado's own anticipation (+40–50 % commands for ~5 %), Kp above 4
+  (commands rise fast for little gain).
+- **Stock values come from real rooms.** `tests/plant_sim.py`
+  `LIVING_ROOM_FIT` / `SECOND_BEDROOM_FIT` were fitted to the morning of
+  11 Oct 2026 by replaying the real valve setpoints and fitting room,
+  radiator, TRV and Tado-controller parameters to the room sensor, TRV
+  reading and cloud heating % (RMS 0.14 / 0.08 °C). Findings: a strongly
+  non-linear valve (30 % open ≈ 50–65 % flow), warm radiator air reaching
+  the room sensor (+0.5 / +1.3 °C at full output), radiator lag 30–35 min,
+  and the Tado anticipating on its own reading (up to 13 min). In those
+  rooms and two generic ones, at 5 and 11 °C outdoors, with the valve
+  modulating or pulsing (opening fully for part of a 20-min cycle) and
+  auto-tune on, the stock values hold 0.04–0.08 °C RMS on average,
+  heat-up overshoot ≤ ~0.2 °C, 45–100 commands a day at 180 s / 0.3 °C;
+  only 25/5: 0.06–0.12 °C, 20–60 commands; the old PI: 0.19–0.27 °C, up to
+  0.6 °C overshoot, 70–110 commands. Sunny days overshoot with every
+  variant (nothing can cool). Re-check against these presets when changing
+  them.
+- **Gain scheduling** (optional) scales Kp by error size, on the plain PI
+  path only. Its old premise ("the valve is already fully open far from the
+  target") is wrong for V3+, see above.
 - **One-sided brake:** `−(1 + Kp)·Td·max(0, slope)`, clamped to [−2, 0] °C, on
-  a Theil–Sen slope of the room sensor. It only acts while the room is rising
-  and can only lower the command, so a falling reading (window, glitch) can
-  never add heat. Off when the sensor is degraded. **Never make it
-  two-sided.**
+  a Theil–Sen slope of the room sensor, on the plain PI path (deliberate
+  control anticipates with the heat-up lead and the firm stop). It only acts
+  while the room is rising and can only lower the command, so a falling
+  reading (window, glitch) can never add heat. Off when the sensor is
+  degraded. **Never make it two-sided.**
 - **Rate limit:** default 180 s between commands to save TRV batteries. Don't
   lower the default.
 - **TRV fallback** (option `fallback_entity_id`): a second climate entity for
@@ -147,14 +204,14 @@ is updating.
   the cycle sends OFF again if the TRV is not off, at most once per rate-limit
   interval. OFF → HEAT runs the regulation even if the mode change fails;
   `set_temperature` carries `hvac_mode: heat` anyway.
-- **Room sensor lost:** a gap is bridged with the last value for the sensor
+- **Room sensor lost:** the room sensor is meant to be reliable (owner's
+  decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
-  the TRV is told the target plus the hold offset (`sensor_lost_target`), so
-  it holds the room on its own reading instead of keeping its last command
-  (possibly 25 °C mid heat-up). The hold offset is a slow average (1 h) of
-  TRV − room, learned only within 0.5 °C of the target, limited to ±3 °C, and
-  saved in the restore data (`hold_offset_c`). Unknown → 0. PI state and the
-  tuner are left alone.
+  nothing is sent and the TRV keeps its last setpoint; the loss is logged
+  once, and after `ROOM_SENSOR_UNAVAILABLE_REPORT_S` (15 min) it becomes a
+  repair. Don't hold the room on the TRV's own reading: the Tado offsets
+  (−5 to −9.9 °C here) and the radiator's heat make its relation to the
+  room swing by 10 °C, so any fixed "target + offset" overheats some rooms.
 - **Pauses and the clock:** the integral covers at most
   `MAX_INTEGRATION_STEP_S` (2 cycles) per cycle (`integration_step`). A last
   command time in the future (clock went back) is reset, so commands are not
@@ -171,7 +228,8 @@ is updating.
   TRV into the entry data, the rest into the options; empty removes an
   optional setting), and the update listener reloads the room. Repairs are
   not persistent, clear themselves when the entity is back, and are removed
-  with the room.
+  with the room. A room sensor that exists but has no usable value for 15
+  min is reported too (`entity_unavailable`, no fix flow).
 
 ## Auto-tune
 
@@ -181,6 +239,13 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   demand turns negative (the "coast"). That causes the heat-up overshoot.
   Lowering Kp barely helps, because the demand only crosses zero when the
   error does. The brake moves that crossing earlier by Td × slope.
+- With deliberate valve control the demand crosses zero at the `coast`
+  command, so the measured coast is the radiator's own (about 0–20 min,
+  short where warm radiator air reaches the sensor), and Td is the heat-up
+  lead. A demand ≥ `heatup_reheat_demand_c` after the crossing
+  (a top-up, e.g. the hold picking up a shortfall) ends the episode: counting the top-up as coast inflated Td,
+  which ended the next heat-up earlier, needing another top-up (a loop the
+  simulator showed: Td 28 → 44 min in five days).
 - The tuner learns only from everyday episodes, never from test signals:
   - **heat-ups** (setpoint step ≥ 0.5 °C with the room ≥ 0.4 °C below) give
     the dead time θ (tangent method), the heating rate, the coast and the

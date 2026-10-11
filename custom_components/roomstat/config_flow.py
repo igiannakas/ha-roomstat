@@ -33,6 +33,7 @@ from .const import (
     CONF_SCHEDULE_OVERRIDE_MIN,
     CONF_SENSOR_GRACE_S,
     CONF_SOURCE_ENTITY_ID,
+    CONF_STEPPED_HEATING,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
     CONF_WINDOW_CLOSE_DELAY_S,
@@ -334,6 +335,10 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 vol.Required("pi_controller"): section(
                     vol.Schema(
                         {
+                            vol.Required(
+                                CONF_STEPPED_HEATING,
+                                default=opts.get(CONF_STEPPED_HEATING, defaults.stepped_enabled),
+                            ): selector.BooleanSelector(),
                             vol.Required(
                                 CONF_CORRECTION_KP,
                                 default=opts.get(CONF_CORRECTION_KP, defaults.tuning.kp),

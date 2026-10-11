@@ -49,19 +49,15 @@ TRV_COMMAND_TIMEOUT_S: float = 10.0
 # gap, HA busy or restarting) cannot add a large step in one go.
 MAX_INTEGRATION_STEP_S: float = 2 * DEFAULT_CONTROL_INTERVAL_S
 
-# Room sensor gone for longer than the grace period: the TRV is told the
-# target plus the usual offset between its own reading and the room, so it
-# holds the room by itself instead of keeping whatever it was last sent
-# (possibly 25 °C mid heat-up).  The offset is a slow average, taken only
-# while the room is near its target, and limited to +-3 °C.
-HOLD_OFFSET_TAU_S: float = 3600.0
-HOLD_OFFSET_NEAR_TARGET_C: float = 0.5
-HOLD_OFFSET_LIMIT_C: float = 3.0
-
 # A configured entity (TRV, room sensor, helpers) that was deleted, renamed or
 # disabled is reported as a Home Assistant repair after this long, counted
 # only once HA has started (integrations load in any order).
 ENTITY_MISSING_REPORT_S: float = 300.0
+
+# A room sensor without a usable reading for this long is reported as a
+# repair too.  Nothing else happens meanwhile: the radiator keeps the last
+# setpoint it was sent (the room sensor is expected to be reliable).
+ROOM_SENSOR_UNAVAILABLE_REPORT_S: float = 900.0
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +132,9 @@ class AutotuneConfig:
     heatup_min_error_c: float = 0.4    # room must be at least this far below
     heatup_max_s: float = 5 * 3600.0   # give up if the target is not reached
     heatup_settle_s: float = 45 * 60.0 # flat/falling this long after the peak
+    # A TRV demand this high after the demand went <= 0 means heating
+    # restarted (a stepped top-up): the episode ends there.
+    heatup_reheat_demand_c: float = 1.0
     # Smaller steps still show overshoot and coast, but the dead time and
     # heating rate need a bigger rise to stand out from sensor noise.
     theta_min_step_c: float = 0.8
@@ -264,6 +263,50 @@ class RegulationConfig:
     # Room slopes below this (°C/h) are treated as flat, so sensor jitter
     # during a steady hold does not wiggle the command.
     derivative_slope_deadband_c_per_h: float = 0.1
+
+    # Deliberate valve control (regulation.py).  The Tado's own controller
+    # opens the valve fully only when its setpoint is well above its own
+    # reading (about +5 °C) and stays shut only well below it (about -2 °C);
+    # in between it throttles, pulses and re-opens by itself as its reading
+    # falls.  So heat-ups run at full power and end with a firm stop, and
+    # near the target fine adjustments are cut by a firm stop ahead of an
+    # overshoot.
+    #
+    # Stock values from two real rooms (11 Oct 2026, Tado V3+ over HomeKit;
+    # tests/plant_sim.py LIVING_ROOM_FIT / SECOND_BEDROOM_FIT) and two
+    # generic ones, at 5 and 11 °C outdoors, with a valve that modulates and
+    # one that pulses, auto-tune on: room RMS error 0.04-0.08 °C on average
+    # while holding (only 25/5: 0.06-0.12; the old PI: 0.19-0.27), heat-up
+    # overshoot <= ~0.2 °C, 45-100 commands a day (25/5: 20-60; old PI:
+    # 70-110).
+    stepped_enabled: bool = True
+    # Heat-ups: a deficit of stepped_heat_enter_c or more heats at full power
+    # (the maximum) until the heat still in the radiator is predicted to
+    # carry the room to within stepped_heat_exit_c of the target: error -
+    # lead x rise rate, lead = the braking time (learned by auto-tune) or
+    # stepped_lead_s.  Then the minimum while the room still rises (coast).
+    # 0.1 stops a little short: the slope estimate lags while the room is
+    # still accelerating, and the hold below picks up any shortfall.
+    stepped_heat_enter_c: float = 1.0
+    stepped_heat_exit_c: float = 0.1
+    stepped_lead_s: float = 600.0
+    # Near the target: the feedforward + PI command with this gain (the
+    # configured Kp applies only with deliberate control off).  A Tado
+    # answers small pushes late and partly, so the gain is high: the push is
+    # (1 + 4) x error.  In the fitted rooms 3-6 all hold within 0.03 °C;
+    # above 4, commands rise quickly for little gain.
+    stepped_hold_kp: float = 4.0
+    # ... with a firm stop (the minimum) once the room is predicted to be
+    # stepped_stop_c over the target within stepped_stop_lead_s, so the
+    # radiator's leftover heat lands at most there.  Released once the room
+    # is predicted to fall back within stepped_release_c of the target in
+    # stepped_release_lead_s, so the radiator is warm again when needed.
+    # Without the firm stop the valve keeps heating just below its reading
+    # (0.05-0.08 °C RMS, +0.3 °C peaks).
+    stepped_stop_c: float = 0.1
+    stepped_stop_lead_s: float = 600.0
+    stepped_release_c: float = 0.02
+    stepped_release_lead_s: float = 1200.0
 
     # Adaptive gain scheduling: scale Kp based on error magnitude
     gain_scheduling_enabled: bool = True

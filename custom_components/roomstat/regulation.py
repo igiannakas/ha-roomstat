@@ -36,6 +36,44 @@ moves that zero-crossing earlier by Td * slope, i.e. it anticipates the
 heat already in the pipe.  It is one-sided by design: it can only ever
 *lower* the command, so a falling reading (open window, sensor glitch)
 can never make it add heat, and it is clamped to ``derivative_max_c``.
+It belongs to the plain PI path: with deliberate valve control (below) the
+heat-up lead and the firm stop do this job.
+
+Deliberate valve control (on by default)
+----------------------------------------
+The Tado controller is not a simple thermostat.  Recorder data (October
+2026, Tado V3+ over HomeKit, heating % from the cloud) shows the valve fully
+open only when its setpoint is about 5 °C or more above its own reading; at
++1..+3 °C it throttles and pulses (on average 30-40 % in the living room),
+because it anticipates on its own reading, which climbs fast next to the
+radiator.  It only stays shut at about 2 °C or more below its reading; just
+below it, it re-opens by itself as the radiator cools.  With the small PI
+gain the push ((1 + kp) * error) is weak: heat-ups run on a part-open valve,
+and the room overshoots while the Tado keeps heating at a setpoint just
+below its reading.
+
+So Roomstat uses strong commands where they matter, and fine ones near the
+target:
+
+* ``heat``: a deficit of ``stepped_heat_enter_c`` or more (a heat-up).
+  Command the maximum (one command, valve fully open) until the heat still
+  in the radiator is predicted to carry the room to the target:
+  error - lead * rise_rate <= ``stepped_heat_exit_c``, with lead = Td (the
+  braking time, learned by auto-tune from exactly this coast) or
+  ``stepped_lead_s``.
+* ``coast``: after a heat-up, the minimum (valve shut) while the room is
+  below the target and still rising, so the leftover heat lands it.
+* ``hold``: near the target, the feedforward + PI command with the high
+  gain ``stepped_hold_kp`` (no brake: the firm stop below anticipates).
+* ``stop``: the minimum, ahead of an overshoot: once the room is predicted
+  to be ``stepped_stop_c`` over the target within ``stepped_stop_lead_s``.
+  Released (back to hold) once it is predicted to fall back within
+  ``stepped_release_c`` of the target in ``stepped_release_lead_s``, so the
+  radiator is warm again by the time the room needs it.
+
+The integral only moves in hold.  In two rooms fitted to real data this
+holds within 0.04-0.05 °C RMS on average (only full/shut commands:
+0.06-0.12; parameters.py).
 
 Anti-windup (two mechanisms):
 1. The integral freezes whenever the output is saturated (clamped at max or
@@ -58,6 +96,14 @@ _LOGGER = logging.getLogger(__name__)
 # 0.01 °C is 1/10 of the Tado quantisation step (0.1 °C) – effectively zero.
 _SATURATION_TOLERANCE_C = 0.01
 
+# Deliberate valve control modes (see the module docstring); hold = the PI
+# command (always, when deliberate control is off).
+MODE_HOLD = "hold"
+MODE_HEAT = "heat"
+MODE_COAST = "coast"
+MODE_STOP = "stop"
+MODES = (MODE_HOLD, MODE_HEAT, MODE_COAST, MODE_STOP)
+
 
 # ---------------------------------------------------------------------------
 # State & result data classes
@@ -68,6 +114,7 @@ class RegulationState:
     """Mutable state carried between regulation cycles."""
 
     integral_c: float = 0.0
+    mode: str = MODE_HOLD
 
 
 @dataclass
@@ -82,6 +129,25 @@ class RegulationResult:
     is_saturated: bool             # True when output was clamped
     new_state: RegulationState
     d_correction_c: float = 0.0    # derivative brake, always <= 0 (diagnostic)
+    mode: str = MODE_HOLD          # heat / coast / hold (PI) / stop
+
+
+def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
+    """The mode to start in, from the setpoint the TRV holds.
+
+    A reload (e.g. a preset temperature change) or a restart in the middle of
+    a heat-up carries it on (and it ends as usual), and one while the valve
+    is shut lets the coast finish.  Anything else starts in hold.
+    """
+    if not config.stepped_enabled or trv_setpoint_c is None:
+        return MODE_HOLD
+    if not math.isfinite(trv_setpoint_c):
+        return MODE_HOLD
+    if trv_setpoint_c >= config.max_target_c - 0.05:
+        return MODE_HEAT
+    if trv_setpoint_c <= config.min_target_c + 0.05:
+        return MODE_COAST
+    return MODE_HOLD
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +212,41 @@ class FeedforwardPiRegulator:
         brake = (1.0 + max(0.0, config.tuning.kp)) * td_s * rising
         return -min(max(0.0, config.derivative_max_c), brake)
 
+    @staticmethod
+    def _next_mode(
+        mode: str, error_c: float, room_slope_c_per_s: float | None,
+        config: RegulationConfig,
+    ) -> str:
+        """The mode for this cycle (see the module docstring)."""
+        if not config.stepped_enabled:
+            return MODE_HOLD
+        rising = falling = 0.0
+        if room_slope_c_per_s is not None and math.isfinite(room_slope_c_per_s):
+            deadband = config.derivative_slope_deadband_c_per_h / 3600.0
+            rising = max(0.0, room_slope_c_per_s - deadband)
+            falling = max(0.0, -room_slope_c_per_s - deadband)
+        td_s = config.tuning.td_s
+        lead_s = td_s if math.isfinite(td_s) and td_s > 0 else config.stepped_lead_s
+        # Where the room ends up once the heat still in the radiator is out.
+        landing = error_c - lead_s * rising
+
+        if mode == MODE_HEAT:
+            return MODE_COAST if landing <= config.stepped_heat_exit_c else MODE_HEAT
+        if error_c >= config.stepped_heat_enter_c and landing > config.stepped_heat_exit_c:
+            return MODE_HEAT
+        if mode == MODE_COAST and error_c > 0 and rising > 0:
+            return MODE_COAST
+        # Near the target: fine adjustments, with a firm stop ahead of an
+        # overshoot that lasts until the room is heading back to the target.
+        if error_c - config.stepped_stop_lead_s * rising <= -config.stepped_stop_c:
+            return MODE_STOP
+        if (
+            mode == MODE_STOP
+            and error_c + config.stepped_release_lead_s * falling < -config.stepped_release_c
+        ):
+            return MODE_STOP
+        return MODE_HOLD
+
     def compute(
         self,
         setpoint_c: float,
@@ -198,6 +299,7 @@ class FeedforwardPiRegulator:
                     error_c=0.0,
                     is_saturated=False,
                     new_state=state,
+                    mode=MODE_HOLD,
                 )
 
         # 1. Feedforward – compensate for sensor-placement offset
@@ -206,24 +308,43 @@ class FeedforwardPiRegulator:
         # 2. Room error
         error = setpoint_c - room_temp_c
 
-        # 3. Proportional correction (adaptive gain scheduling)
-        effective_kp = self._effective_kp(error, self.cfg)
+        # 3. Proportional correction (adaptive gain scheduling; with
+        # deliberate control the fixed hold gain)
+        stepped = self.cfg.stepped_enabled
+        effective_kp = (
+            self.cfg.stepped_hold_kp if stepped else self._effective_kp(error, self.cfg)
+        )
         p_correction = effective_kp * error
 
         # 4. Integral correction (carried from previous cycles)
         i_correction = state.integral_c
 
-        # 4b. Derivative brake (one-sided, clamped; 0 when Td = 0)
-        d_correction = self._derivative_brake(room_slope_c_per_s, self.cfg)
+        # 4b. Derivative brake (one-sided, clamped; 0 when Td = 0).  With
+        # deliberate control the firm stop anticipates instead, and Td is the
+        # heat-up's lead.
+        d_correction = (
+            0.0 if stepped else self._derivative_brake(room_slope_c_per_s, self.cfg)
+        )
 
         # 5. Combine: base target + corrections
         base_target = setpoint_c + feedforward_offset
         raw_command = base_target + p_correction + i_correction + d_correction
 
+        # 5b. Deliberate valve control: heat (maximum), coast or stop
+        # (minimum), or the PI command (hold).
+        prev_mode = state.mode if state.mode in MODES else MODE_HOLD
+        mode = self._next_mode(prev_mode, error, room_slope_c_per_s, self.cfg)
+        if mode == MODE_HEAT:
+            command = self.cfg.max_target_c
+        elif mode in (MODE_COAST, MODE_STOP):
+            command = self.cfg.min_target_c
+        else:
+            command = raw_command
+
         # 6. Clamp to safe actuator range
         final_command = max(
             self.cfg.min_target_c,
-            min(self.cfg.max_target_c, raw_command),
+            min(self.cfg.max_target_c, command),
         )
         is_saturated = abs(final_command - raw_command) > _SATURATION_TOLERANCE_C
 
@@ -233,8 +354,9 @@ class FeedforwardPiRegulator:
             saturated_high = raw_command > self.cfg.max_target_c
             saturated_low = raw_command < self.cfg.min_target_c
 
-            # Mechanism A: block integration during output saturation
-            may_integrate = True
+            # Mechanism A: block integration during output saturation, and
+            # whenever a strong command replaces the PI command.
+            may_integrate = mode == MODE_HOLD
             if saturated_high and error > 0:
                 may_integrate = False
             if saturated_low and error < 0:
@@ -255,9 +377,7 @@ class FeedforwardPiRegulator:
                 new_integral *= self.cfg.integral_decay
 
         # 8. Build result
-        new_state = RegulationState(
-            integral_c=new_integral,
-        )
+        new_state = RegulationState(integral_c=new_integral, mode=mode)
 
         return RegulationResult(
             target_for_tado_c=round(final_command, 1),
@@ -268,4 +388,5 @@ class FeedforwardPiRegulator:
             is_saturated=is_saturated,
             new_state=new_state,
             d_correction_c=round(d_correction, 2),
+            mode=mode,
         )

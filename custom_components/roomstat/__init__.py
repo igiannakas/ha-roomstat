@@ -15,7 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .card import async_register_card
 from .climate_controllers import MissingEntityWatch, plausible_c, read_trv
 from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, CONF_FALLBACK_ENTITY_ID, DOMAIN
-from .parameters import ENTITY_MISSING_REPORT_S
+from .parameters import ENTITY_MISSING_REPORT_S, ROOM_SENSOR_UNAVAILABLE_REPORT_S
 from .repairs import async_check_entities, async_delete_entity_issues
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,8 +44,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 1. Ensure DOMAIN dict exists in hass.data
     hass.data.setdefault(DOMAIN, {})
 
-    # A deleted, renamed or disabled entity becomes a repair (repairs.py).
-    missing_watch = MissingEntityWatch(ENTITY_MISSING_REPORT_S)
+    # A deleted, renamed or disabled entity, or a room sensor that stays
+    # unavailable, becomes a repair (repairs.py).
+    missing_watch = MissingEntityWatch(
+        ENTITY_MISSING_REPORT_S, {"unavailable": ROOM_SENSOR_UNAVAILABLE_REPORT_S}
+    )
 
     # 2. Define the data update method
     async def async_update_data():
@@ -98,7 +101,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_max_temp"] = trv["max"]
             data[f"{prefix}_off"] = trv["off"]
 
-        async_check_entities(hass, entry, missing_watch, time.time())
+        async_check_entities(
+            hass, entry, missing_watch, time.time(),
+            int(ROOM_SENSOR_UNAVAILABLE_REPORT_S // 60),
+        )
         return data
 
     # 3. Create the Coordinator

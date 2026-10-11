@@ -177,6 +177,7 @@ class TestDerivativeBrake:
         c = P.RegulationConfig()
         c.tuning = P.CorrectionTuning(kp=kp, ki=0.0, td_s=td)
         c.gain_scheduling_enabled = False
+        c.stepped_enabled = False      # the PI brake itself
         return c
 
     def _run(self, cfg, slope):
@@ -893,6 +894,7 @@ class TestEpisodeAcrossRestart:
             c = P.RegulationConfig()
             c.tuning = P.CorrectionTuning(kp=0.6, ki=0.002)
             c.gain_fine_threshold_c = 1.0
+            c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
             sim = RoomSim(PlantParams(**LIVING), R, c, ProxySettings(), y0=19.0,
                           tuner=_tuner(), autotune_module=A, seed=3)
             if restart_at_h is not None:
@@ -933,6 +935,7 @@ def _closed_loop(plant_kw, kp, ki, days, sched=SCHED, td=0.0, deriv=True, cfg=No
     c = P.RegulationConfig()
     c.tuning = P.CorrectionTuning(kp=kp, ki=ki, td_s=td)
     c.gain_fine_threshold_c = 1.0
+    c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
     tuner = _tuner(kp=kp, ki=ki, td=td, deriv=deriv, cfg=cfg) if tune else None
     sim = RoomSim(PlantParams(**plant_kw), R, c, ProxySettings(), y0=19.0,
                   tuner=tuner, autotune_module=A, seed=3)
@@ -1015,6 +1018,7 @@ def test_production_settings_with_sunny_days_stay_sane():
     c = P.RegulationConfig()
     c.tuning = P.CorrectionTuning(kp=0.6, ki=0.002)
     c.gain_fine_threshold_c = 1.0
+    c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
     tuner = _tuner()
     sim = RoomSim(PlantParams(**LIVING, extra_gain=sun), R, c,
                   ProxySettings(min_command_interval_s=180, min_change_threshold_c=0.3),
@@ -1027,3 +1031,27 @@ def test_production_settings_with_sunny_days_stay_sane():
     quiet = [d for d in range(14, 21) if not sunny[d]]
     assert quiet
     assert max(_evening_overshoot(tr, d) for d in quiet) < 0.3
+
+
+def test_heating_again_after_the_stop_ends_the_heat_up():
+    """A stepped top-up (or the PI asking for heat again) ends the coast:
+    the new heat must not count as coast, or the braking time would grow
+    with every top-up."""
+    t = _tuner()
+    _feed(t, 0.0, 18.0, 18.5)
+    room = 18.5
+    for k in range(1, 46):                        # heat at 2 °C/h for 45 min
+        room += 2.0 / 60
+        _feed(t, k * 60.0, 20.0, room, demand=5.0)
+    for k in range(46, 61):                       # stopped: coasts 0.2 °C
+        room += 0.2 / 15
+        _feed(t, k * 60.0, 20.0, room, demand=-8.0)
+    for k in range(61, 66):                       # flat, short of the target
+        _feed(t, k * 60.0, 20.0, room, demand=-8.0)
+    assert t.phase == A.PHASE_HEATUP
+    _feed(t, 66 * 60.0, 20.0, room, demand=5.0)   # top-up starts
+    assert t.phase != A.PHASE_HEATUP
+    assert t._counters["heatups"] == 1
+    m = t._heatups[-1]
+    assert m.coast_rise_c == pytest.approx(0.2, abs=0.06)
+    assert not m.truncated

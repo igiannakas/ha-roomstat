@@ -84,12 +84,14 @@
             "name": "PI Controller",
             "description": "Proportional-integral controller tuning parameters.",
             "data": {
+              "stepped_heating_enabled": "Deliberate valve control",
               "correction_kp": "Proportional correction (Kp)",
               "correction_ki": "Integral correction (Ki)",
               "integral_deadband_c": "Integral precision zone",
               "derivative_time_min": "Heat-up braking time (derivative)"
             },
             "data_description": {
+              "stepped_heating_enabled": "Roomstat heats up at full power and shuts the valve early enough for the radiator's leftover heat to reach the target, because a Tado answers small changes late and only partly. Near the target it adjusts the valve firmly and shuts it a little ahead of an overshoot. Off: the PI controller below adjusts the valve's setpoint (Kp and gain scheduling only apply then).",
               "correction_kp": "Proportional gain of the PI controller. Higher values react faster to temperature deviations.",
               "correction_ki": "Integral gain of the PI controller. Higher values correct persistent offsets more aggressively.",
               "integral_deadband_c": "Integral only accumulates when the error is within this zone. Prevents overshoot during large transients.",
@@ -309,6 +311,10 @@
           "entry_removed": "This Roomstat room no longer exists."
         }
       }
+    },
+    "entity_unavailable": {
+      "title": "{room}: no reading from {entity_id}",
+      "description": "The Roomstat room **{room}** has had no usable reading from its room sensor `{entity_id}` for {minutes} minutes. The room isn't regulated meanwhile: the radiator keeps its last setting.\n\nCheck the sensor (power, battery, network). This repair disappears by itself once the sensor reports again."
     }
   }
 }

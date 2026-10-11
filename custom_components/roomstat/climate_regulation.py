@@ -15,20 +15,16 @@ from .climate_controllers import (
     TrvReading,
     command_limits,
     integration_step,
-    sensor_lost_target,
     trv_setpoint_drifted,
-    update_hold_offset,
 )
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
-    HOLD_OFFSET_LIMIT_C,
-    HOLD_OFFSET_NEAR_TARGET_C,
-    HOLD_OFFSET_TAU_S,
     MAX_INTEGRATION_STEP_S,
     TRV_COMMAND_SPACING_S,
     TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
 )
+from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -174,7 +170,7 @@ class RegulationMixin:
             missing_for = now - self._room_missing_since
             if missing_for > self._sensor_grace_s:
                 # Gone for longer than the grace period (also a sensor that
-                # never reported after a restart): see the hold below.
+                # never reported after a restart).
                 sensor_lost = True
                 self._sensor_degraded = True
             elif self._last_valid_room_temp is not None:
@@ -192,16 +188,32 @@ class RegulationMixin:
             else:
                 self._sensor_degraded = False
 
-        if tado_internal is None:
-            self._last_reason = "waiting_for_sensors"
+        if sensor_lost and not self._room_sensor_lost_logged:
+            # Nothing is sent until the sensor is back: the TRV keeps its
+            # last setpoint.  The room sensor is meant to be reliable, so a
+            # long outage is reported (a repair after
+            # ROOM_SENSOR_UNAVAILABLE_REPORT_S, see repairs.py), not bridged.
+            self._room_sensor_lost_logged = True
+            _LOGGER.warning(
+                "%s: room sensor unavailable for %d min; the radiator keeps "
+                "its last setting until it is back",
+                self._config_entry.title, int(missing_for / 60),
+            )
+
+        if sensor_lost and tado_internal is not None and self._reg_state.mode == MODE_HEAT:
+            # A heat-up's maximum command is never left in place without a
+            # room reading: it is ended (coast) before the room is left alone.
+            # Until the TRV has taken the stop, it is tried again (once per
+            # rate-limit interval).
+            await self._async_decide_and_send(
+                now, trv, self._config.min_target_c, strong=True
+            )
+            if self._last_reason.startswith("sent(") or self._last_reason == "already_at_target":
+                self._reg_state.mode = MODE_COAST
             self._write_state_with_binary_sensor()
             return
 
-        if sensor_lost:
-            await self._async_hold_without_room_sensor(now, trv, missing_for)
-            return
-
-        if room_temp is None:
+        if room_temp is None or tado_internal is None:
             self._last_reason = "waiting_for_sensors"
             self._write_state_with_binary_sensor()
             return
@@ -215,17 +227,10 @@ class RegulationMixin:
 
         # 3b. Robust room slope for the derivative brake (only on fresh
         # readings; a bridged/stale value must not look like a flat room).
-        # Fresh readings near the target also teach the offset used while the
-        # room sensor is lost.
         slope = None
         if not self._sensor_degraded:
             self._slope.add(now, room_temp, self.coordinator.data.get("room_temp_ts"))
             slope = self._slope.slope_c_per_s()
-            if abs(setpoint - room_temp) <= HOLD_OFFSET_NEAR_TARGET_C:
-                self._hold_offset_c = update_hold_offset(
-                    self._hold_offset_c, tado_internal - room_temp,
-                    dt, HOLD_OFFSET_TAU_S, HOLD_OFFSET_LIMIT_C,
-                )
 
         # 4. Compute regulation
         result = self._regulator.compute(
@@ -240,7 +245,9 @@ class RegulationMixin:
         self._last_result = result
 
         # 5-6. Send decision and command
-        await self._async_decide_and_send(now, trv, result.target_for_tado_c)
+        await self._async_decide_and_send(
+            now, trv, result.target_for_tado_c, strong=result.mode != MODE_HOLD
+        )
 
         # 7. Background auto-tune (no-op when disabled).  Runs after the
         # send so it sees the command the TRV now holds; any new values take
@@ -256,41 +263,15 @@ class RegulationMixin:
 
         self._write_state_with_binary_sensor()
 
-    async def _async_hold_without_room_sensor(
-        self, now: float, trv: TrvReading, missing_for: float
-    ) -> None:
-        """The room sensor is gone for longer than the grace period.
-
-        Rather than leave the TRV on whatever it was last sent (possibly
-        25 °C in the middle of a heat-up, for hours), tell it the target plus
-        the usual offset between its own reading and the room, so it holds
-        the room by itself until the sensor is back.  The PI state and the
-        auto-tuner are left alone; regulation resumes where it was.
-        """
-        if not self._room_sensor_lost_logged:
-            self._room_sensor_lost_logged = True
-            _LOGGER.warning(
-                "%s: room sensor unavailable for %d min; the TRV holds the "
-                "target on its own reading (offset %+.1f °C) until it is back",
-                self._config_entry.title,
-                int(missing_for / 60),
-                self._hold_offset_c or 0.0,
-            )
-        self._last_result = None
-        target = sensor_lost_target(
-            self._effective_setpoint(), self._hold_offset_c,
-            self._config.min_target_c, self._config.max_target_c,
-        )
-        await self._async_decide_and_send(now, trv, target, prefix="sensor_lost:")
-        self._write_state_with_binary_sensor()
-
     async def _async_decide_and_send(
-        self, now: float, trv: TrvReading, target: float, prefix: str = ""
+        self, now: float, trv: TrvReading, target: float, *, strong: bool = False
     ) -> None:
         """Decide whether *target* goes to the TRV this cycle, and send it.
 
         Sets ``_last_reason``.  Rate limiting: at most one command per
-        ``min_command_interval_s``, except an urgent decrease.
+        ``min_command_interval_s``, except an urgent decrease and a
+        deliberate command (``strong``: the start or end of a heat burst,
+        one command each, which must not wait).
         """
         # Prefer our own last-sent value (always fresh) over coordinator data
         # (which may be up to 60s stale from the polling interval).
@@ -325,7 +306,7 @@ class RegulationMixin:
         # (Tado shows its 5 °C setpoint as off), and Home Assistant refuses a
         # setpoint below 7 °C for a HomeKit valve that is off.
         if trv.off and target <= self._config.min_target_c + 0.05:
-            self._last_reason = f"{prefix}already_at_target"
+            self._last_reason = "already_at_target"
             return
 
         # Keep the command inside what the TRV accepts right now (anything
@@ -377,9 +358,19 @@ class RegulationMixin:
                     target
                     < current_tado_setpoint - self._behaviour.urgent_decrease_threshold_c
                 )
-                if is_urgent_decrease:
+                # Skipping the rate limit is for a new command only: a
+                # command that just failed waits like any other, so an
+                # outage still costs one attempt per interval.
+                new_command = (
+                    self._last_attempt_c is None
+                    or abs(target - self._last_attempt_c) >= 0.05
+                )
+                if is_urgent_decrease and new_command:
                     should_send = True
                     reason = "urgent_decrease"
+                elif strong and new_command:
+                    should_send = True
+                    reason = "stepped"
                 else:
                     remaining = int(self._config.min_command_interval_s - time_since_last)
                     reason = f"rate_limited({remaining}s)"
@@ -388,13 +379,14 @@ class RegulationMixin:
                 reason = "normal_update"
 
         if not should_send:
-            self._last_reason = f"{prefix}{reason}"
+            self._last_reason = reason
             return
         # A failed command still counts for the rate limit, so an outage
         # costs one attempt per interval, not one per cycle.
         sent = await self._async_send_to_tado(target, trv.entity_id)
         self._last_command_sent_ts = now
-        self._last_reason = f"{prefix}{'sent' if sent else 'send_failed'}({reason})"
+        self._last_attempt_c = target
+        self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
 
     async def _async_keep_trv_off(self, now: float) -> None:
         """Roomstat is off: keep the TRV off as well.

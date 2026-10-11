@@ -86,6 +86,7 @@ from .const import (
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SENSOR_GRACE_S,
+    CONF_STEPPED_HEATING,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
     CONF_WINDOW_DELAY_S,
@@ -99,14 +100,13 @@ from .const import (
 from .parameters import (
     DEFAULT_CONTROL_INTERVAL_S,
     DEFAULT_SENSOR_GRACE_S,
-    HOLD_OFFSET_LIMIT_C,
     AutotuneConfig,
     BehaviourConfig,
     CorrectionTuning,
     PresetConfig,
     RegulationConfig,
 )
-from .regulation import FeedforwardPiRegulator, RegulationState
+from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -120,22 +120,16 @@ class _AutomationExtraData(ExtraStoredData):
     """
 
     def __init__(
-        self,
-        state: PersistedAutomationState,
-        autotune: dict[str, Any] | None = None,
-        hold_offset_c: float | None = None,
+        self, state: PersistedAutomationState, autotune: dict[str, Any] | None = None
     ) -> None:
         self._state = state
         self._autotune = autotune
-        self._hold_offset_c = hold_offset_c
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
         data = self._state.as_dict()
         if self._autotune is not None:
             data["autotune"] = self._autotune
-        if self._hold_offset_c is not None:
-            data["hold_offset_c"] = round(self._hold_offset_c, 2)
         return data
 
 
@@ -243,6 +237,7 @@ class RoomstatClimate(
         self._last_regulation_ts = 0.0
         self._last_command_sent_ts = 0.0
         self._last_sent_setpoint: float | None = None
+        self._last_attempt_c: float | None = None   # last command tried
 
         # Sensor resilience: last-valid values for grace-period bridging
         self._last_valid_room_temp: float | None = None
@@ -264,12 +259,11 @@ class RoomstatClimate(
         self._trv_fallback_active: bool = False
 
         # Failure handling (see climate_regulation.py): the current command
-        # error (logged once, not every attempt), when the room sensor went
-        # missing, and the TRV-vs-room offset used while it stays away.
+        # error (logged once, not every attempt), and when the room sensor
+        # went missing (its loss is logged once).
         self._last_command_error: str | None = None
         self._room_missing_since: float | None = None
         self._room_sensor_lost_logged: bool = False
-        self._hold_offset_c: float | None = None
 
         # State-machine controllers (hold their own timer + saved-state)
         self._window_ctrl = WindowAutomationController()
@@ -312,6 +306,9 @@ class RoomstatClimate(
             # raising max_target_c above what the TRV will accept.
             config.presets.boost_target_c = min(
                 config.presets.boost_target_c, config.max_target_c
+            )
+            config.stepped_enabled = bool(
+                opts.get(CONF_STEPPED_HEATING, config.stepped_enabled)
             )
             # Adaptive gain scheduling
             config.gain_scheduling_enabled = opts.get(
@@ -424,6 +421,9 @@ class RoomstatClimate(
         """Run when entity about to be added to HA."""
         await super().async_added_to_hass()
 
+        # Carry on a heat burst (or stop) the TRV is still holding.
+        self._reg_state.mode = resume_mode(self._active_trv().setpoint_c, self._config)
+
         # Restore previous state
         last_state = await self.async_get_last_state()
         # Automation snapshot (window / presence / boost).  None on the first
@@ -436,9 +436,6 @@ class RoomstatClimate(
             if isinstance(extra_dict, dict):
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
-                offset = safe_float(extra_dict.get("hold_offset_c"))
-                if offset is not None and abs(offset) <= HOLD_OFFSET_LIMIT_C:
-                    self._hold_offset_c = offset
 
         if last_state:
             if last_state.state in (HVACMode.HEAT, HVACMode.OFF):
@@ -674,7 +671,7 @@ class RoomstatClimate(
     def extra_restore_state_data(self) -> ExtraStoredData:
         """Persist automation and auto-tune state across restart/reload."""
         return _AutomationExtraData(
-            self._automation_snapshot(), self._autotuner.as_dict(), self._hold_offset_c
+            self._automation_snapshot(), self._autotuner.as_dict()
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -976,9 +973,6 @@ class RoomstatClimate(
             "trv_fallback_active": trv.is_fallback,
             "active_trv_entity_id": trv.entity_id,
             "last_command_error": self._last_command_error,
-            "hold_offset_c": (
-                round(self._hold_offset_c, 1) if self._hold_offset_c is not None else None
-            ),
             "correction_kp": self._config.tuning.kp,
             "correction_ki": self._config.tuning.ki,
             "correction_td_min": round(self._config.tuning.td_s / 60.0, 1),
@@ -1014,6 +1008,7 @@ class RoomstatClimate(
                 "error_c": r.error_c,
                 "target_for_tado_c": r.target_for_tado_c,
                 "is_saturated": r.is_saturated,
+                "regulation_mode": r.mode,
             })
 
         return attrs

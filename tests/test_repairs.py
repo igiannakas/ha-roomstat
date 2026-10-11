@@ -129,9 +129,9 @@ class _Hass:
             async_update_entry=self._update_entry,
         )
 
-    def present(self, *entity_ids, registered=True):
+    def present(self, *entity_ids, registered=True, state="20.5"):
         for eid in entity_ids:
-            self._states[eid] = object()
+            self._states[eid] = types.SimpleNamespace(state=state)
             if registered:
                 self._registry[eid] = _RegEntry()
 
@@ -167,6 +167,15 @@ def _issue(hass, key):
     return hass.issues.get(("roomstat", f"e1_{key}"))
 
 
+def _check_unavailable(hass, entry, watch, now):
+    repairs.async_check_entities(hass, entry, watch, now, unavailable_minutes=15)
+
+
+def _setup_unavailable(options=None):
+    hass, entry, _ = _setup(options)
+    return hass, entry, repairs.MissingEntityWatch(300, {"unavailable": 900})
+
+
 class TestCheck:
 
     def test_all_fine(self):
@@ -184,7 +193,8 @@ class TestCheck:
         assert issue["translation_key"] == "entity_missing"
         assert issue["severity"] == "error"
         assert issue["is_fixable"] is True
-        assert issue["translation_placeholders"] == {"room": "Bedroom", "entity_id": TRV}
+        assert issue["translation_placeholders"] == {
+            "room": "Bedroom", "entity_id": TRV, "minutes": "15"}
         assert issue["data"] == {"entry_id": "e1", "key": "source_entity_id"}
 
     def test_disabled_sensor(self):
@@ -264,6 +274,49 @@ def _flow(hass, key):
     return flow
 
 
+class TestRoomSensorUnavailable:
+
+    def test_reported_after_15_minutes(self):
+        hass, entry, watch = _setup_unavailable()
+        hass.present(ROOM, state="unavailable")
+        _check_unavailable(hass, entry, watch, 1000)
+        _check_unavailable(hass, entry, watch, 1800)
+        assert hass.issues == {}
+        _check_unavailable(hass, entry, watch, 1900)
+        issue = _issue(hass, "external_temperature_entity_id")
+        assert issue["translation_key"] == "entity_unavailable"
+        assert issue["is_fixable"] is False
+        assert issue["severity"] == "error"
+        assert issue["translation_placeholders"] == {
+            "room": "Bedroom", "entity_id": ROOM, "minutes": "15"}
+
+    @pytest.mark.parametrize("value", ["unknown", "not a number", "85.0"])
+    def test_no_usable_value_counts(self, value):
+        hass, entry, watch = _setup_unavailable()
+        hass.present(ROOM, state=value)
+        _check_unavailable(hass, entry, watch, 1000)
+        _check_unavailable(hass, entry, watch, 1900)
+        assert _issue(hass, "external_temperature_entity_id")
+
+    def test_cleared_when_it_reports_again(self):
+        hass, entry, watch = _setup_unavailable()
+        hass.present(ROOM, state="unavailable")
+        _check_unavailable(hass, entry, watch, 1000)
+        _check_unavailable(hass, entry, watch, 1900)
+        hass.present(ROOM, state="19.8")
+        _check_unavailable(hass, entry, watch, 1960)
+        assert hass.issues == {}
+
+    def test_other_entities_unavailable_are_not_reported(self):
+        """A valve that drops off has the fallback and its own alert; window
+        and presence sensors are optional."""
+        hass, entry, watch = _setup_unavailable({"window_sensor_id": WINDOW})
+        hass.present(TRV, WINDOW, state="unavailable")
+        _check_unavailable(hass, entry, watch, 1000)
+        _check_unavailable(hass, entry, watch, 5000)
+        assert hass.issues == {}
+
+
 class TestFixFlow:
 
     def test_form_asks_for_a_climate_entity(self):
@@ -313,3 +366,7 @@ def test_every_setting_has_a_label(lang):
     for key in ("entity_missing", "entity_disabled"):
         labels = issues[key]["fix_flow"]["step"]["replace"]["data"]
         assert set(labels) == set(repairs.ROLE_BY_KEY)
+    unavailable = issues["entity_unavailable"]
+    assert {"{room}", "{entity_id}"} <= {
+        w for w in unavailable["title"].replace(":", " ").split() if w.startswith("{")}
+    assert "{minutes}" in unavailable["description"]

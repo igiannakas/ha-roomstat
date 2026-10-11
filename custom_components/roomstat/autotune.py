@@ -593,6 +593,12 @@ class _HeatupTracker:
         self._last_cycle_ts = s.ts
         d = s.demand_c
         if d is not None:
+            if self.cross_ts is not None and d >= self.cfg.heatup_reheat_demand_c:
+                # Told to heat again after being told to stop: a stepped
+                # top-up (the coast fell short), or the PI asking for heat
+                # once the room fell back.  The coast ends here; counting
+                # the new heat as coast would inflate the braking time.
+                return _DONE
             if d > 0.2:
                 self.demand_was_positive = True
             elif d <= 0 and self.demand_was_positive and self.cross_ts is None:

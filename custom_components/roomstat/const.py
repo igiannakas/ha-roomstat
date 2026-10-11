@@ -75,6 +75,8 @@ CONF_AUTOTUNE_DERIVATIVE = "autotune_derivative"
 
 # Adaptive gain scheduling
 CONF_GAIN_SCHEDULING = "gain_scheduling_enabled"
+# Deliberate valve control: only the maximum (heat) or the minimum (stop).
+CONF_STEPPED_HEATING = "stepped_heating_enabled"
 CONF_GAIN_FINE_MULTIPLIER = "gain_fine_multiplier"
 CONF_GAIN_STARTUP_MULTIPLIER = "gain_startup_multiplier"
 CONF_GAIN_STARTUP_THRESHOLD_C = "gain_startup_threshold_c"

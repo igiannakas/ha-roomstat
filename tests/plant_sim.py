@@ -16,6 +16,12 @@ What is simulated
   a large share of the radiator heat) and its *own PI controller* that moves
   the valve every couple of minutes.  The integrator is what makes the real
   TRVs keep heating for a long time after the proxy asks them to stop.
+  With ``tado_td_min`` the controller also anticipates on the rate of its
+  own reading: it throttles while the reading climbs fast and re-opens when
+  it falls.  That reproduces the Tado V3+ behaviour in the October 2026
+  heating-% data: fully open only at a push (setpoint - reading) of about
+  +5 °C or more, partly open and pulsing at +1..+3 °C, and reliably shut
+  only at about -2 °C or below (see ``TADO_V3``).
 * **Proxy**: the real ``FeedforwardPiRegulator`` plus the send logic of
   ``climate_regulation.py`` (rate limit, change threshold, urgent decrease,
   0.1 °C command rounding).  Optionally the real ``Autotuner``.
@@ -52,13 +58,43 @@ class PlantParams:
     tado_kp: float = 0.35             # valve fraction per °C of TRV error
     tado_ti_min: float = 30.0         # TRV integral time
     tado_period_s: float = 120.0      # how often the TRV moves the valve
+    tado_td_min: float = 0.0          # anticipation on its own reading's rate
     valve_leak: float = 0.0           # valve never fully closes (fraction)
+    valve_gamma: float = 1.0          # flow = opening ** gamma (< 1: a radiator
+                                      # valve gives most of its flow early)
+    sensor_conv_c: float = 0.0        # room sensor reads this much more at full
+                                      # radiator output (warm air reaching it)
     sensor_noise_c: float = 0.01
     sensor_period_s: float = 30.0
     sensor_resolution_c: float = 0.01  # reported step (many Zigbee sensors: 0.1)
     glitch_prob: float = 0.0          # chance per report of a wild reading
     glitch_size_c: float = 1.5
     extra_gain: Callable[[float], float] | None = None  # °C/h vs time (sun…)
+
+
+# Tado V3+ controller as measured (October 2026 heating-% data, see the
+# module docstring): combine with a room, e.g. PlantParams(**room, **TADO_V3).
+TADO_V3 = dict(tado_kp=0.35, tado_td_min=12.0)
+
+# Two real rooms, fitted to the morning of 11 Oct 2026 (overnight cooling,
+# a 06:00 heat-up and the hold after it): the real valve setpoints were
+# replayed through this model and room, radiator, TRV and Tado-controller
+# parameters fitted to the room sensor, the TRV's reading and the cloud's
+# heating %.  RMS error: room 0.14 / 0.08 °C, TRV reading 0.19 / 0.22 °C.
+# Note the strongly non-linear valve (gamma) and the warm radiator air that
+# reaches the room sensor (sensor_conv_c).
+LIVING_ROOM_FIT = dict(
+    trv_offset_c=-9.9, t_out_c=11.0, tau_room_h=39.6, heat_rate_c_per_h=2.46,
+    mix_lag_min=0.9, water_delay_min=1.3, tau_rad_min=35.3, trv_bias_c=-0.66,
+    trv_beta_c=19.3, trv_lag_min=17.3, tado_kp=0.60, tado_ti_min=43.2,
+    tado_td_min=13.0, valve_gamma=0.34, sensor_conv_c=1.33,
+)
+SECOND_BEDROOM_FIT = dict(
+    trv_offset_c=-5.0, t_out_c=11.0, tau_room_h=37.0, heat_rate_c_per_h=1.13,
+    mix_lag_min=1.4, water_delay_min=0.7, tau_rad_min=30.7, trv_bias_c=0.13,
+    trv_beta_c=5.96, trv_lag_min=5.6, tado_kp=0.53, tado_ti_min=73.1,
+    tado_td_min=3.6, valve_gamma=0.63, sensor_conv_c=0.53,
+)
 
 
 @dataclass
@@ -144,6 +180,7 @@ class RoomSim:
         delay_steps = max(1, int(plant.water_delay_min * 60 / self.DT))
         self.flow_line: deque[float] = deque([0.0] * delay_steps, maxlen=delay_steps)
         self.trv_raw = y0 + plant.trv_bias_c
+        self.tado_prev = round(self.trv_raw + plant.trv_offset_c, 1)
         self.valve = 0.0
         self.tado_i = 0.0
         self.trv_sp = 5.0
@@ -164,15 +201,21 @@ class RoomSim:
 
     def _tado_step(self) -> None:
         p = self.p
-        err = self.trv_sp - self._tado_reported()
+        reading = self._tado_reported()
         dt_min = p.tado_period_s / 60.0
+        rate = (reading - self.tado_prev) / dt_min          # °C/min
+        self.tado_prev = reading
+        err = self.trv_sp - reading
         self.tado_i += p.tado_kp / p.tado_ti_min * err * dt_min
         self.tado_i = min(1.0, max(0.0, self.tado_i))
-        self.valve = min(1.0, max(0.0, p.tado_kp * err + self.tado_i))
+        lead = err - p.tado_td_min * rate
+        self.valve = min(1.0, max(0.0, p.tado_kp * lead + self.tado_i))
 
     def _physics_step(self) -> None:
         p, dt_h, dt_min = self.p, self.DT / 3600.0, self.DT / 60.0
         flow = max(self.valve, p.valve_leak)
+        if p.valve_gamma != 1.0 and flow > 0:
+            flow = flow ** p.valve_gamma
         self.flow_line.append(flow)
         delayed = self.flow_line[0]
         self.q += (delayed - self.q) * min(1.0, dt_min / p.tau_rad_min)
@@ -186,7 +229,7 @@ class RoomSim:
 
     def _sensor_step(self) -> None:
         p = self.p
-        v = self.y_mix + self.rng.gauss(0.0, p.sensor_noise_c)
+        v = self.y_mix + p.sensor_conv_c * self.q + self.rng.gauss(0.0, p.sensor_noise_c)
         if p.glitch_prob and self.rng.random() < p.glitch_prob:
             v += self.rng.choice((-1.0, 1.0)) * p.glitch_size_c
         res = p.sensor_resolution_c
