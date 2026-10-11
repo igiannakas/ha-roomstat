@@ -63,7 +63,7 @@ class ResumeScheduleButton(CoordinatorEntity, ButtonEntity):
 class ResetAutotuneButton(CoordinatorEntity, ButtonEntity):
     """Forgets everything the auto-tuner learned for this room.
 
-    The room goes straight back to the Kp / Ki / derivative time set in the
+    The room goes straight back to the Kp / Ki / braking time set in the
     options, and learning starts again from there.
     """
 

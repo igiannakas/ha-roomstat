@@ -81,21 +81,19 @@
             }
           },
           "pi_controller": {
-            "name": "PI-Regler",
-            "description": "Parameter für den Proportional-Integral-Regler.",
+            "name": "Regler",
+            "description": "Aufgeheizt wird mit voller Leistung, gestoppt so früh, dass die Restwärme des Heizkörpers das Ziel erreicht. Nahe am Ziel wird der Sollwert des Ventils kräftig nachgestellt und das Ventil kurz vor einem Überschwingen geschlossen.",
             "data": {
-              "stepped_heating_enabled": "Gezielte Ventilsteuerung",
-              "correction_kp": "Proportionale Korrektur (Kp)",
-              "correction_ki": "Integrale Korrektur (Ki)",
+              "correction_kp": "Verstärkung nahe am Ziel (Kp)",
+              "correction_ki": "Integralanteil (Ki)",
               "integral_deadband_c": "Integral-Präzisionszone",
-              "derivative_time_min": "Bremszeit beim Aufheizen (D-Anteil)"
+              "derivative_time_min": "Bremszeit beim Aufheizen"
             },
             "data_description": {
-              "stepped_heating_enabled": "Roomstat heizt mit voller Leistung auf und schließt das Ventil so früh, dass die Restwärme des Heizkörpers das Ziel erreicht, weil ein Tado auf kleine Änderungen spät und nur teilweise reagiert. Nahe am Ziel stellt es das Ventil kräftig nach und schließt es kurz vor einem Überschwingen. Aus: Der PI-Regler unten passt den Sollwert des Ventils an (nur dann gelten Kp und die adaptive Verstärkung).",
-              "correction_kp": "Proportionalanteil des PI-Reglers. Höhere Werte reagieren schneller auf Temperaturabweichungen.",
-              "correction_ki": "Integralanteil des PI-Reglers. Höhere Werte korrigieren anhaltende Abweichungen aggressiver.",
-              "integral_deadband_c": "Integral sammelt nur innerhalb dieser Zone. Verhindert Überschwingen bei großen Temperaturänderungen.",
-              "derivative_time_min": "0 = aus. Senkt den Sollwert, solange der Raum wärmer wird, damit der Heizkörper vor dem Erreichen des Ziels abschaltet statt danach. Kann die Heizleistung nur verringern. Typisch 15–35 min. Wenn die Selbstoptimierung die Bremszeit lernt, ist dies nur der Startwert."
+              "correction_kp": "Wie kräftig das Ventil nahe am Ziel nachgestellt wird: um (1 + Kp) × die Abweichung des Raums. Ein Tado reagiert auf kleine Änderungen spät und nur teilweise, daher ist der Wert hoch. Typisch 3–6.",
+              "correction_ki": "Gleicht eine anhaltende Abweichung nahe am Ziel aus. Höhere Werte gleichen sie schneller aus.",
+              "integral_deadband_c": "Das Integral sammelt nur, wenn der Raum so nah am Ziel ist, damit es sich beim Aufheizen nie aufschaukelt.",
+              "derivative_time_min": "Wie weit das Aufheizen vorausschaut, wohin die Restwärme des Heizkörpers den Raum noch trägt, und damit, wie früh es endet. 0 = keine Vorausschau. Wenn die Selbstoptimierung die Bremszeit lernt, ist dies nur der Startwert."
             }
           },
           "autotune": {
@@ -108,24 +106,6 @@
             "data_description": {
               "autotune_enabled": "Passt den Regler in kleinen Schritten an und macht jede Änderung rückgängig, die das Ergebnis verschlechtert. Eine Änderung von Kp, Ki oder Bremszeit oben startet das Lernen neu.",
               "autotune_derivative": "Lernt auch, wie früh vor dem Ziel das Heizen enden soll – daraus, wie lange der Heizkörper nach dem Stopp-Befehl an Tado weiterheizt. Empfohlen."
-            }
-          },
-          "gain_scheduling": {
-            "name": "Adaptive Verstärkung",
-            "description": "Automatische Kp-Skalierung basierend auf der Temperaturabweichung.",
-            "data": {
-              "gain_scheduling_enabled": "Adaptive Verstärkung",
-              "gain_fine_multiplier": "Nahziel-Stärke",
-              "gain_startup_multiplier": "Kaltstart-Boost",
-              "gain_startup_threshold_c": "Kaltstart-Zonenschwelle",
-              "gain_fine_threshold_c": "Nahziel-Zonenschwelle"
-            },
-            "data_description": {
-              "gain_scheduling_enabled": "Schnelleres Aufheizen bei Kaltstart, sanftere Regelung nahe am Ziel.",
-              "gain_fine_multiplier": "Kp-Multiplikator nahe am Ziel. Nur aktiv wenn adaptive Verstärkung aktiviert ist.",
-              "gain_startup_multiplier": "Kp-Multiplikator bei Kaltstart (großer Fehler). Nur aktiv wenn adaptive Verstärkung aktiviert ist.",
-              "gain_startup_threshold_c": "Fehler oberhalb dieser Schwelle aktiviert den Kaltstart-Multiplikator.",
-              "gain_fine_threshold_c": "Fehler unterhalb dieser Schwelle aktiviert den Nahziel-Multiplikator."
             }
           },
           "trv_communication": {

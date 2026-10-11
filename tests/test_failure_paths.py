@@ -147,9 +147,9 @@ class TestValveOff:
         assert ent.extra_state_attributes["last_command_error"] is None
 
     def test_heat_wanted_is_kept_inside_what_the_off_valve_accepts(self, monkeypatch):
-        """PI commands (deliberate control off) between 5 and 7 °C."""
+        """A hold command between 5 and 7 °C goes out as 7."""
         clock = _Clock(monkeypatch)
-        ent = _entity({"stepped_heating_enabled": False})
+        ent = _entity()
         _validating_trv(ent)
         # A warm room: the command lands between 5 and 7 °C.
         ent._target_temp = 6.0

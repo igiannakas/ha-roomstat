@@ -13,9 +13,18 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .card import async_register_card
-from .climate_controllers import MissingEntityWatch, plausible_c, read_trv
+from .climate_controllers import (
+    MissingEntityWatch,
+    migrate_options_v1_to_v2,
+    plausible_c,
+    read_trv,
+)
 from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, CONF_FALLBACK_ENTITY_ID, DOMAIN
-from .parameters import ENTITY_MISSING_REPORT_S, ROOM_SENSOR_UNAVAILABLE_REPORT_S
+from .parameters import (
+    ENTITY_MISSING_REPORT_S,
+    ROOM_SENSOR_UNAVAILABLE_REPORT_S,
+    CorrectionTuning,
+)
 from .repairs import async_check_entities, async_delete_entity_issues
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,6 +44,25 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Serve the dashboard card (custom:roomstat-card)."""
     await async_register_card(hass)
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Bring options written by older versions to the current meaning."""
+    if entry.version > 1:
+        return False                 # written by a newer Roomstat
+    if entry.minor_version < 2:
+        defaults = CorrectionTuning()
+        options = migrate_options_v1_to_v2(
+            entry.options, defaults.kp, defaults.td_s / 60.0
+        )
+        hass.config_entries.async_update_entry(entry, options=options, minor_version=2)
+        _LOGGER.info(
+            "%s: settings migrated to the current controller (Kp %s, braking "
+            "time %s min, gain scheduling removed)",
+            entry.title, options.get("correction_kp", defaults.kp),
+            options.get("derivative_time_min", defaults.td_s / 60.0),
+        )
     return True
 
 

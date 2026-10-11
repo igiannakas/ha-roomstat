@@ -172,58 +172,6 @@ class TestSlopeEstimator:
         assert est.slope_c_per_s() == 0.0
 
 
-class TestDerivativeBrake:
-    def _cfg(self, td=1200.0, kp=0.6):
-        c = P.RegulationConfig()
-        c.tuning = P.CorrectionTuning(kp=kp, ki=0.0, td_s=td)
-        c.gain_scheduling_enabled = False
-        c.stepped_enabled = False      # the PI brake itself
-        return c
-
-    def _run(self, cfg, slope):
-        return R.FeedforwardPiRegulator(cfg).compute(
-            setpoint_c=20.0, room_temp_c=19.5, tado_internal_c=21.0,
-            time_delta_s=0.0, state=R.RegulationState(), room_slope_c_per_s=slope,
-        )
-
-    def test_off_by_default(self):
-        c = P.RegulationConfig()
-        assert c.tuning.td_s == 0.0
-        res = R.FeedforwardPiRegulator(c).compute(
-            setpoint_c=20.0, room_temp_c=19.5, tado_internal_c=21.0,
-            time_delta_s=0.0, state=R.RegulationState(), room_slope_c_per_s=1e-3)
-        assert res.d_correction_c == 0.0
-
-    def test_brakes_when_rising(self):
-        cfg = self._cfg()
-        rising = 2.0 / 3600                       # 2 °C/h
-        res = self._run(cfg, rising)
-        expected = -(1 + 0.6) * 1200 * (rising - 0.1 / 3600)
-        assert res.d_correction_c == pytest.approx(expected, abs=0.01)
-        assert res.target_for_tado_c == pytest.approx(
-            round(20.0 + 1.5 + 0.6 * 0.5 + expected, 1), abs=0.051)
-
-    @pytest.mark.parametrize("slope", [-5.0 / 3600, -0.5 / 3600, 0.0, 0.05 / 3600])
-    def test_never_adds_heat(self, slope):
-        assert self._run(self._cfg(), slope).d_correction_c == 0.0
-
-    def test_clamped(self):
-        res = self._run(self._cfg(td=2700), 50.0 / 3600)   # absurd slope
-        assert res.d_correction_c == pytest.approx(-2.0)
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), None])
-    def test_bad_slope_ignored(self, bad):
-        assert self._run(self._cfg(), bad).d_correction_c == 0.0
-
-    def test_does_not_touch_integral(self):
-        cfg = self._cfg()
-        cfg.tuning.ki = 0.003
-        st = R.RegulationState(integral_c=0.1)
-        a = R.FeedforwardPiRegulator(cfg).compute(20.0, 19.9, 21.0, 60.0, st, 2.0 / 3600)
-        b = R.FeedforwardPiRegulator(cfg).compute(20.0, 19.9, 21.0, 60.0, st, None)
-        assert a.new_state.integral_c == b.new_state.integral_c
-
-
 def _synthetic_heatup(theta_min=12.0, rate=2.0, sp=20.0, y0=18.5, overshoot=0.3,
                       cross_after_reach_min=-10.0, minutes=240, glitch=False):
     """Room: flat for theta, ramps at `rate`, then eases into sp + overshoot."""
@@ -892,15 +840,13 @@ class TestEpisodeAcrossRestart:
         the same measurements as no restart at all."""
         def run(restart_at_h):
             c = P.RegulationConfig()
-            c.tuning = P.CorrectionTuning(kp=0.6, ki=0.002)
-            c.gain_fine_threshold_c = 1.0
-            c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
+            c.tuning = P.CorrectionTuning(kp=4.0, ki=0.002, td_s=0.0)
             sim = RoomSim(PlantParams(**LIVING), R, c, ProxySettings(), y0=19.0,
-                          tuner=_tuner(), autotune_module=A, seed=3)
+                          tuner=_tuner(kp=4.0), autotune_module=A, seed=3)
             if restart_at_h is not None:
                 sim.run(restart_at_h, SCHED)
                 assert sim.tuner.phase == A.PHASE_HEATUP
-                sim.tuner = _restart(sim.tuner)
+                sim.tuner = _restart(sim.tuner, kp=4.0)
                 sim.run(48 - restart_at_h, SCHED)
             else:
                 sim.run(48, SCHED)
@@ -934,8 +880,6 @@ SCHED = schedule_from([(0, 18.0), (6, 20.0), (8, 5.0), (17, 20.0), (22.5, 18.0)]
 def _closed_loop(plant_kw, kp, ki, days, sched=SCHED, td=0.0, deriv=True, cfg=None, tune=True):
     c = P.RegulationConfig()
     c.tuning = P.CorrectionTuning(kp=kp, ki=ki, td_s=td)
-    c.gain_fine_threshold_c = 1.0
-    c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
     tuner = _tuner(kp=kp, ki=ki, td=td, deriv=deriv, cfg=cfg) if tune else None
     sim = RoomSim(PlantParams(**plant_kw), R, c, ProxySettings(), y0=19.0,
                   tuner=tuner, autotune_module=A, seed=3)
@@ -951,31 +895,35 @@ def _evening_overshoot(tr, day):
 
 class TestClosedLoop:
     def test_learns_to_stop_overshoot(self):
-        tuner, tr = _closed_loop(LIVING, 0.6, 0.002, days=7)
-        _, fixed = _closed_loop(LIVING, 0.6, 0.002, days=7, tune=False)
+        """Starting without a braking time (heat-ups stop only at the
+        target), it learns one from the coast."""
+        tuner, tr = _closed_loop(LIVING, 4.0, 0.002, days=7)
+        _, fixed = _closed_loop(LIVING, 4.0, 0.002, days=7, tune=False)
         before = _evening_overshoot(fixed, 6)       # same day, no tuner
         after = _evening_overshoot(tr, 6)
-        assert before > 0.35
-        assert after < 0.25
+        assert before > 0.3
+        assert after < 0.15
         assert after < before - 0.15
         assert 0 < tuner.active_tuning().td_s <= P.AutotuneConfig().td_max_s
-        assert all(0.1 <= kp <= 2.0 for kp in tr.kp)
+        assert all(1.0 <= kp <= 8.0 for kp in tr.kp)
         assert tuner.summary()["rollbacks"] == 0
 
     def test_calms_an_oscillating_room(self):
+        """A sluggish valve and too much integral: it swings; the tuner
+        calms it."""
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8, mix_lag_min=6)
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(plant, 1.2, 0.003, days=7, sched=flat)
+        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
 
         def p2p(d0, d1):
             idx = tr.window(d0 * DAY, d1 * DAY)
             e = [tr.sp[i] - tr.y_true[i] for i in idx]
             return max(e) - min(e)
 
-        assert p2p(0.5, 2) > 1.0
-        assert p2p(5, 7) < 0.6
+        assert p2p(0.5, 2) > 0.7
+        assert p2p(5, 7) < 0.55
         a = tuner.active_tuning()
-        assert a.kp < 1.2 and a.ki < 0.003
+        assert a.kp < 4.0 and a.ki < 0.01
 
     @pytest.mark.parametrize("period", [30.0, 300.0])
     def test_coarse_sensor_still_calms_oscillation(self, period):
@@ -983,7 +931,7 @@ class TestClosedLoop:
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8,
                      mix_lag_min=6, sensor_resolution_c=0.1, sensor_period_s=period)
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(plant, 1.2, 0.003, days=7, sched=flat)
+        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
         idx = tr.window(5 * DAY, 7 * DAY)
         e = [tr.sp[i] - tr.y_true[i] for i in idx]
         assert max(e) - min(e) < 0.7
@@ -991,17 +939,17 @@ class TestClosedLoop:
 
     def test_coarse_sensor_still_learns_braking(self):
         plant = dict(LIVING, sensor_resolution_c=0.1, sensor_period_s=300.0)
-        tuner, tr = _closed_loop(plant, 0.6, 0.002, days=7)
-        assert tuner.active_tuning().td_s >= 600
+        tuner, tr = _closed_loop(plant, 4.0, 0.002, days=7)
+        assert tuner.active_tuning().td_s >= 300
         assert _evening_overshoot(tr, 6) < 0.35
 
     def test_does_nothing_without_episodes(self):
         """A room held at a steady temperature with no swings is left alone."""
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(dict(LIVING, tado_ti_min=200), 0.6, 0.0003, days=3,
+        tuner, tr = _closed_loop(dict(LIVING, tado_ti_min=200), 4.0, 0.0003, days=3,
                                  sched=flat)
         a = tuner.active_tuning()
-        assert a.kp == 0.6
+        assert a.kp == 4.0
         assert a.td_s == 0.0
 
 
@@ -1016,10 +964,8 @@ def test_production_settings_with_sunny_days_stay_sane():
         return 0.4 if sunny[d] and 13 <= h < 18.5 else 0.0
 
     c = P.RegulationConfig()
-    c.tuning = P.CorrectionTuning(kp=0.6, ki=0.002)
-    c.gain_fine_threshold_c = 1.0
-    c.stepped_enabled = False   # PI tuning (stepped: test_stepped_heating.py)
-    tuner = _tuner()
+    c.tuning = P.CorrectionTuning(kp=4.0, ki=0.002, td_s=0.0)
+    tuner = _tuner(kp=4.0)
     sim = RoomSim(PlantParams(**LIVING, extra_gain=sun), R, c,
                   ProxySettings(min_command_interval_s=180, min_change_threshold_c=0.3),
                   y0=19.0, tuner=tuner, autotune_module=A, seed=8)

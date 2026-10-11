@@ -122,7 +122,7 @@ class SimTrace:
     kp: list[float] = field(default_factory=list)
     ki: list[float] = field(default_factory=list)
     td: list[float] = field(default_factory=list)
-    d_term: list[float] = field(default_factory=list)
+    mode: list[str] = field(default_factory=list)
     sends: int = 0
 
     def window(self, t0: float, t1: float) -> list[int]:
@@ -305,7 +305,7 @@ class RoomSim:
         tr.kp.append(self.cfg.tuning.kp)
         tr.ki.append(self.cfg.tuning.ki)
         tr.td.append(getattr(self.cfg.tuning, "td_s", 0.0))
-        tr.d_term.append(getattr(res, "d_correction_c", 0.0))
+        tr.mode.append(getattr(res, "mode", ""))
 
     def run(
         self,

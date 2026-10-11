@@ -895,3 +895,45 @@ class TestReplaceEntitySetting:
         data, opts = {"source_entity_id": "climate.old"}, {"window_sensor_id": "b.x"}
         replace_entity_setting(data, opts, "window_sensor_id", None, in_data=False)
         assert opts == {"window_sensor_id": "b.x"}
+
+
+migrate_options_v1_to_v2 = _ctrl_mod.migrate_options_v1_to_v2
+
+
+class TestMigrateOptions:
+    """Entries made before 2.2 (one controller, Kp is the gain near the
+    target, the braking time a visible default)."""
+
+    OLD = {
+        "correction_kp": 0.6, "correction_ki": 0.003, "derivative_time_min": 0,
+        "stepped_heating_enabled": True, "gain_scheduling_enabled": False,
+        "gain_fine_multiplier": 1, "gain_startup_multiplier": 1.5,
+        "gain_startup_threshold_c": 2, "gain_fine_threshold_c": 1,
+        "min_command_interval_s": 120, "comfort_target": 21,
+    }
+
+    def test_obsolete_options_go_and_the_rest_stays(self):
+        new = migrate_options_v1_to_v2(self.OLD, 4.0, 10.0)
+        assert new == {
+            "correction_kp": 4.0, "correction_ki": 0.003, "derivative_time_min": 10.0,
+            "min_command_interval_s": 120, "comfort_target": 21,
+        }
+
+    def test_a_braking_time_already_set_is_kept(self):
+        new = migrate_options_v1_to_v2({**self.OLD, "derivative_time_min": 20}, 4.0, 10.0)
+        assert new["derivative_time_min"] == 20
+
+    @pytest.mark.parametrize("bad", [None, "x", float("nan"), -5])
+    def test_bad_braking_time_becomes_the_default(self, bad):
+        new = migrate_options_v1_to_v2({"derivative_time_min": bad}, 4.0, 10.0)
+        assert new["derivative_time_min"] == 10.0
+
+    def test_unset_values_stay_unset(self):
+        """No Kp or braking time stored: the defaults apply anyway."""
+        assert migrate_options_v1_to_v2({"comfort_target": 21}, 4.0, 10.0) == {
+            "comfort_target": 21}
+
+    def test_input_is_not_changed(self):
+        old = dict(self.OLD)
+        migrate_options_v1_to_v2(old, 4.0, 10.0)
+        assert old == self.OLD

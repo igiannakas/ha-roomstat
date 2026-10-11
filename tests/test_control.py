@@ -1,14 +1,12 @@
-"""Deliberate valve control: closed loop against Tados that behave like the
-real ones, and end to end through the climate entity.
+"""The controller: closed loop against Tados that behave like the real ones,
+and end to end through the climate entity.
 
 The Tado V3+ only opens fully when its setpoint is about 5 °C above its own
 reading, throttles at smaller pushes and re-opens by itself just below it
 (tests/plant_sim.py ``TADO_V3``, and the two rooms fitted to real data,
-``LIVING_ROOM_FIT`` / ``SECOND_BEDROOM_FIT``).  The feedforward + PI command
-with the small Kp keeps the push at (1 + Kp) * error, so the valve reacts
-late and blurred.  Deliberate control heats up at the maximum, lets the
-radiator coast at the minimum, and holds the target with fine adjustments
-(a high gain) cut by a firm stop ahead of an overshoot.
+``LIVING_ROOM_FIT`` / ``SECOND_BEDROOM_FIT``).  Roomstat heats up at the
+maximum, lets the radiator coast at the minimum, and holds the target with
+fine adjustments (a high gain) cut by a firm stop ahead of an overshoot.
 """
 from __future__ import annotations
 
@@ -35,23 +33,26 @@ from tests.pure_modules import regulation as R
 DAY = 86400.0
 SCHED = schedule_from([(0, 18.0), (6, 20.0), (21.5, 18.0)])
 
-# Rooms as measured (offsets as set in the Tado app).
+# Generic rooms (offsets as set in the Tado app), with a quicker radiator and
+# a linear valve, unlike the fitted ones.
 LIVING = dict(trv_offset_c=-9.9, tau_room_h=50, t_out_c=12, trv_beta_c=6,
               heat_rate_c_per_h=2.5, tau_rad_min=12, water_delay_min=3, mix_lag_min=3)
 SLOW = dict(trv_offset_c=-5.0, tau_room_h=40, t_out_c=12, trv_beta_c=6,
             heat_rate_c_per_h=1.2, tau_rad_min=15, water_delay_min=3, mix_lag_min=4)
 
 
-def _sim(plant, stepped, *, days=8, tune=True, seed=3):
+def _tuner(c):
+    t = c.tuning
+    return A.Autotuner(A.AutotuneConfig(), A.Tuning(t.kp, t.ki, t.td_s),
+                       derivative_allowed=True)
+
+
+def _sim(plant, *, days=8, tune=True, seed=3):
+    """Stock values, stock send settings (180 s / 0.3 °C)."""
     c = P.RegulationConfig()
-    c.tuning = P.CorrectionTuning(kp=0.6, ki=0.003)
-    c.gain_scheduling_enabled = False
-    c.stepped_enabled = stepped
-    tuner = (A.Autotuner(A.AutotuneConfig(), A.Tuning(0.6, 0.003, 0.0),
-                         derivative_allowed=True) if tune else None)
     sim = RoomSim(PlantParams(**dict(plant, **TADO_V3)), R, c,
                   ProxySettings(min_command_interval_s=180, min_change_threshold_c=0.3),
-                  y0=18.5, tuner=tuner, autotune_module=A, seed=seed)
+                  y0=18.5, tuner=_tuner(c) if tune else None, autotune_module=A, seed=seed)
     return sim, sim.run(days * 24, SCHED)
 
 
@@ -82,11 +83,23 @@ def _summary(tr, days=8):
 class TestSimulatedTado:
     def test_throttles_at_small_pushes_like_the_real_one(self):
         """Calibration guard: average opening per push (setpoint - reading),
-        as in the recorder data (living room, October 2026)."""
-        _, pi = _sim(LIVING, stepped=False, days=3, tune=False)
-        _, st = _sim(LIVING, stepped=True, days=3, tune=False)
+        as in the recorder data (living room, October 2026, when Roomstat
+        still sent the weak push (1 + 0.8) x error), plus Roomstat's own
+        commands."""
         b = defaultdict(list)
-        for tr in (pi, st):
+        for weak in (True, False):
+            sim = RoomSim(PlantParams(**dict(LIVING, **TADO_V3)), R, P.RegulationConfig(),
+                          ProxySettings(min_command_interval_s=180, min_change_threshold_c=0.3),
+                          y0=18.5, seed=3, autotune_module=A)
+            if weak:
+                def weak_push(*, setpoint_c, room_temp_c, tado_internal_c, state, **_):
+                    cmd = setpoint_c + tado_internal_c - room_temp_c + 0.8 * (setpoint_c - room_temp_c)
+                    return R.RegulationResult(
+                        target_for_tado_c=round(min(25.0, max(5.0, cmd)), 1),
+                        feedforward_offset_c=0.0, p_correction_c=0.0, i_correction_c=0.0,
+                        error_c=0.0, is_saturated=False, new_state=state)
+                sim.regulator.compute = weak_push
+            tr = sim.run(72, SCHED)
             for i, t in enumerate(tr.t):
                 if t >= DAY and tr.cmd[i] > 5:
                     push = tr.cmd[i] - tr.tado[i]
@@ -99,38 +112,31 @@ class TestSimulatedTado:
         assert mean["neg"] < 0.05         # real: ~1 %
 
 
-@pytest.mark.parametrize("plant, faster_by", [(LIVING, 0.3), (SLOW, 0.1)])
-def test_faster_with_less_overshoot_and_fewer_commands(plant, faster_by):
-    _, pi = _sim(plant, stepped=False)
-    _, st = _sim(plant, stepped=True)
-    a, b = _summary(pi), _summary(st)
-    assert b["reach"] < a["reach"] * (1 - faster_by)
-    assert b["overshoot"] < a["overshoot"] - 0.1
-    assert b["overshoot"] < 0.3
-    assert b["hold_sd"] < a["hold_sd"] * 0.6
-    assert b["sends"] < a["sends"]
+@pytest.mark.parametrize("plant, reach_max", [(LIVING, 60), (SLOW, 130)])
+def test_generic_rooms_fast_heat_ups_little_overshoot_steady_hold(plant, reach_max):
+    s = _summary(_sim(plant)[1])
+    assert s["reach"] < reach_max
+    assert s["overshoot"] < 0.15
+    assert s["hold_sd"] < 0.1
+    assert s["sends"] < 70
 
 
 def test_auto_tune_learns_the_coast_without_rollbacks():
     """The braking time becomes the heat-up's lead: the radiator's real
     coast after a hard stop (minutes, not the PI-era 45 min)."""
-    sim, _ = _sim(LIVING, stepped=True)
+    sim, _ = _sim(LIVING)
     td_min = sim.tuner.active_tuning().td_s / 60
     assert 5 <= td_min <= 25
     assert sim.tuner.summary()["rollbacks"] == 0
 
 
-def _fitted(plant, target, stepped, *, days=8):
-    """A real room (fitted to 11 Oct 2026) with your settings of that day:
-    Kp 0.6, Ki 0.003, 120 s / 0.2 °C, auto-tune on."""
+def _fitted(plant, target, *, days=8):
+    """A real room (fitted to 11 Oct 2026) with your send settings of that
+    day (120 s / 0.2 °C), stock gains, auto-tune on."""
     c = P.RegulationConfig()
-    c.tuning = P.CorrectionTuning(kp=0.6, ki=0.003)
-    c.gain_scheduling_enabled = False
-    c.stepped_enabled = stepped
-    tuner = A.Autotuner(A.AutotuneConfig(), A.Tuning(0.6, 0.003, 0.0), derivative_allowed=True)
     sim = RoomSim(PlantParams(**plant), R, c,
                   ProxySettings(min_command_interval_s=120, min_change_threshold_c=0.2),
-                  y0=18.5, tuner=tuner, autotune_module=A, seed=3)
+                  y0=18.5, tuner=_tuner(c), autotune_module=A, seed=3)
     tr = sim.run(days * 24, schedule_from([(0, 18.0), (6, target), (21.5, 18.0)]))
     last = range(days - 3, days)
     hold = [i for d in last for i in tr.window(d * DAY + 10 * 3600, d * DAY + 21 * 3600)]
@@ -145,20 +151,21 @@ def _fitted(plant, target, stepped, *, days=8):
 
 
 @pytest.mark.parametrize("plant, target", [(LIVING_ROOM_FIT, 20.0), (SECOND_BEDROOM_FIT, 21.5)])
-def test_real_rooms_held_tightly_with_fewer_commands(plant, target):
-    old, new = _fitted(plant, target, False), _fitted(plant, target, True)
-    assert new["rms"] < 0.05 and new["rms"] < old["rms"] / 4
-    assert new["worst"] < 0.15
-    assert new["overshoot"] < 0.2 and new["overshoot"] < old["overshoot"]
-    assert new["sends"] < old["sends"]
+def test_real_rooms_held_tightly(plant, target):
+    """The old PI held these at 0.18-0.26 °C RMS with up to +0.5 °C
+    overshoot and 77-142 commands a day."""
+    r = _fitted(plant, target)
+    assert r["rms"] < 0.05
+    assert r["worst"] < 0.15
+    assert r["overshoot"] < 0.2
+    assert r["sends"] < 110
 
 
 def test_works_without_auto_tune():
-    _, pi = _sim(LIVING, stepped=False, tune=False)
-    _, st = _sim(LIVING, stepped=True, tune=False)
-    a, b = _summary(pi), _summary(st)
-    assert b["reach"] < a["reach"]
-    assert b["overshoot"] < a["overshoot"] - 0.3
+    s = _summary(_sim(LIVING, tune=False)[1])
+    assert s["reach"] < 60
+    assert s["overshoot"] < 0.25
+    assert s["hold_sd"] < 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -269,17 +276,8 @@ class TestEntity:
         clock.tick(60)
         _feed(ent, 19.2, 12.0, setpoint=5.0)         # e.g. a window shut
         _cycle(ent)
-        assert ent._last_reason == "sent(stepped)"
+        assert ent._last_reason == "sent(strong)"
         assert _sent(ent)[-1] == 25.0
-
-    def test_option_off_keeps_the_pi_command(self, monkeypatch):
-        _Clock(monkeypatch)
-        ent = _make_entity({"stepped_heating_enabled": False})
-        _run(_start(ent))
-        _feed(ent, 18.5, 9.0, setpoint=8.0)
-        _cycle(ent)
-        assert ent.extra_state_attributes["regulation_mode"] == "hold"
-        assert _sent(ent) and _sent(ent)[0] < 25.0
 
     def test_reload_mid_heat_up_carries_on(self, monkeypatch):
         """Changing a preset temperature reloads the room: a heat-up 0.8 °C

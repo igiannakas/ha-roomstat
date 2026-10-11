@@ -1,7 +1,7 @@
 """Sensor entities for Roomstat.
 
 * boost and schedule-override countdowns;
-* the controller gains in use (Kp, Ki, derivative time) and the auto-tuner's
+* the controller gains in use (Kp, Ki, braking time) and the auto-tuner's
   status and learned room model, as measurement sensors so Home Assistant
   keeps long-term statistics of how the tuning evolves.
 """

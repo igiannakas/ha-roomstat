@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.1.0-blue)
+![Version](https://img.shields.io/badge/version-2.2.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -42,21 +42,20 @@ changes.
   too; until it's back, the radiator keeps its last setting.
 
 **Control**
-- **Deliberate valve control.** A Tado valve has its own controller: it only
-  opens fully when asked for much more than it reads, only stays shut when
-  asked for much less, and in between reacts late and partly. So Roomstat
-  heats up at full power and shuts the valve early enough for the
-  radiator's leftover heat to reach the target. Near the target it adjusts
-  the valve firmly, and shuts it a little ahead of an overshoot. Rooms hold
-  within about 0.05 °C. On by default; **Configure → PI Controller →
-  Deliberate valve control**. Kp and gain scheduling only apply with it
-  off.
+- **A controller made for the Tado valve.** A Tado valve has its own
+  controller: it only opens fully when asked for much more than it reads,
+  only stays shut when asked for much less, and in between reacts late and
+  partly. So Roomstat heats up at full power and shuts the valve early
+  enough for the radiator's leftover heat to reach the target. Near the
+  target it adjusts the valve firmly (**Kp**, 4 by default), and shuts it a
+  little ahead of an overshoot. Rooms hold within about 0.05 °C. Settings
+  under **Configure → Controller**.
+- **Heat-up braking.** **Heat-up braking time** (10 minutes by default) is
+  how far ahead a heat-up predicts where the radiator's leftover heat will
+  carry the room, so it stops before the target rather than after it. 0 =
+  no anticipation. Auto-tune can learn it.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
-- **Heat-up braking.** Stops heating a little before the room reaches its
-  target, so the heat still in the radiator doesn't push it past. It can only
-  ever reduce heating. With deliberate valve control, the braking time
-  decides how early a heat-up stops (10 minutes ahead if it's 0).
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual
@@ -82,6 +81,10 @@ changes.
 **Removed**
 - The "Follow physical thermostat" switch and its two settings. If you turn
   the dial on the radiator, the next command from Roomstat overrides it.
+- The original PI controller, its derivative brake and adaptive gain
+  scheduling (with its four settings), replaced by the controller above.
+  Rooms set up before 2.2 are converted on the first start: Kp becomes 4,
+  and a braking time of 0 becomes 10 minutes.
 
 ## Install
 
@@ -115,8 +118,8 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 - **Reset auto-tune** forgets everything it learned. Changing Kp, Ki or the
   braking time yourself also starts learning again.
 
-You can set the braking time by hand instead, under **Configure → PI
-Controller → Heat-up braking time** (0 = off).
+You can set the braking time by hand instead, under **Configure →
+Controller → Heat-up braking time**, with **Learn heat-up braking** off.
 
 ## Schedule
 

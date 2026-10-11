@@ -7,6 +7,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
+from .climate_controllers import OBSOLETE_OPTIONS
 from .const import (
     CONF_AUTOTUNE_DERIVATIVE,
     CONF_AUTOTUNE_ENABLED,
@@ -16,11 +17,6 @@ from .const import (
     CONF_DERIVATIVE_TIME_MIN,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
-    CONF_GAIN_FINE_MULTIPLIER,
-    CONF_GAIN_FINE_THRESHOLD_C,
-    CONF_GAIN_SCHEDULING,
-    CONF_GAIN_STARTUP_MULTIPLIER,
-    CONF_GAIN_STARTUP_THRESHOLD_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -33,7 +29,6 @@ from .const import (
     CONF_SCHEDULE_OVERRIDE_MIN,
     CONF_SENSOR_GRACE_S,
     CONF_SOURCE_ENTITY_ID,
-    CONF_STEPPED_HEATING,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
     CONF_WINDOW_CLOSE_DELAY_S,
@@ -48,6 +43,9 @@ class RoomstatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """UI setup for the integration (initial setup)."""
 
     VERSION = 1
+    # 2: one controller (no switch, no gain scheduling); Kp is the gain near
+    # the target.  __init__.py async_migrate_entry converts older options.
+    MINOR_VERSION = 2
 
     async def async_step_user(self, user_input=None):
         errors: dict[str, str] = {}
@@ -122,6 +120,8 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 if key not in cleaned:
                     merged.pop(key, None)
             merged.update(cleaned)
+            for key in OBSOLETE_OPTIONS:
+                merged.pop(key, None)
             # Reload is triggered by the update_listener in __init__.py
             # AFTER HA has persisted the new options, avoiding stale data.
             return self.async_create_entry(title="", data=merged)
@@ -331,20 +331,16 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                     {"collapsed": True},
                 ),
 
-                # Section: PI Controller
+                # Section: Controller (key kept from the PI-only days)
                 vol.Required("pi_controller"): section(
                     vol.Schema(
                         {
-                            vol.Required(
-                                CONF_STEPPED_HEATING,
-                                default=opts.get(CONF_STEPPED_HEATING, defaults.stepped_enabled),
-                            ): selector.BooleanSelector(),
                             vol.Required(
                                 CONF_CORRECTION_KP,
                                 default=opts.get(CONF_CORRECTION_KP, defaults.tuning.kp),
                             ): selector.NumberSelector(
                                 selector.NumberSelectorConfig(
-                                    min=0.0, max=5.0, step=0.1,
+                                    min=0.5, max=10.0, step=0.1,
                                     mode=selector.NumberSelectorMode.BOX,
                                 )
                             ),
@@ -369,7 +365,9 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                             ),
                             vol.Required(
                                 CONF_DERIVATIVE_TIME_MIN,
-                                default=opts.get(CONF_DERIVATIVE_TIME_MIN, 0),
+                                default=opts.get(
+                                    CONF_DERIVATIVE_TIME_MIN, defaults.tuning.td_s / 60.0
+                                ),
                             ): selector.NumberSelector(
                                 selector.NumberSelectorConfig(
                                     min=0, max=45, step=1,
@@ -394,57 +392,6 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                                 CONF_AUTOTUNE_DERIVATIVE,
                                 default=opts.get(CONF_AUTOTUNE_DERIVATIVE, True),
                             ): selector.BooleanSelector(),
-                        }
-                    ),
-                    {"collapsed": True},
-                ),
-
-                # Section: Gain Scheduling
-                vol.Required("gain_scheduling"): section(
-                    vol.Schema(
-                        {
-                            vol.Required(
-                                CONF_GAIN_SCHEDULING,
-                                default=opts.get(CONF_GAIN_SCHEDULING, defaults.gain_scheduling_enabled),
-                            ): selector.BooleanSelector(),
-                            vol.Required(
-                                CONF_GAIN_FINE_MULTIPLIER,
-                                default=opts.get(CONF_GAIN_FINE_MULTIPLIER, defaults.gain_fine_multiplier),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=0.3, max=1.5, step=0.1,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                )
-                            ),
-                            vol.Required(
-                                CONF_GAIN_STARTUP_MULTIPLIER,
-                                default=opts.get(CONF_GAIN_STARTUP_MULTIPLIER, defaults.gain_startup_multiplier),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=1.0, max=3.0, step=0.1,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                )
-                            ),
-                            vol.Required(
-                                CONF_GAIN_STARTUP_THRESHOLD_C,
-                                default=opts.get(CONF_GAIN_STARTUP_THRESHOLD_C, defaults.gain_startup_threshold_c),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=0.5, max=5.0, step=0.1,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                    unit_of_measurement="°C",
-                                )
-                            ),
-                            vol.Required(
-                                CONF_GAIN_FINE_THRESHOLD_C,
-                                default=opts.get(CONF_GAIN_FINE_THRESHOLD_C, defaults.gain_fine_threshold_c),
-                            ): selector.NumberSelector(
-                                selector.NumberSelectorConfig(
-                                    min=0.1, max=2.0, step=0.1,
-                                    mode=selector.NumberSelectorMode.BOX,
-                                    unit_of_measurement="°C",
-                                )
-                            ),
                         }
                     ),
                     {"collapsed": True},

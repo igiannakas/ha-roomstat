@@ -61,23 +61,28 @@ ROOM_SENSOR_UNAVAILABLE_REPORT_S: float = 900.0
 
 
 # ---------------------------------------------------------------------------
-# Correction tuning  (PI layer on top of feedforward)
+# Tuning (the three values in the options flow, and what auto-tune learns)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class CorrectionTuning:
-    """PI correction parameters applied on top of the feedforward offset.
+    """Gains of the controller (regulation.py).
 
-    These are intentionally *small* – the feedforward does the heavy lifting.
+    kp: the gain near the target (hold).  A Tado answers small pushes late
+        and partly, so it is high: the valve is pushed by (1 + kp) x error.
+        In the two rooms fitted to real data (tests/plant_sim.py) 3-6 all
+        hold within about 0.03 °C; above 4 commands rise fast for little
+        gain.
+    ki: integral gain near the target, for a lasting offset.
+    td_s: the braking time: how far ahead a heat-up predicts where the heat
+        still in the radiator will carry the room (lead x rise rate), and so
+        how early it stops.  0 = no anticipation.  Auto-tune learns it from
+        the coast after each heat-up.
     """
 
-    kp: float = 0.8    # proportional gain for residual room-error correction
-    ki: float = 0.003   # integral gain for slow steady-state error correction
-    # Derivative brake time (s).  0 = off (default).  Only ever *reduces*
-    # the command while the room temperature is rising, so the TRV stops
-    # heating before the room reaches the target instead of after it.  See
-    # regulation.py and CLAUDE.md for why this is one-sided.
-    td_s: float = 0.0
+    kp: float = 4.0
+    ki: float = 0.003
+    td_s: float = 600.0
 
 
 # ---------------------------------------------------------------------------
@@ -90,8 +95,8 @@ class AutotuneConfig:
 
     # Absolute hard bounds on the tuned values.  Nothing the tuner does can
     # leave these, whatever the measurements say.
-    kp_min: float = 0.1
-    kp_max: float = 2.0
+    kp_min: float = 0.5
+    kp_max: float = 8.0
     ki_min: float = 0.00005
     ki_max: float = 0.005
     td_max_s: float = 2700.0           # 45 min
@@ -256,18 +261,14 @@ class RegulationConfig:
     # Minimum difference to current Tado setpoint before sending a new command
     min_change_threshold_c: float = 0.3
 
-    # Derivative brake limits.  The brake is -(1 + Kp) * Td * max(0, slope),
-    # clamped to [-derivative_max_c, 0]: it can lower the command by at most
-    # this much and can never raise it.
-    derivative_max_c: float = 2.0
     # Room slopes below this (°C/h) are treated as flat, so sensor jitter
-    # during a steady hold does not wiggle the command.
-    derivative_slope_deadband_c_per_h: float = 0.1
+    # does not count as rising or falling.
+    slope_deadband_c_per_h: float = 0.1
 
-    # Deliberate valve control (regulation.py).  The Tado's own controller
-    # opens the valve fully only when its setpoint is well above its own
-    # reading (about +5 °C) and stays shut only well below it (about -2 °C);
-    # in between it throttles, pulses and re-opens by itself as its reading
+    # The controller (regulation.py).  The Tado's own controller opens the
+    # valve fully only when its setpoint is well above its own reading
+    # (about +5 °C) and stays shut only well below it (about -2 °C); in
+    # between it throttles, pulses and re-opens by itself as its reading
     # falls.  So heat-ups run at full power and end with a firm stop, and
     # near the target fine adjustments are cut by a firm stop ahead of an
     # overshoot.
@@ -279,38 +280,23 @@ class RegulationConfig:
     # while holding (only 25/5: 0.06-0.12; the old PI: 0.19-0.27), heat-up
     # overshoot <= ~0.2 °C, 45-100 commands a day (25/5: 20-60; old PI:
     # 70-110).
-    stepped_enabled: bool = True
-    # Heat-ups: a deficit of stepped_heat_enter_c or more heats at full power
-    # (the maximum) until the heat still in the radiator is predicted to
-    # carry the room to within stepped_heat_exit_c of the target: error -
-    # lead x rise rate, lead = the braking time (learned by auto-tune) or
-    # stepped_lead_s.  Then the minimum while the room still rises (coast).
-    # 0.1 stops a little short: the slope estimate lags while the room is
-    # still accelerating, and the hold below picks up any shortfall.
-    stepped_heat_enter_c: float = 1.0
-    stepped_heat_exit_c: float = 0.1
-    stepped_lead_s: float = 600.0
-    # Near the target: the feedforward + PI command with this gain (the
-    # configured Kp applies only with deliberate control off).  A Tado
-    # answers small pushes late and partly, so the gain is high: the push is
-    # (1 + 4) x error.  In the fitted rooms 3-6 all hold within 0.03 °C;
-    # above 4, commands rise quickly for little gain.
-    stepped_hold_kp: float = 4.0
-    # ... with a firm stop (the minimum) once the room is predicted to be
-    # stepped_stop_c over the target within stepped_stop_lead_s, so the
+    #
+    # Heat-ups: a deficit of heatup_enter_c or more heats at full power (the
+    # maximum) until the heat still in the radiator is predicted to carry
+    # the room to within heatup_exit_c of the target: error - Td x rise
+    # rate.  Then the minimum while the room still rises (coast).  0.1 stops
+    # a little short: the slope estimate lags while the room is still
+    # accelerating, and the hold picks up any shortfall.
+    heatup_enter_c: float = 1.0
+    heatup_exit_c: float = 0.1
+    # Near the target, a firm stop (the minimum) once the room is predicted
+    # to be stop_over_c over the target within stop_lead_s, so the
     # radiator's leftover heat lands at most there.  Released once the room
-    # is predicted to fall back within stepped_release_c of the target in
-    # stepped_release_lead_s, so the radiator is warm again when needed.
-    # Without the firm stop the valve keeps heating just below its reading
+    # is predicted to fall back within release_c of the target in
+    # release_lead_s, so the radiator is warm again when needed.  Without
+    # the firm stop the valve keeps heating just below its reading
     # (0.05-0.08 °C RMS, +0.3 °C peaks).
-    stepped_stop_c: float = 0.1
-    stepped_stop_lead_s: float = 600.0
-    stepped_release_c: float = 0.02
-    stepped_release_lead_s: float = 1200.0
-
-    # Adaptive gain scheduling: scale Kp based on error magnitude
-    gain_scheduling_enabled: bool = True
-    gain_startup_multiplier: float = 1.5   # Kp multiplier when |error| > startup_threshold
-    gain_fine_multiplier: float = 1.0      # Kp multiplier when |error| < fine_threshold
-    gain_startup_threshold_c: float = 2.0  # error threshold for startup (aggressive) zone
-    gain_fine_threshold_c: float = 0.5     # error threshold for fine (gentle) zone
+    stop_over_c: float = 0.1
+    stop_lead_s: float = 600.0
+    release_c: float = 0.02
+    release_lead_s: float = 1200.0

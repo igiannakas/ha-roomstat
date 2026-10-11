@@ -62,25 +62,18 @@ CONF_OVERLAY_REFRESH_S = "overlay_refresh_s"
 # thermostat), read and commanded only while the source TRV is unavailable
 CONF_FALLBACK_ENTITY_ID = "fallback_entity_id"
 
-# PI controller tuning keys (stored in options)
+# Controller tuning keys (stored in options; see regulation.py).  Kp is the
+# gain near the target, the braking time how far ahead a heat-up predicts
+# its landing (minutes, 0 = no anticipation).  The keys keep their old names.
 CONF_CORRECTION_KP = "correction_kp"
 CONF_CORRECTION_KI = "correction_ki"
-# Derivative brake time in minutes (0 = off).  See regulation.py.
 CONF_DERIVATIVE_TIME_MIN = "derivative_time_min"
 
 # Background auto-tune (see autotune.py)
 CONF_AUTOTUNE_ENABLED = "autotune_enabled"
-# Let the auto-tuner learn the derivative brake time as well.
+# Let the auto-tuner learn the braking time as well.
 CONF_AUTOTUNE_DERIVATIVE = "autotune_derivative"
 
-# Adaptive gain scheduling
-CONF_GAIN_SCHEDULING = "gain_scheduling_enabled"
-# Deliberate valve control: only the maximum (heat) or the minimum (stop).
-CONF_STEPPED_HEATING = "stepped_heating_enabled"
-CONF_GAIN_FINE_MULTIPLIER = "gain_fine_multiplier"
-CONF_GAIN_STARTUP_MULTIPLIER = "gain_startup_multiplier"
-CONF_GAIN_STARTUP_THRESHOLD_C = "gain_startup_threshold_c"
-CONF_GAIN_FINE_THRESHOLD_C = "gain_fine_threshold_c"
 CONF_MIN_COMMAND_INTERVAL_S = "min_command_interval_s"
 CONF_MIN_CHANGE_THRESHOLD_C = "min_change_threshold_c"
 CONF_INTEGRAL_DEADBAND_C = "integral_deadband_c"

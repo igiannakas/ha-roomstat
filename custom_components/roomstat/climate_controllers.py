@@ -975,3 +975,47 @@ def _get_call_later() -> _CallLaterFn:
     """Return HA's ``async_call_later`` (imported lazily to stay HA-free at module level)."""
     from homeassistant.helpers.event import async_call_later  # noqa: PLC0415
     return async_call_later
+
+
+# ---------------------------------------------------------------------------
+# Config entry migration (__init__.py async_migrate_entry)
+# ---------------------------------------------------------------------------
+
+# Options of entries made before 2.2 (config entry minor version 1), when the
+# controller had a switch (deliberate valve control on or off), gain
+# scheduling and a plain PI path with a small Kp.  Keys as in const.py.
+OBSOLETE_OPTIONS = (
+    "stepped_heating_enabled",
+    "gain_scheduling_enabled",
+    "gain_fine_multiplier",
+    "gain_startup_multiplier",
+    "gain_startup_threshold_c",
+    "gain_fine_threshold_c",
+)
+
+
+def migrate_options_v1_to_v2(
+    options: Mapping[str, Any], kp: float, braking_time_min: float,
+) -> dict[str, Any]:
+    """Options of a minor version 1 entry, in the current meaning.
+
+    The obsolete keys go.  Kp was the plain PI path's gain (around 0.6-0.8),
+    a different scale from the gain near the target now (``kp``, 4), so a
+    stored Kp is replaced.  A braking time of 0 meant "10 minutes ahead"
+    with deliberate valve control, which is now the visible default
+    (``braking_time_min``); any other value already was the heat-up lead
+    and is kept.  The changed values restart auto-tune's learning (its
+    baseline changes), so what it learned with the old controller goes too.
+    """
+    new = {k: v for k, v in options.items() if k not in OBSOLETE_OPTIONS}
+    if "correction_kp" in new:
+        new["correction_kp"] = kp
+    if "derivative_time_min" in new:
+        try:
+            td_min = float(new["derivative_time_min"])
+        except (TypeError, ValueError):
+            td_min = 0.0
+        if not math.isfinite(td_min) or td_min <= 0:
+            new["derivative_time_min"] = braking_time_min
+    return new
+

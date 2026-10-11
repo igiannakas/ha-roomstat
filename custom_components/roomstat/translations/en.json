@@ -81,21 +81,19 @@
             }
           },
           "pi_controller": {
-            "name": "PI Controller",
-            "description": "Proportional-integral controller tuning parameters.",
+            "name": "Controller",
+            "description": "Heat-ups run at full power and stop early enough for the radiator's leftover heat to reach the target. Near the target, the valve's setpoint is adjusted firmly and the valve is shut a little ahead of an overshoot.",
             "data": {
-              "stepped_heating_enabled": "Deliberate valve control",
-              "correction_kp": "Proportional correction (Kp)",
-              "correction_ki": "Integral correction (Ki)",
+              "correction_kp": "Gain near the target (Kp)",
+              "correction_ki": "Integral gain (Ki)",
               "integral_deadband_c": "Integral precision zone",
-              "derivative_time_min": "Heat-up braking time (derivative)"
+              "derivative_time_min": "Heat-up braking time"
             },
             "data_description": {
-              "stepped_heating_enabled": "Roomstat heats up at full power and shuts the valve early enough for the radiator's leftover heat to reach the target, because a Tado answers small changes late and only partly. Near the target it adjusts the valve firmly and shuts it a little ahead of an overshoot. Off: the PI controller below adjusts the valve's setpoint (Kp and gain scheduling only apply then).",
-              "correction_kp": "Proportional gain of the PI controller. Higher values react faster to temperature deviations.",
-              "correction_ki": "Integral gain of the PI controller. Higher values correct persistent offsets more aggressively.",
-              "integral_deadband_c": "Integral only accumulates when the error is within this zone. Prevents overshoot during large transients.",
-              "derivative_time_min": "0 = off. Lowers the command while the room is warming, so the radiator stops before the room reaches the target instead of after it. It can only ever reduce heating. Typical 15–35 min. When auto-tune learns braking, this is only its starting value."
+              "correction_kp": "How firmly the valve is pushed near the target: by (1 + Kp) × the room's error. A Tado reacts late and only partly to small changes, so this is high. Typical 3–6.",
+              "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster.",
+              "integral_deadband_c": "The integral only builds up when the room is this close to the target, so heat-ups never wind it up.",
+              "derivative_time_min": "How far ahead a heat-up predicts where the radiator's leftover heat will carry the room, and so how early it stops. 0 = no anticipation. When auto-tune learns braking, this is only its starting value."
             }
           },
           "autotune": {
@@ -108,24 +106,6 @@
             "data_description": {
               "autotune_enabled": "Adjusts the controller a little at a time and undoes any change that makes things worse. Changing Kp, Ki or the braking time above restarts learning.",
               "autotune_derivative": "Also learn how early to stop heating before the target, from how long the radiator keeps heating after Tado is told to stop. Recommended."
-            }
-          },
-          "gain_scheduling": {
-            "name": "Gain Scheduling",
-            "description": "Automatic Kp scaling based on temperature error.",
-            "data": {
-              "gain_scheduling_enabled": "Adaptive gain scheduling",
-              "gain_fine_multiplier": "Near-target strength",
-              "gain_startup_multiplier": "Cold-start boost",
-              "gain_startup_threshold_c": "Cold-start zone threshold",
-              "gain_fine_threshold_c": "Near-target zone threshold"
-            },
-            "data_description": {
-              "gain_scheduling_enabled": "Faster heating on cold start, gentler near target.",
-              "gain_fine_multiplier": "Kp multiplier when close to target. Only active when adaptive gain scheduling is enabled.",
-              "gain_startup_multiplier": "Kp multiplier during cold start (large error). Only active when adaptive gain scheduling is enabled.",
-              "gain_startup_threshold_c": "Error above this threshold activates cold-start multiplier.",
-              "gain_fine_threshold_c": "Error below this threshold activates near-target multiplier."
             }
           },
           "trv_communication": {

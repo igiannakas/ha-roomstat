@@ -225,7 +225,7 @@ class RegulationMixin:
         # 3. Effective setpoint (considers HVAC mode + preset)
         setpoint = self._effective_setpoint()
 
-        # 3b. Robust room slope for the derivative brake (only on fresh
+        # 3b. Robust room slope for the heat-up and stop predictions (only on fresh
         # readings; a bridged/stale value must not look like a flat room).
         slope = None
         if not self._sensor_degraded:
@@ -270,8 +270,8 @@ class RegulationMixin:
 
         Sets ``_last_reason``.  Rate limiting: at most one command per
         ``min_command_interval_s``, except an urgent decrease and a
-        deliberate command (``strong``: the start or end of a heat burst,
-        one command each, which must not wait).
+        strong command (``strong``: heat, coast or stop, one command each,
+        which must not wait).
         """
         # Prefer our own last-sent value (always fresh) over coordinator data
         # (which may be up to 60s stale from the polling interval).
@@ -370,7 +370,7 @@ class RegulationMixin:
                     reason = "urgent_decrease"
                 elif strong and new_command:
                     should_send = True
-                    reason = "stepped"
+                    reason = "strong"
                 else:
                     remaining = int(self._config.min_command_interval_s - time_since_last)
                     reason = f"rate_limited({remaining}s)"

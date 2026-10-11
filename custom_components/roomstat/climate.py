@@ -73,11 +73,6 @@ from .const import (
     CONF_ECO_TARGET,
     CONF_FALLBACK_ENTITY_ID,
     CONF_FROST_PROTECTION_TARGET,
-    CONF_GAIN_FINE_MULTIPLIER,
-    CONF_GAIN_FINE_THRESHOLD_C,
-    CONF_GAIN_SCHEDULING,
-    CONF_GAIN_STARTUP_MULTIPLIER,
-    CONF_GAIN_STARTUP_THRESHOLD_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -86,7 +81,6 @@ from .const import (
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SENSOR_GRACE_S,
-    CONF_STEPPED_HEATING,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
     CONF_WINDOW_DELAY_S,
@@ -292,7 +286,9 @@ class RoomstatClimate(
         if opts:
             kp = opts.get(CONF_CORRECTION_KP, config.tuning.kp)
             ki = opts.get(CONF_CORRECTION_KI, config.tuning.ki)
-            td_s = float(opts.get(CONF_DERIVATIVE_TIME_MIN, 0) or 0) * 60.0
+            td_s = float(
+                opts.get(CONF_DERIVATIVE_TIME_MIN, config.tuning.td_s / 60.0) or 0
+            ) * 60.0
             config.tuning = CorrectionTuning(kp=kp, ki=ki, td_s=td_s)
             config.presets = PresetConfig(
                 eco_target_c=opts.get(CONF_ECO_TARGET, config.presets.eco_target_c),
@@ -306,25 +302,6 @@ class RoomstatClimate(
             # raising max_target_c above what the TRV will accept.
             config.presets.boost_target_c = min(
                 config.presets.boost_target_c, config.max_target_c
-            )
-            config.stepped_enabled = bool(
-                opts.get(CONF_STEPPED_HEATING, config.stepped_enabled)
-            )
-            # Adaptive gain scheduling
-            config.gain_scheduling_enabled = opts.get(
-                CONF_GAIN_SCHEDULING, config.gain_scheduling_enabled
-            )
-            config.gain_fine_multiplier = opts.get(
-                CONF_GAIN_FINE_MULTIPLIER, config.gain_fine_multiplier
-            )
-            config.gain_startup_multiplier = opts.get(
-                CONF_GAIN_STARTUP_MULTIPLIER, config.gain_startup_multiplier
-            )
-            config.gain_startup_threshold_c = opts.get(
-                CONF_GAIN_STARTUP_THRESHOLD_C, config.gain_startup_threshold_c
-            )
-            config.gain_fine_threshold_c = opts.get(
-                CONF_GAIN_FINE_THRESHOLD_C, config.gain_fine_threshold_c
             )
             config.min_command_interval_s = opts.get(
                 CONF_MIN_COMMAND_INTERVAL_S, config.min_command_interval_s
@@ -1004,7 +981,6 @@ class RoomstatClimate(
                 "feedforward_offset_c": r.feedforward_offset_c,
                 "p_correction_c": r.p_correction_c,
                 "i_correction_c": r.i_correction_c,
-                "d_correction_c": r.d_correction_c,
                 "error_c": r.error_c,
                 "target_for_tado_c": r.target_for_tado_c,
                 "is_saturated": r.is_saturated,

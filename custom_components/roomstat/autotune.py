@@ -1,22 +1,25 @@
-"""Background PI(D) auto-tuning for Roomstat (HA-independent).
+"""Background auto-tuning for Roomstat (HA-independent).
 
 Design summary (more in CLAUDE.md, "Auto-tune")
 -----------------------------------------------
 The proxy cannot move the valve.  It sets a target for the TRV, whose own
-controller (with its own integrator) moves the valve.  Because the
-feedforward cancels the TRV reading, the TRV acts on
+controller (with its own integrator) moves the valve.  Near the target the
+feedforward cancels the TRV reading, so the TRV acts on
 
-    demand = (1 + kp) * error + integral + derivative_brake
+    demand = (1 + kp) * error + integral
 
-so the plant seen by the tuner is *demand -> TRV controller -> valve ->
-radiator -> room air -> room sensor*.  Measured on real rooms it is:
+and a heat-up is the maximum until the predicted landing, then the minimum
+(regulation.py).  The plant seen by the tuner is *demand -> TRV controller
+-> valve -> radiator -> room air -> room sensor*.  Measured on real rooms
+it is:
 
 * an integrating process with dead time (rooms lose heat over tens of
   hours, so SIMC's integrating rules apply: Ti = 4 (tau_c + theta));
 * strongly asymmetric: heating runs at 1-3 °C/h, passive cooling at
   0.3-0.5 °C/h, so overshoot is far more costly than undershoot;
-* followed by a long "coast": the TRV keeps delivering heat for 30-60 min
-  after its demand turns negative.
+* followed by a "coast": the radiator keeps delivering heat after its
+  demand turns negative (minutes after a hard stop; 30-60 min after a weak
+  one, when the TRV's own integrator unwinds slowly).
 
 The tuner therefore learns from naturally occurring episodes, never from
 injected test signals:
@@ -26,10 +29,11 @@ injected test signals:
 * **Holds** (steady setpoint after a heat-up) give the mean offset and
   any oscillation.
 
-and moves Kp, Ki and the derivative brake time Td in small, bounded,
-rate-limited steps, with SIMC providing the ceilings and a watchdog that
-rolls back any change that made things worse.  It only ever adjusts the
-values the regulator uses; it never writes config options.
+and moves Kp, Ki and the braking time Td (how far ahead a heat-up predicts
+its landing) in small, bounded, rate-limited steps, with SIMC providing the
+ceilings and a watchdog that rolls back any change that made things worse.
+It only ever adjusts the values the regulator uses; it never writes config
+options.
 """
 from __future__ import annotations
 
@@ -142,7 +146,7 @@ class SlopeEstimator:
 
     One sample per regulation cycle.  A repeated (unchanged) reading is real
     information – "no change at this resolution" – and pulls the slope
-    towards zero, which for a brake is the safe direction.  Wild reports are
+    towards zero, which for the predictions is the safe direction.  Wild reports are
     removed by a :class:`SpikeFilter` first, and the median of pairwise
     slopes then ignores up to ~29 % remaining outliers.  Returns °C/s, or
     None while the window is too short or after a data gap.
@@ -695,7 +699,8 @@ class Autotuner:
       (the trims are re-anchored to the restored values) and only after
       the normal rate limit;
     * a large oscillation detunes immediately;
-    * the derivative brake can only lower the command (regulation.py).
+    * the braking time only moves the heat-up's end and only uses a rising
+      room (regulation.py).
     """
 
     VERSION = 1
@@ -1000,7 +1005,7 @@ class Autotuner:
         td_model = (_clamp(model_coast * self._trim["td_s"], 0, c.td_max_s)
                     if model_coast is not None else None)
         td_near_model = td_model is None or m.td_s >= 0.85 * td_model
-        braking = m.td_s > 0                       # a brake was active (learned or manual)
+        braking = m.td_s > 0                       # a braking time was set (learned or manual)
         learns_td = self.derivative_allowed and braking
         if os > c.overshoot_target_c + 0.1:
             if learns_td and td_near_model:
@@ -1021,8 +1026,8 @@ class Autotuner:
                     if self._votes["td_down"] >= c.confirm_up:
                         self._trim_by("td_s", 0.85)
                         self._votes["td_down"] = 0
-                # Manual brake with learning off: the user's Td is the cause;
-                # raising Kp would not help (the brake scales with 1 + Kp).
+                # Manual braking time with learning off: the user's Td is
+                # the cause; raising Kp would not help.
             else:
                 self._votes["kp_up"] += 1
                 if self._votes["kp_up"] >= c.confirm_up:
