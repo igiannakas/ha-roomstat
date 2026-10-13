@@ -110,8 +110,9 @@
           },
           "trv_communication": {
             "name": "TRV-Kommunikation",
-            "description": "Befehlsintervalle, Batterieschonung und ein Ersatz, wenn das TRV nicht erreichbar ist.",
+            "description": "Das Thermostat, Befehlsintervalle, Batterieschonung und ein Ersatz, wenn das TRV nicht erreichbar ist.",
             "data": {
+              "source_entity_id": "Thermostat (TRV)",
               "min_command_interval_s": "Mindest-Befehlsintervall",
               "min_change_threshold_c": "Mindest-Änderungsschwelle",
               "overlay_refresh_s": "Overlay-Refresh-Intervall",
@@ -119,6 +120,7 @@
               "prefer_fallback": "Ersatz-Thermostat zuerst verwenden"
             },
             "data_description": {
+              "source_entity_id": "Die Klima-Entität, die Roomstat liest und steuert: das Ventil über HomeKit oder das Tado-Cloud-Thermostat des Raums. Um HomeKit nicht mehr zu verwenden, hier das Cloud-Thermostat wählen; war es das Ersatz-Thermostat, wird der Ersatz entfernt. Ein Cloud-Thermostat wird per Abfrage aktualisiert, daher wartet Roomstat länger, bevor es einen nicht angekommenen Befehl erneut sendet.",
               "min_command_interval_s": "Mindestzeit zwischen Befehlen an das TRV (Batterieschonung).",
               "min_change_threshold_c": "Mindestdifferenz zum aktuellen Tado-Sollwert, bevor ein neuer Befehl gesendet wird.",
               "overlay_refresh_s": "Sollwert periodisch erneut an das TRV senden, um Cloud-API-Overlays aktiv zu halten. 0 = aus. Mit HomeKit nicht nötig: Roomstat prüft jede Minute, ob das TRV seinen Befehl noch hält, und sendet ihn sonst erneut.",
@@ -144,6 +146,9 @@
     "error": {
       "temp_entity_not_found": "Externer Temperatursensor nicht gefunden.",
       "temp_not_temperature": "Bitte einen Temperatursensor (device_class: temperature) auswählen."
+    },
+    "abort": {
+      "trv_in_use": "Dieses Thermostat wird bereits von einem anderen Roomstat-Raum verwendet."
     }
   },
   "entity": {

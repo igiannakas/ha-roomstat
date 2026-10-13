@@ -110,8 +110,9 @@
           },
           "trv_communication": {
             "name": "TRV Communication",
-            "description": "Command timing, battery conservation, and a fallback for when the TRV is unavailable.",
+            "description": "The thermostat, command timing, battery conservation, and a fallback for when the TRV is unavailable.",
             "data": {
+              "source_entity_id": "Thermostat (TRV)",
               "min_command_interval_s": "Minimum command interval",
               "min_change_threshold_c": "Minimum change threshold",
               "overlay_refresh_s": "Overlay refresh interval",
@@ -119,6 +120,7 @@
               "prefer_fallback": "Use the fallback first"
             },
             "data_description": {
+              "source_entity_id": "The climate entity Roomstat reads and commands: the valve via HomeKit, or the room's Tado cloud thermostat. To stop using HomeKit, pick the cloud thermostat here; if it was the fallback, the fallback is removed. A cloud thermostat is updated by polling, so Roomstat waits longer before it re-sends a command that has not shown up.",
               "min_command_interval_s": "Minimum time between commands sent to the TRV (battery conservation).",
               "min_change_threshold_c": "Minimum difference to the current Tado setpoint before a new command is sent.",
               "overlay_refresh_s": "Periodically resend the setpoint to the TRV to keep cloud-API overlays alive. 0 = off. Not needed with HomeKit: Roomstat checks every minute that the TRV still holds its command and sends it again if not.",
@@ -144,6 +146,9 @@
     "error": {
       "temp_entity_not_found": "External temperature sensor not found.",
       "temp_not_temperature": "Please select a temperature sensor (device_class: temperature)."
+    },
+    "abort": {
+      "trv_in_use": "That thermostat is already used by another Roomstat room."
     }
   },
   "entity": {

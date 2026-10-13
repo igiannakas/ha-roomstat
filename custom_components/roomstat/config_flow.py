@@ -7,7 +7,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
-from .climate_controllers import OBSOLETE_OPTIONS
+from .climate_controllers import OBSOLETE_OPTIONS, change_trv
 from .const import (
     CONF_AUTOTUNE_DERIVATIVE,
     CONF_AUTOTUNE_ENABLED,
@@ -123,6 +123,24 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
             merged.update(cleaned)
             for key in OBSOLETE_OPTIONS:
                 merged.pop(key, None)
+
+            # The TRV lives in the entry data (it is also the unique ID).
+            # Changing it writes data and options in one update, so the room
+            # reloads once; the options saved below are then unchanged.
+            entry = self.config_entry
+            new_source = merged.pop(CONF_SOURCE_ENTITY_ID, None)
+            if new_source and new_source != entry.data.get(CONF_SOURCE_ENTITY_ID):
+                for other in self.hass.config_entries.async_entries(DOMAIN):
+                    if other.entry_id != entry.entry_id and (
+                        other.unique_id == new_source
+                        or other.data.get(CONF_SOURCE_ENTITY_ID) == new_source
+                    ):
+                        return self.async_abort(reason="trv_in_use")
+                new_data, merged = change_trv(entry.data, merged, new_source)
+                self.hass.config_entries.async_update_entry(
+                    entry, data=new_data, options=merged, unique_id=new_source
+                )
+
             # Reload is triggered by the update_listener in __init__.py
             # AFTER HA has persisted the new options, avoiding stale data.
             return self.async_create_entry(title="", data=merged)
@@ -240,6 +258,15 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         source_entity = data.get(CONF_SOURCE_ENTITY_ID)
         trv_section_schema = vol.Schema(
             {
+                # The TRV the room reads and commands, e.g. a Tado valve via
+                # HomeKit, or the room's Tado cloud thermostat to stop using
+                # HomeKit.  Choosing the fallback here removes the fallback.
+                vol.Required(
+                    CONF_SOURCE_ENTITY_ID,
+                    default=source_entity,
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="climate")
+                ),
                 vol.Required(
                     CONF_MIN_COMMAND_INTERVAL_S,
                     default=opts.get(CONF_MIN_COMMAND_INTERVAL_S, defaults.min_command_interval_s),

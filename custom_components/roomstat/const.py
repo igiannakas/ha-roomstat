@@ -67,6 +67,12 @@ CONF_FALLBACK_ENTITY_ID = "fallback_entity_id"
 # default: every cloud command costs Tado API calls.
 CONF_PREFER_FALLBACK = "prefer_fallback"
 
+# Integrations whose climate entities reach the TRV through a cloud API that
+# Home Assistant polls (minutes between updates).  A TRV from one of them
+# gets the slower drift grace, whether it is the configured TRV or the
+# fallback (see climate_regulation.py).
+CLOUD_TRV_PLATFORMS = frozenset({"tado"})
+
 # Controller tuning keys (stored in options; see regulation.py).  Kp is the
 # gain near the target, the braking time how far ahead a heat-up predicts
 # its landing (minutes, 0 = no anticipation).  The keys keep their old names.

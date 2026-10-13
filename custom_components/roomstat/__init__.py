@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -19,7 +20,12 @@ from .climate_controllers import (
     plausible_c,
     read_trv,
 )
-from .const import CONF_EXTERNAL_TEMPERATURE_ENTITY_ID, CONF_FALLBACK_ENTITY_ID, DOMAIN
+from .const import (
+    CLOUD_TRV_PLATFORMS,
+    CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
+    CONF_FALLBACK_ENTITY_ID,
+    DOMAIN,
+)
 from .parameters import (
     ENTITY_MISSING_REPORT_S,
     ROOM_SENSOR_UNAVAILABLE_REPORT_S,
@@ -128,6 +134,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_min_temp"] = trv["min"]
             data[f"{prefix}_max_temp"] = trv["max"]
             data[f"{prefix}_off"] = trv["off"]
+            # Which integration provides it: a cloud one is polled, so its
+            # values can be minutes old (slower drift grace).
+            reg_entry = er.async_get(hass).async_get(entity_id) if entity_id else None
+            data[f"{prefix}_cloud"] = (
+                reg_entry is not None and reg_entry.platform in CLOUD_TRV_PLATFORMS
+            )
 
         async_check_entities(
             hass, entry, missing_watch, time.time(),

@@ -961,3 +961,41 @@ class TestMigrateOptions:
         old = dict(self.OLD)
         migrate_options_v1_to_v2(old, 4.0, 10.0)
         assert old == self.OLD
+
+
+# ---------------------------------------------------------------------------
+# Changing the room's TRV (e.g. HomeKit valve -> Tado cloud thermostat)
+# ---------------------------------------------------------------------------
+
+change_trv = _ctrl_mod.change_trv
+
+
+class TestChangeTrv:
+
+    DATA = {"source_entity_id": HOMEKIT, "name": "Study",
+            "external_temperature_entity_id": "sensor.study"}
+
+    def test_to_the_fallback_removes_the_fallback(self):
+        data, opts = change_trv(
+            self.DATA,
+            {"fallback_entity_id": CLOUD, "prefer_fallback": True, "correction_kp": 4},
+            CLOUD,
+        )
+        assert data == {**self.DATA, "source_entity_id": CLOUD}
+        assert opts == {"correction_kp": 4}
+
+    def test_to_another_entity_keeps_the_fallback(self):
+        opts_in = {"fallback_entity_id": CLOUD, "prefer_fallback": True}
+        data, opts = change_trv(self.DATA, opts_in, "climate.other")
+        assert data["source_entity_id"] == "climate.other"
+        assert opts == opts_in
+
+    def test_inputs_are_not_changed(self):
+        data_in, opts_in = dict(self.DATA), {"fallback_entity_id": CLOUD}
+        change_trv(data_in, opts_in, CLOUD)
+        assert data_in == self.DATA and opts_in == {"fallback_entity_id": CLOUD}
+
+    def test_slow_readings(self):
+        assert not TrvReading(HOMEKIT, 20.0).slow
+        assert TrvReading(CLOUD, 20.0, is_cloud=True).slow
+        assert TrvReading(CLOUD, 20.0, is_fallback=True).slow

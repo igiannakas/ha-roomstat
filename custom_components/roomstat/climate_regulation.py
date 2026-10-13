@@ -257,7 +257,10 @@ class RegulationMixin:
         # fallback carries the commands: it is the same valve.  When only the
         # fallback reads, the tuner keeps learning from the room sensor but
         # without the TRV's reading: cloud polling can be minutes old, so the
-        # TRV demand is unknown for those cycles (no demand crossing).
+        # TRV demand is unknown for those cycles (no demand crossing).  A
+        # configured TRV that is itself a cloud entity (no local link at all)
+        # is the only reading there is, so the tuner gets it: the demand
+        # crossing comes from the command step, which shows at once.
         self._feed_autotune(
             now, setpoint, room_temp,
             self._source_trv_internal() if trv.is_fallback else tado_internal,
@@ -292,7 +295,7 @@ class RegulationMixin:
             self._last_sent_setpoint,
             trv.setpoint_c,
             time_since_last,
-            FALLBACK_DRIFT_GRACE_S if trv.is_fallback else TRV_DRIFT_GRACE_S,
+            FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S,
             self._config.min_change_threshold_c,
             trv_off=trv.off,
             floor_c=self._config.min_target_c,
@@ -400,7 +403,7 @@ class RegulationMixin:
         """
         trv = self._active_trv()
         self._note_trv_source(trv)
-        grace = FALLBACK_DRIFT_GRACE_S if trv.is_fallback else TRV_DRIFT_GRACE_S
+        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
         since = now - self._last_command_sent_ts
         reason = "hvac_off"
         if (

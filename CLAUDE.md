@@ -179,11 +179,22 @@ Read this before changing `regulation.py` or `parameters.py`.
   reading while it is available (the same valve, pushed at once over
   HomeKit), even when the commands go through the fallback. Leaving the
   preferred entity is logged as a warning, coming back as info.
+- **Cloud TRVs** (`CLOUD_TRV_PLATFORMS`, today `tado`): the coordinator marks
+  each TRV entity from a cloud integration (`<prefix>_cloud`, from the entity
+  registry), and `TrvReading.slow` (fallback or cloud) picks the 6-min drift
+  grace. So a room can run on the Tado cloud thermostat alone, with HomeKit
+  disabled (owner, Oct 2026: HomeKit was suspected of locking up the
+  bridge). Then the cloud reading also feeds the auto-tuner, as the only
+  one there is: the demand crossing comes from the command step, which the
+  command's own refresh shows at once. The TRV can be changed in the options
+  flow (TRV section); it is written to the entry data and unique ID together
+  with the options (`change_trv`, one reload), and a fallback that becomes
+  the TRV is removed with "prefer the fallback".
 - **Command spacing:** one `CommandPacer` for all rooms keeps TRV commands at
   least `TRV_COMMAND_SPACING_S` (5 s) apart. All rooms run their cycle on the
   same minute after a restart, and all V3+ valves share one bridge.
 - **Lost commands:** if the TRV still reports a different setpoint
-  `TRV_DRIFT_GRACE_S` (2 min; 6 min on a fallback) after a command, the
+  `TRV_DRIFT_GRACE_S` (2 min; 6 min on a fallback or cloud TRV) after a command, the
   command is sent again (`trv_setpoint_drifted`). This covers a command lost
   on the way and a Tado schedule block that ended the override, so blind
   overlay refreshes are not needed with HomeKit (`overlay_refresh_s` 0).

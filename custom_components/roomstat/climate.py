@@ -921,6 +921,7 @@ class RoomstatClimate(
                 min_c=data.get(f"{prefix}_min_temp"),
                 max_c=data.get(f"{prefix}_max_temp"),
                 off=bool(data.get(f"{prefix}_off")),
+                is_cloud=bool(data.get(f"{prefix}_cloud")),
             )
 
         primary = reading(self._config_entry.data.get("source_entity_id"), "tado")
@@ -957,6 +958,7 @@ class RoomstatClimate(
             "regulation_reason": self._last_reason,
             "tado_internal_temp_c": trv.internal_c,
             "trv_fallback_active": trv.is_fallback,
+            "trv_cloud": trv.is_cloud,
             "trv_prefer_fallback": self._prefer_fallback(),
             "active_trv_entity_id": trv.entity_id,
             "last_command_error": self._last_command_error,

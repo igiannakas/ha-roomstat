@@ -615,6 +615,15 @@ class TrvReading:
     min_c: float | None = None
     max_c: float | None = None
     off: bool = False                 # the entity is in hvac mode "off"
+    # Read through a polled cloud API (e.g. the Tado integration): its
+    # readings and setpoint can be minutes old.
+    is_cloud: bool = False
+
+    @property
+    def slow(self) -> bool:
+        """Readings arrive by cloud polling: allow longer before a command
+        that does not show up counts as lost."""
+        return self.is_fallback or self.is_cloud
 
     @property
     def usable(self) -> bool:
@@ -688,6 +697,24 @@ def choose_trv(
     if primary.usable or not fallback.usable:
         return primary
     return replace(fallback, is_fallback=True)
+
+
+def change_trv(
+    data: Mapping[str, Any], options: Mapping[str, Any], new_source: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Entry data and options after the room's TRV is changed to *new_source*.
+
+    A fallback that is now the TRV itself is removed, together with "prefer
+    the fallback" (e.g. moving a room from its HomeKit valve to the Tado cloud
+    thermostat that was its fallback, to stop using HomeKit).
+    """
+    # Keys as in const.py (this module stays free of Home Assistant imports).
+    new_data = {**data, "source_entity_id": new_source}
+    new_options = dict(options)
+    if new_options.get("fallback_entity_id") == new_source:
+        new_options.pop("fallback_entity_id", None)
+        new_options.pop("prefer_fallback", None)
+    return new_data, new_options
 
 
 def trv_setpoint_drifted(

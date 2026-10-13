@@ -344,3 +344,72 @@ def test_prefer_fallback_tuner_reads_the_valve(monkeypatch):
     _feed(ent, room=19.1, trv=None, cloud=(17.5, 20.0))
     _cycle(ent)
     assert [s.tado_internal_c for s in seen] == [18.0, None]
+
+
+# --- A cloud thermostat as the configured TRV (no HomeKit at all) -----------
+
+
+def _feed_cloud_trv(ent, *, room=19.0, trv=(18.0, 20.0)):
+    """Coordinator data when the configured TRV is a cloud entity."""
+    _feed(ent, room=room, trv=trv, cloud=None)
+    ent.coordinator.data["tado_cloud"] = True
+
+
+def test_cloud_trv_gets_the_slower_drift_grace(monkeypatch):
+    """A configured TRV read through cloud polling waits the fallback's
+    grace (6 min), not the local 2 min, before re-sending a command."""
+    clock = _Clock(monkeypatch)
+    ent = _make_entity({"overlay_refresh_s": 0})
+    _run(_start(ent))
+    _feed_cloud_trv(ent)
+    _cycle(ent)
+    sent = ent._last_sent_setpoint
+    assert sent is not None
+    assert ent.extra_state_attributes["trv_cloud"] is True
+    assert ent.extra_state_attributes["trv_fallback_active"] is False
+    ent.hass.service_calls.clear()
+
+    # 4 min later the cloud still shows the old setpoint: not lost yet.
+    clock.tick(240)
+    _feed_cloud_trv(ent, trv=(18.0, 15.0))
+    _cycle(ent)
+    assert _sent(ent) == []
+
+    # Past 6 min it is.
+    clock.tick(180)
+    _feed_cloud_trv(ent, trv=(18.0, 15.0))
+    _cycle(ent)
+    assert _sent(ent) == [(TRV, sent)]
+
+
+def test_local_trv_keeps_the_short_grace(monkeypatch):
+    clock = _Clock(monkeypatch)
+    ent = _make_entity({"overlay_refresh_s": 0})
+    _run(_start(ent))
+    _feed(ent, cloud=None)
+    _cycle(ent)
+    sent = ent._last_sent_setpoint
+    assert ent.extra_state_attributes["trv_cloud"] is False
+    ent.hass.service_calls.clear()
+    clock.tick(240)
+    _feed(ent, trv=(18.0, 15.0), cloud=None)
+    _cycle(ent)
+    assert _sent(ent) == [(TRV, sent)]
+
+
+def test_cloud_trv_reading_feeds_the_tuner(monkeypatch):
+    """With no local link the cloud reading is the only one, so the tuner
+    gets it (the demand crossing comes from the command step)."""
+    clock = _Clock(monkeypatch)
+    ent = _make_entity({"autotune_enabled": True, "correction_kp": 0.6,
+                        "correction_ki": 0.002})
+    _run(_start(ent))
+    seen = []
+    orig = ent._autotuner.observe
+    ent._autotuner.observe = lambda s: (seen.append(s), orig(s))[1]
+    _feed_cloud_trv(ent)
+    _cycle(ent)
+    clock.tick(60)
+    _feed_cloud_trv(ent, room=19.1, trv=(18.4, 20.0))
+    _cycle(ent)
+    assert [s.tado_internal_c for s in seen] == [18.0, 18.4]

@@ -36,8 +36,9 @@ TRV_COMMAND_SPACING_S: float = 5.0
 # A TRV whose setpoint still differs from the last command this long after it
 # was sent did not take it (lost on the way, or a Tado schedule block ended
 # the override): the command is sent again.  This replaces blind periodic
-# re-sends.  Longer for a fallback entity, whose readings come from cloud
-# polling (about every 5 min).
+# re-sends.  Longer for the fallback entity and for any cloud entity
+# (const.CLOUD_TRV_PLATFORMS), whose readings come from cloud polling (every
+# 5-30 min; a command's own refresh shows at once).
 TRV_DRIFT_GRACE_S: float = 120.0
 FALLBACK_DRIFT_GRACE_S: float = 360.0
 
