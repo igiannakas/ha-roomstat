@@ -662,7 +662,9 @@ def command_limits(
     return (lo, hi) if lo <= hi else (cfg_min, cfg_max)
 
 
-def choose_trv(primary: TrvReading, fallback: TrvReading | None) -> TrvReading:
+def choose_trv(
+    primary: TrvReading, fallback: TrvReading | None, prefer_fallback: bool = False
+) -> TrvReading:
     """The TRV to read and command this cycle.
 
     The configured valve whenever it gives a reading.  When it does not
@@ -670,13 +672,20 @@ def choose_trv(primary: TrvReading, fallback: TrvReading | None) -> TrvReading:
     Tado cloud thermostat, which reaches the same valve another way), the
     fallback.  Otherwise the configured valve, so the cycle waits for it as
     before.  A fallback that is the configured valve itself is ignored.
+
+    With ``prefer_fallback`` the roles swap: the fallback whenever it gives
+    a reading (or when neither does, so the cycle waits for the preferred
+    one), the configured valve only while the fallback is unavailable.  A
+    reading from the fallback entity is always marked ``is_fallback``, so it
+    keeps its slower grace periods whichever entity is preferred.
     """
-    if (
-        primary.usable
-        or fallback is None
-        or not fallback.usable
-        or fallback.entity_id == primary.entity_id
-    ):
+    if fallback is None or fallback.entity_id == primary.entity_id:
+        return primary
+    if prefer_fallback:
+        if fallback.usable or not primary.usable:
+            return replace(fallback, is_fallback=True)
+        return primary
+    if primary.usable or not fallback.usable:
         return primary
     return replace(fallback, is_fallback=True)
 

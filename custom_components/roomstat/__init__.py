@@ -112,7 +112,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # TRV's own reading, setpoint, accepted range and off state: the
         # source entity, and the optional fallback for the same room (used
-        # only while the source is unavailable, see
+        # while the source is unavailable, or first when preferred, see
         # climate_controllers.choose_trv).
         for entity_id, prefix in (
             (source_entity_id, "tado"),

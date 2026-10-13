@@ -17,6 +17,7 @@ from .climate_controllers import (
     integration_step,
     trv_setpoint_drifted,
 )
+from .const import CONF_FALLBACK_ENTITY_ID
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
     MAX_INTEGRATION_STEP_S,
@@ -251,13 +252,15 @@ class RegulationMixin:
 
         # 7. Background auto-tune (no-op when disabled).  Runs after the
         # send so it sees the command the TRV now holds; any new values take
-        # effect from the next cycle.  On a fallback it keeps learning from
-        # the room sensor, but without the TRV's own reading: that comes from
-        # cloud polling and can be minutes old, so the TRV demand is unknown
-        # for those cycles (no demand crossing is detected from it).
+        # effect from the next cycle.  The TRV's own reading comes from the
+        # configured TRV (e.g. HomeKit, pushed at once), even while the
+        # fallback carries the commands: it is the same valve.  When only the
+        # fallback reads, the tuner keeps learning from the room sensor but
+        # without the TRV's reading: cloud polling can be minutes old, so the
+        # TRV demand is unknown for those cycles (no demand crossing).
         self._feed_autotune(
             now, setpoint, room_temp,
-            None if trv.is_fallback else tado_internal,
+            self._source_trv_internal() if trv.is_fallback else tado_internal,
             result,
         )
 
@@ -416,29 +419,38 @@ class RegulationMixin:
         self._last_reason = reason
         self._write_state_with_binary_sensor()
 
-    def _note_trv_source(self, trv) -> None:
-        """Log a switch to or from the fallback TRV entity.
+    def _source_trv_internal(self) -> float | None:
+        """The configured TRV's own reading this cycle (None if unavailable)."""
+        return (self.coordinator.data or {}).get("tado_internal_temp")
 
-        The last sent setpoint is forgotten on a switch, so the next cycle
-        compares its command with what the newly used entity reports (a
+    def _note_trv_source(self, trv) -> None:
+        """Log a switch between the configured TRV and the fallback entity.
+
+        Leaving the preferred entity is a warning, coming back to it is
+        info.  The last sent setpoint is forgotten on a switch, so the next
+        cycle compares its command with what the newly used entity reports (a
         command sent just before the switch may never have arrived).
         """
         if trv.is_fallback == self._trv_fallback_active:
             return
         self._trv_fallback_active = trv.is_fallback
         self._last_sent_setpoint = None
-        if trv.is_fallback:
-            _LOGGER.warning(
-                "%s: %s unavailable, using fallback %s",
+        source_id = self._config_entry.data.get("source_entity_id")
+        fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
+        prefer_fallback = self._prefer_fallback()
+        preferred, backup = (fallback_id, source_id) if prefer_fallback else (source_id, fallback_id)
+        if trv.is_fallback == prefer_fallback:
+            _LOGGER.info(
+                "%s: %s available again, back on it",
                 self._config_entry.title,
-                self._config_entry.data.get("source_entity_id"),
-                trv.entity_id,
+                preferred,
             )
         else:
-            _LOGGER.info(
-                "%s: %s available again, leaving the fallback",
+            _LOGGER.warning(
+                "%s: %s unavailable, using %s",
                 self._config_entry.title,
-                trv.entity_id,
+                preferred,
+                backup,
             )
 
     def _note_command_result(self, entity_id: str, what: str, err: BaseException | None) -> None:

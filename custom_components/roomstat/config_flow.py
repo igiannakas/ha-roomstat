@@ -22,6 +22,7 @@ from .const import (
     CONF_MIN_COMMAND_INTERVAL_S,
     CONF_NAME,
     CONF_OVERLAY_REFRESH_S,
+    CONF_PREFER_FALLBACK,
     CONF_PRESENCE_AWAY_DELAY_S,
     CONF_PRESENCE_HOME_DELAY_S,
     CONF_PRESENCE_SENSOR_ID,
@@ -277,6 +278,12 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                         exclude_entities=[source_entity] if source_entity else [],
                     )
                 ),
+                # Swap the roles: the fallback first, the TRV above only while
+                # the fallback is unavailable.
+                vol.Required(
+                    CONF_PREFER_FALLBACK,
+                    default=bool(opts.get(CONF_PREFER_FALLBACK, False)),
+                ): selector.BooleanSelector(),
             }
         )
         fallback_entity = opts.get(CONF_FALLBACK_ENTITY_ID)

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.2.0-blue)
+![Version](https://img.shields.io/badge/version-2.3.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -27,6 +27,11 @@ changes.
   or longer. Pick the room's Tado cloud thermostat under **Configure → TRV
   Communication → Fallback thermostat**, and Roomstat controls the room
   through it until the valve is back. Auto-tune keeps learning meanwhile.
+  If the cloud is the more reliable link for you, turn on **Use the fallback
+  first**: Roomstat then commands the room through the cloud and uses HomeKit
+  only while the cloud is down, still reading the valve over HomeKit for
+  auto-tune. Each cloud command costs Tado API calls, so this needs a plan
+  with enough daily quota (Auto-Assist).
 - **Gentle on the bridge.** Commands from different rooms go out at least
   5 seconds apart. Roomstat checks every minute that each valve still holds
   its last command, and sends it again only if it doesn't, so you can set

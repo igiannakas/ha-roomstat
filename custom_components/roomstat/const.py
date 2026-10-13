@@ -62,6 +62,11 @@ CONF_OVERLAY_REFRESH_S = "overlay_refresh_s"
 # thermostat), read and commanded only while the source TRV is unavailable
 CONF_FALLBACK_ENTITY_ID = "fallback_entity_id"
 
+# Use the fallback entity first and the source TRV only while the fallback is
+# unavailable (e.g. the Tado cloud first, HomeKit as the backup).  Off by
+# default: every cloud command costs Tado API calls.
+CONF_PREFER_FALLBACK = "prefer_fallback"
+
 # Controller tuning keys (stored in options; see regulation.py).  Kp is the
 # gain near the target, the braking time how far ahead a heat-up predicts
 # its landing (minutes, 0 = no anticipation).  The keys keep their old names.

@@ -77,6 +77,7 @@ from .const import (
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
     CONF_OVERLAY_REFRESH_S,
+    CONF_PREFER_FALLBACK,
     CONF_PRESENCE_AWAY_DELAY_S,
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
@@ -248,9 +249,11 @@ class RoomstatClimate(
             CONF_OVERLAY_REFRESH_S, 0
         )
 
-        # True while the configured TRV is unavailable and the fallback
-        # entity (e.g. the room's Tado cloud thermostat) is used instead.
-        self._trv_fallback_active: bool = False
+        # True while the fallback entity (e.g. the room's Tado cloud
+        # thermostat) is the one in use: while the configured TRV is
+        # unavailable, or always when the fallback is preferred.  Starts on
+        # the preferred one, so the first cycle logs no switch.
+        self._trv_fallback_active: bool = self._prefer_fallback()
 
         # Failure handling (see climate_regulation.py): the current command
         # error (logged once, not every attempt), and when the room sensor
@@ -899,9 +902,15 @@ class RoomstatClimate(
 
         return HVACAction.IDLE
 
+    def _prefer_fallback(self) -> bool:
+        """Whether the fallback entity is used first (option, needs one set)."""
+        opts = self._config_entry.options
+        return bool(opts.get(CONF_PREFER_FALLBACK)) and bool(opts.get(CONF_FALLBACK_ENTITY_ID))
+
     def _active_trv(self) -> TrvReading:
-        """The TRV to read and command now: the configured one, or the
-        fallback entity while the configured one is unavailable."""
+        """The TRV to read and command now: the preferred one (the
+        configured TRV, or the fallback entity when that is preferred), or the
+        other while the preferred one is unavailable."""
         data = self.coordinator.data or {}
 
         def reading(entity_id: str | None, prefix: str) -> TrvReading:
@@ -917,7 +926,7 @@ class RoomstatClimate(
         primary = reading(self._config_entry.data.get("source_entity_id"), "tado")
         fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
         fallback = reading(fallback_id, "fallback") if fallback_id else None
-        return choose_trv(primary, fallback)
+        return choose_trv(primary, fallback, self._prefer_fallback())
 
     @property
     def icon(self) -> str:
@@ -948,6 +957,7 @@ class RoomstatClimate(
             "regulation_reason": self._last_reason,
             "tado_internal_temp_c": trv.internal_c,
             "trv_fallback_active": trv.is_fallback,
+            "trv_prefer_fallback": self._prefer_fallback(),
             "active_trv_entity_id": trv.entity_id,
             "last_command_error": self._last_command_error,
             "correction_kp": self._config.tuning.kp,

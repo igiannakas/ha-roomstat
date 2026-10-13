@@ -170,6 +170,15 @@ Read this before changing `regulation.py` or `parameters.py`.
   but gets no TRV reading (it can be minutes old from cloud polling), so the
   TRV demand is unknown for those cycles. Each cloud command costs Tado API
   calls, so the fallback is never the default path.
+- **Prefer the fallback** (option `prefer_fallback`, off by default): for an
+  owner whose local link drops out more than the cloud (and who has the API
+  quota, Auto-Assist), the roles swap in `choose_trv`: the fallback whenever
+  it reads (or when neither does), the configured TRV only while the
+  fallback is down. A fallback reading keeps `is_fallback` (slower drift
+  grace) either way. The auto-tuner still gets the configured TRV's own
+  reading while it is available (the same valve, pushed at once over
+  HomeKit), even when the commands go through the fallback. Leaving the
+  preferred entity is logged as a warning, coming back as info.
 - **Command spacing:** one `CommandPacer` for all rooms keeps TRV commands at
   least `TRV_COMMAND_SPACING_S` (5 s) apart. All rooms run their cycle on the
   same minute after a restart, and all V3+ valves share one bridge.

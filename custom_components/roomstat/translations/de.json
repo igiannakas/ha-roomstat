@@ -115,13 +115,15 @@
               "min_command_interval_s": "Mindest-Befehlsintervall",
               "min_change_threshold_c": "Mindest-Änderungsschwelle",
               "overlay_refresh_s": "Overlay-Refresh-Intervall",
-              "fallback_entity_id": "Ersatz-Thermostat"
+              "fallback_entity_id": "Ersatz-Thermostat",
+              "prefer_fallback": "Ersatz-Thermostat zuerst verwenden"
             },
             "data_description": {
               "min_command_interval_s": "Mindestzeit zwischen Befehlen an das TRV (Batterieschonung).",
               "min_change_threshold_c": "Mindestdifferenz zum aktuellen Tado-Sollwert, bevor ein neuer Befehl gesendet wird.",
               "overlay_refresh_s": "Sollwert periodisch erneut an das TRV senden, um Cloud-API-Overlays aktiv zu halten. 0 = aus. Mit HomeKit nicht nötig: Roomstat prüft jede Minute, ob das TRV seinen Befehl noch hält, und sendet ihn sonst erneut.",
-              "fallback_entity_id": "Optional. Eine weitere Klima-Entität für denselben Raum, zum Beispiel das Tado-Cloud-Thermostat des Raums. Solange das TRV oben nicht erreichbar ist (etwa bei einem HomeKit-Aussetzer), liest und steuert Roomstat den Raum über diese Entität und wechselt danach von selbst zurück. Die automatische Abstimmung lernt dabei über den Raumsensor weiter."
+              "fallback_entity_id": "Optional. Eine weitere Klima-Entität für denselben Raum, zum Beispiel das Tado-Cloud-Thermostat des Raums. Solange das TRV oben nicht erreichbar ist (etwa bei einem HomeKit-Aussetzer), liest und steuert Roomstat den Raum über diese Entität und wechselt danach von selbst zurück. Die automatische Abstimmung lernt dabei über den Raumsensor weiter.",
+              "prefer_fallback": "Steuert den Raum über das Ersatz-Thermostat oben (zum Beispiel die Tado-Cloud) und über das TRV nur, solange das Ersatz-Thermostat nicht erreichbar ist. Für den Fall, dass die lokale Verbindung öfter ausfällt als die Cloud. Jeder Befehl kostet dann Tado-API-Aufrufe und braucht genug Tageskontingent (Auto-Assist). Die eigene Messung des TRV fließt weiter in die automatische Abstimmung, solange es erreichbar ist."
             }
           },
           "behaviour": {

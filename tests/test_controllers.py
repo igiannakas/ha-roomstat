@@ -699,6 +699,30 @@ class TestTrvSource:
         p = TrvReading(HOMEKIT)
         assert choose_trv(p, TrvReading(HOMEKIT, 19.5, 21.0)) is p
 
+    # prefer_fallback: the roles swap (e.g. the Tado cloud first, HomeKit as
+    # the backup); a fallback reading is still marked is_fallback.
+
+    def test_prefer_fallback_wins_when_usable(self):
+        p = TrvReading(HOMEKIT, 20.0, 21.0)
+        chosen = choose_trv(p, TrvReading(CLOUD, 19.5, 21.0), prefer_fallback=True)
+        assert chosen == TrvReading(CLOUD, 19.5, 21.0, is_fallback=True)
+
+    def test_prefer_fallback_uses_primary_while_fallback_unavailable(self):
+        p = TrvReading(HOMEKIT, 20.0, 21.0)
+        assert choose_trv(p, TrvReading(CLOUD), prefer_fallback=True) is p
+
+    def test_prefer_fallback_waits_for_it_when_neither_reads(self):
+        chosen = choose_trv(TrvReading(HOMEKIT), TrvReading(CLOUD), prefer_fallback=True)
+        assert chosen.entity_id == CLOUD and chosen.is_fallback
+
+    def test_prefer_without_fallback_keeps_primary(self):
+        p = TrvReading(HOMEKIT, 20.0, 21.0)
+        assert choose_trv(p, None, prefer_fallback=True) is p
+
+    def test_prefer_fallback_equal_to_primary_is_ignored(self):
+        p = TrvReading(HOMEKIT)
+        assert choose_trv(p, TrvReading(HOMEKIT, 19.5, 21.0), prefer_fallback=True) is p
+
 
 class TestCommandLimits:
 

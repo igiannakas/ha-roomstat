@@ -11,6 +11,7 @@ from homeassistant.helpers import entity_registry as er
 from .const import (
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
+    CONF_PREFER_FALLBACK,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SOURCE_ENTITY_ID,
     CONF_SUMMER_MODE_ENTITY_ID,
@@ -80,6 +81,7 @@ async def async_get_config_entry_diagnostics(
         "effective_selection": {
             "source_entity_id": source_entity_id,
             "fallback_entity_id": fallback_id,
+            "prefer_fallback": bool(config_entry.options.get(CONF_PREFER_FALLBACK)),
             "external_temperature_entity_id": ext_temp_id,
             "summer_mode_entity_id": summer_id,
             "schedule_entity_id": schedule_id,

@@ -115,13 +115,15 @@
               "min_command_interval_s": "Minimum command interval",
               "min_change_threshold_c": "Minimum change threshold",
               "overlay_refresh_s": "Overlay refresh interval",
-              "fallback_entity_id": "Fallback thermostat"
+              "fallback_entity_id": "Fallback thermostat",
+              "prefer_fallback": "Use the fallback first"
             },
             "data_description": {
               "min_command_interval_s": "Minimum time between commands sent to the TRV (battery conservation).",
               "min_change_threshold_c": "Minimum difference to the current Tado setpoint before a new command is sent.",
               "overlay_refresh_s": "Periodically resend the setpoint to the TRV to keep cloud-API overlays alive. 0 = off. Not needed with HomeKit: Roomstat checks every minute that the TRV still holds its command and sends it again if not.",
-              "fallback_entity_id": "Optional. Another climate entity for the same room, for example the room's Tado cloud thermostat. While the TRV above is unavailable (such as a HomeKit dropout), Roomstat reads and commands the room through this one instead, and switches back on its own. Auto-tune keeps learning from the room sensor meanwhile."
+              "fallback_entity_id": "Optional. Another climate entity for the same room, for example the room's Tado cloud thermostat. While the TRV above is unavailable (such as a HomeKit dropout), Roomstat reads and commands the room through this one instead, and switches back on its own. Auto-tune keeps learning from the room sensor meanwhile.",
+              "prefer_fallback": "Command the room through the fallback thermostat above (for example the Tado cloud), and through the TRV only while the fallback is unavailable. For when the local link drops out more often than the cloud. Every command then costs Tado API calls, so it needs enough daily quota (Auto-Assist). The TRV's own reading still feeds auto-tune while it is available."
             }
           },
           "behaviour": {

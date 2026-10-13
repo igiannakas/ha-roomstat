@@ -248,3 +248,99 @@ def test_summer_lock_enforced_through_the_fallback(monkeypatch):
     ent._async_summer_changed(_event("on"))
     _cycle(ent)
     assert _sent(ent) == [(CLOUD, 5.0)]
+
+
+# ---------------------------------------------------------------------------
+# prefer_fallback: the fallback (e.g. the Tado cloud) first, the TRV as backup
+# ---------------------------------------------------------------------------
+
+def _preferred(options=None):
+    return _entity({"prefer_fallback": True, **(options or {})})
+
+
+def test_prefer_fallback_commands_through_the_fallback(monkeypatch):
+    _Clock(monkeypatch)
+    ent = _preferred()
+    _feed(ent)
+    _cycle(ent)
+    assert _sent(ent) and all(e == CLOUD for e, _ in _sent(ent))
+    attrs = ent.extra_state_attributes
+    assert attrs["trv_fallback_active"] is True
+    assert attrs["trv_prefer_fallback"] is True
+    assert attrs["active_trv_entity_id"] == CLOUD
+
+
+def test_prefer_fallback_uses_the_valve_while_the_fallback_is_down(monkeypatch, caplog):
+    clock = _Clock(monkeypatch)
+    ent = _preferred()
+    _feed(ent)
+    _cycle(ent)
+    ent.hass.service_calls.clear()
+
+    # The cloud drops out: the valve (HomeKit) takes over, with a warning.
+    clock.tick(300)
+    with caplog.at_level("INFO"):
+        _feed(ent, trv=(18.2, 20.0), cloud=None)
+        _cycle(ent)
+    assert ent.extra_state_attributes["trv_fallback_active"] is False
+    assert _sent(ent) and all(e == TRV for e, _ in _sent(ent))
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(f"{CLOUD} unavailable, using {TRV}" in r.getMessage() for r in warnings)
+
+    # The cloud is back: commands go through it again (info, not a warning).
+    caplog.clear()
+    ent.hass.service_calls.clear()
+    clock.tick(300)
+    with caplog.at_level("INFO"):
+        _feed(ent, cloud=(18.4, 15.0))   # stale setpoint after the switch: resend
+        _cycle(ent)
+    assert ent.extra_state_attributes["trv_fallback_active"] is True
+    assert _sent(ent) and all(e == CLOUD for e, _ in _sent(ent))
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any(f"{CLOUD} available again" in r.getMessage() for r in caplog.records)
+
+
+def test_prefer_fallback_starts_on_it_without_a_switch_warning(monkeypatch, caplog):
+    _Clock(monkeypatch)
+    ent = _preferred()
+    with caplog.at_level("INFO"):
+        _feed(ent)
+        _cycle(ent)
+    assert not [r for r in caplog.records if "unavailable" in r.getMessage()]
+
+
+def test_prefer_fallback_waits_for_it_when_both_are_down(monkeypatch):
+    _Clock(monkeypatch)
+    ent = _preferred()
+    _feed(ent, trv=None, cloud=None)
+    _cycle(ent)
+    assert ent._last_reason == "waiting_for_sensors"
+    assert ent.hass.service_calls == []
+
+
+def test_prefer_fallback_without_a_fallback_is_ignored(monkeypatch):
+    _Clock(monkeypatch)
+    ent = _make_entity({"prefer_fallback": True})
+    _run(_start(ent))
+    _feed(ent)
+    _cycle(ent)
+    assert _sent(ent) and all(e == TRV for e, _ in _sent(ent))
+    assert ent.extra_state_attributes["trv_prefer_fallback"] is False
+
+
+def test_prefer_fallback_tuner_reads_the_valve(monkeypatch):
+    """Commands go through the cloud, but auto-tune gets the valve's own
+    reading from HomeKit while it is there (the same valve, pushed at once),
+    and none while only the cloud reads."""
+    clock = _Clock(monkeypatch)
+    ent = _preferred({"autotune_enabled": True, "correction_kp": 0.6,
+                      "correction_ki": 0.002})
+    seen = []
+    orig = ent._autotuner.observe
+    ent._autotuner.observe = lambda s: (seen.append(s), orig(s))[1]
+    _feed(ent, trv=(18.0, 20.0), cloud=(17.5, 20.0))
+    _cycle(ent)
+    clock.tick(60)
+    _feed(ent, room=19.1, trv=None, cloud=(17.5, 20.0))
+    _cycle(ent)
+    assert [s.tado_internal_c for s in seen] == [18.0, None]
