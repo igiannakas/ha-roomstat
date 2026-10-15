@@ -269,7 +269,15 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
 - The tuner learns only from everyday episodes, never from test signals:
   - **heat-ups** (setpoint step ≥ 0.5 °C with the room ≥ 0.4 °C below) give
     the dead time θ (tangent method), the heating rate, the coast and the
-    overshoot;
+    overshoot. θ and the rate need a rise ≥ 0.6 °C (`theta_min_step_c`,
+    `rate_min_step_c`): with 0.8, mild nights (living room, 15 Oct 2026:
+    0.75 °C to climb) never gave a θ, so the SIMC Ki never came. Simulated
+    (four rooms, five outdoor temperatures): no change in 23 of 24 cases;
+    the generic living room at 15 °C went 0.061 → 0.033 °C RMS (its learned
+    θ brings the SIMC Ki, 0.003 → 0.0005). Tried and dropped (Oct 2026):
+    judging swinging hold windows that heated < 20 % of the time — it calms
+    badly swinging rooms (0.31 → 0.14 °C RMS) but made moderately swinging
+    ones worse (up to +0.03 °C RMS);
   - **holds** (steady setpoint, valve actually heating) give offset and
     oscillation.
 

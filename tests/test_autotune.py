@@ -214,6 +214,32 @@ class TestAnalyseHeatup:
                              cross_ts=cross * 60.0, tuning=A.Tuning(0.6, 0.002))
         assert m.theta_s / 60 == pytest.approx(12.0, abs=1.5)
 
+    def test_real_mild_morning_gives_a_dead_time(self):
+        """Living room, 15 Oct 2026, 06:00 night 18 -> comfort 20 from
+        19.25 °C: a 0.75 °C climb, under the old 0.8 °C bar.  Room sensor
+        and TRV demand (command - TRV reading) once a minute; the stop came
+        at 06:18.  The room started rising about 5 min after the step."""
+        room = [19.25, 19.25, 19.25, 19.26, 19.27, 19.29, 19.31, 19.33, 19.35, 19.39,
+                19.42, 19.45, 19.48, 19.5, 19.53, 19.56, 19.59, 19.61, 19.65, 19.68,
+                19.72, 19.74, 19.75, 19.78, 19.8, 19.83, 19.86, 19.88, 19.9, 19.91,
+                19.93, 19.94, 19.96, 19.98, 19.99, 20.0, 20.01, 20.01, 20.02, 20.03,
+                20.04, 20.05, 20.05, 20.06, 20.06, 20.07, 20.07, 20.08, 20.08, 20.08,
+                20.08, 20.09, 20.1, 20.1, 20.1, 20.1, 20.1, 20.1, 20.1, 20.1, 20.1,
+                20.1, 20.1, 20.1, 20.1, 20.09, 20.09, 20.09, 20.08, 20.08, 20.08,
+                20.08, 20.08, 20.08, 20.08, 20.08, 20.08, 20.07, 20.07, 20.07, 20.07,
+                20.06, 20.06, 20.06, 20.06, 20.05, 20.05, 20.05, 20.04, 20.04]
+        demand = [3.7, 3.7, 3.7, 3.7, 3.7, 3.6, 3.4, 3.5, 3.3, 2.7, 3.1, 2.9, 2.2, 2.6,
+                  2.5, 2.0, 2.2, 2.0] + [-7.0] * (len(room) - 18)
+        samples = [(k * 60.0, y, d) for k, (y, d) in enumerate(zip(room, demand))]
+        kw = dict(start_ts=0.0, setpoint_c=20.0, cross_ts=18 * 60.0,
+                  tuning=A.Tuning(4.0, 0.003, 1164.0))
+        m = A.analyse_heatup(samples, cfg=CFG, **kw)
+        assert m.theta_s / 60 == pytest.approx(4.7, abs=1.0)
+        assert m.rate_c_per_h == pytest.approx(1.8, abs=0.2)
+        assert m.overshoot_c == pytest.approx(0.1, abs=0.02)
+        old = A.analyse_heatup(samples, cfg=P.AutotuneConfig(theta_min_step_c=0.8), **kw)
+        assert old.theta_s is None           # what 2.4 learned from it
+
     def test_small_step_gives_no_dead_time(self):
         s, cross = _synthetic_heatup(y0=19.5)
         m = A.analyse_heatup(s, start_ts=0.0, setpoint_c=20.0, cfg=CFG,

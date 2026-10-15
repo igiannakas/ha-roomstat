@@ -142,8 +142,12 @@ class AutotuneConfig:
     # restarted (a stepped top-up): the episode ends there.
     heatup_reheat_demand_c: float = 1.0
     # Smaller steps still show overshoot and coast, but the dead time and
-    # heating rate need a bigger rise to stand out from sensor noise.
-    theta_min_step_c: float = 0.8
+    # heating rate need a bigger rise to stand out from sensor noise.  0.6
+    # for both: with a 0.01 °C sensor a 0.6 °C rise is 60 steps, and in mild
+    # weather a night setback can leave less than 0.8 °C to climb (living
+    # room, 15 Oct 2026: 0.75 °C), so with 0.8 no dead time, and so no SIMC
+    # Ki, was ever learned there.
+    theta_min_step_c: float = 0.6
     rate_min_step_c: float = 0.6
     # An episode cut short by the schedule is kept if the TRV demand had
     # already gone <= 0 at least this long before (coast as a lower bound),
