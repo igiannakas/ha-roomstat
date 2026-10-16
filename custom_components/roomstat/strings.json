@@ -245,6 +245,19 @@
       "autotune_last_overshoot": {
         "name": "Last heat-up overshoot"
       }
+,
+      "regulation_command": {
+        "name": "Command to valve"
+      },
+      "regulation_error": {
+        "name": "Room error"
+      },
+      "regulation_mode": {
+        "name": "Regulation mode",
+        "state": {
+          "heat": "Heat-up", "coast": "Coast", "hold": "Hold", "stop": "Stop"
+        }
+      }
     },
     "button": {
       "resume_schedule": {

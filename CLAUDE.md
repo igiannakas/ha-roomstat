@@ -64,8 +64,11 @@ the HA modules.
   manual overrides that expire.
 - `climate_summer.py`: summer lock (5 °C, service calls refused, TRV held).
 - `number.py`: preset temperatures. `sensor.py`: boost remaining, schedule
-  override remaining, auto-tune sensors. `button.py`: resume schedule, reset
-  auto-tune. `binary_sensor.py`: sensor degraded, out of band.
+  override remaining, auto-tune sensors, and the regulation trace (command to
+  the valve, room error as measurement sensors — long-term statistics outlive
+  the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
+  an enum). `button.py`: resume schedule, reset auto-tune.
+  `binary_sensor.py`: sensor degraded, out of band.
 - `config_flow.py`: setup and the options flow (sections).
 - `repairs.py`: repairs for entity settings whose entity was deleted, renamed
   or disabled, with a fix flow to pick a replacement.
@@ -127,7 +130,15 @@ Read this before changing `regulation.py` or `parameters.py`.
   instead of 25 (slower, not tighter), stopping at the target itself (2–3×
   the commands), cancelling the Tado's own anticipation (+40–50 % commands
   for ~5 %), Kp above 4 (commands rise fast for little gain), a derivative
-  term in hold (the firm stop anticipates).
+  term in hold (the firm stop anticipates), a shorter slope window for the
+  stop and the heat-up end (Theil–Sen 15 → 10 or 8 min, 16 Oct 2026, after
+  a real stop came 7 min after the rise was visible): no change in heat-up
+  overshoot or cold-start peaks in any of the four rooms, +15–30 % commands
+  in the fitted living room (a noisier slope toggles hold ↔ stop), Kp below
+  4 (16 Oct 2026, owner's settings, auto-tune on: Kp 0.8 doubles the hold
+  RMS in the fitted rooms, 0.03 → 0.06, worst 0.08 → 0.16; Kp 2 costs
+  +0.01 RMS for 10–25 % fewer commands; the heat-up overshoot is the same
+  at every Kp, and a cold radiator takes full power on any push).
 - **Predictions are one-sided.** The heat-up end and the stop use the rise
   rate only while the room rises (slope deadband 0.1 °C/h); only the
   release looks at a fall, and it only hands back to hold. A falling reading

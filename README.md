@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.5.1-blue)
+![Version](https://img.shields.io/badge/version-2.6.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -74,6 +74,10 @@ changes.
   anticipation in heat-ups. Auto-tune can learn it.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
+- **A trace per room.** Diagnostic sensors for the command sent to the valve,
+  the room error and the regulation mode, updated every cycle. The first two
+  keep long-term statistics, so you can look at a room's behaviour weeks later
+  even after the recorder has purged the detail.
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual

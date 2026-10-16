@@ -398,6 +398,12 @@ class RoomstatClimate(
         return self._autotune_enabled
 
     @property
+    def last_regulation(self) -> Any:
+        """The last regulation result (mode, error, command), or None before
+        the first cycle.  Read by the trace sensors (sensor.py)."""
+        return self._last_result
+
+    @property
     def active_tuning(self) -> Tuning:
         """The Kp / Ki / Td the regulator is using right now."""
         t = self._config.tuning

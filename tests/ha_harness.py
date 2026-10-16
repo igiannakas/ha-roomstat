@@ -9,6 +9,7 @@ Not a test module (no ``test_`` prefix); imported by the e2e test files.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import enum
 import importlib.util
 import sys
@@ -129,9 +130,38 @@ def _install_ha_stubs() -> None:
         BinarySensorDeviceClass=BinarySensorDeviceClass,
         BinarySensorEntity=BinarySensorEntity,
     )
+
+    class SensorDeviceClass(str, enum.Enum):  # noqa: UP042
+        DURATION = "duration"
+        ENUM = "enum"
+        TEMPERATURE = "temperature"
+
+    class SensorStateClass(str, enum.Enum):  # noqa: UP042
+        MEASUREMENT = "measurement"
+
+    @dataclasses.dataclass(frozen=True, kw_only=True)
+    class SensorEntityDescription:
+        key: str
+        translation_key: str | None = None
+        device_class: object = None
+        native_unit_of_measurement: str | None = None
+        state_class: object = None
+        suggested_display_precision: int | None = None
+        entity_category: object = None
+        options: list | None = None
+
+    class SensorEntity(_Entity):
+        pass
+
+    mod(
+        "homeassistant.components.sensor",
+        SensorDeviceClass=SensorDeviceClass, SensorEntity=SensorEntity,
+        SensorEntityDescription=SensorEntityDescription, SensorStateClass=SensorStateClass,
+    )
     mod("homeassistant.config_entries", ConfigEntry=object)
     mod("homeassistant.const", ATTR_TEMPERATURE="temperature", PRECISION_TENTHS=0.1,
         UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"),
+        UnitOfTime=types.SimpleNamespace(MINUTES="min"),
         EntityCategory=EntityCategory)
     mod("homeassistant.core", CALLBACK_TYPE=object, HomeAssistant=object,
         callback=lambda f: f)
@@ -156,7 +186,7 @@ def _load_entity_package():
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [str(_ROOT)]
     sys.modules[pkg_name] = pkg
-    for name in ("climate", "binary_sensor"):
+    for name in ("climate", "binary_sensor", "sensor"):
         spec = importlib.util.spec_from_file_location(f"{pkg_name}.{name}", _ROOT / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"{pkg_name}.{name}"] = module
@@ -171,9 +201,11 @@ if not _HA_INSTALLED:
     # row and must not wait (test_trv_fallback.py covers the spacing).
     sys.modules["roomstat_e2e.climate_regulation"].COMMAND_PACER.spacing_s = 0.0
     _binary_sensor = sys.modules["roomstat_e2e.binary_sensor"]
+    _sensor = sys.modules["roomstat_e2e.sensor"]
 else:  # pragma: no cover
     _climate = None
     _binary_sensor = None
+    _sensor = None
 
 e2e = pytest.mark.skipif(
     _HA_INSTALLED, reason="end-to-end stubs are only used when HA is not installed"

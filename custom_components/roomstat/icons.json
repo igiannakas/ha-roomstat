@@ -67,6 +67,21 @@
       },
       "schedule_override_remaining": {
         "default": "mdi:timer-sand"
+      },
+      "regulation_command": {
+        "default": "mdi:thermostat"
+      },
+      "regulation_error": {
+        "default": "mdi:delta"
+      },
+      "regulation_mode": {
+        "default": "mdi:state-machine",
+        "state": {
+          "heat": "mdi:fire",
+          "coast": "mdi:fire-off",
+          "hold": "mdi:approximately-equal",
+          "stop": "mdi:stop-circle-outline"
+        }
       }
     },
     "binary_sensor": {

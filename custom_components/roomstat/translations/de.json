@@ -245,6 +245,19 @@
       "autotune_last_overshoot": {
         "name": "Letztes Überschwingen"
       }
+,
+      "regulation_command": {
+        "name": "Befehl an das Ventil"
+      },
+      "regulation_error": {
+        "name": "Regelabweichung"
+      },
+      "regulation_mode": {
+        "name": "Regelmodus",
+        "state": {
+          "heat": "Aufheizen", "coast": "Ausrollen", "hold": "Halten", "stop": "Stopp"
+        }
+      }
     },
     "button": {
       "resume_schedule": {

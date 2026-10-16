@@ -3,7 +3,11 @@
 * boost and schedule-override countdowns;
 * the controller gains in use (Kp, Ki, braking time) and the auto-tuner's
   status and learned room model, as measurement sensors so Home Assistant
-  keeps long-term statistics of how the tuning evolves.
+  keeps long-term statistics of how the tuning evolves;
+* the regulation trace: the command sent to the valve, the room error and
+  the controller mode, each cycle.  The first two are measurement sensors,
+  so their 5-minute statistics outlive the recorder's purge and a season of
+  behaviour can be analysed after the fact; the mode is an enum.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .autotune import STATUSES
 from .const import DOMAIN
+from .regulation import MODES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -58,6 +63,14 @@ def _status_attrs(climate: Any) -> dict[str, Any]:
     s = dict(climate.autotune_summary())
     s.pop("status", None)
     return s
+
+
+def _regulation(field: str) -> Callable[[Any], Any]:
+    """A field of the last regulation result (None before the first cycle)."""
+    def value(climate: Any) -> Any:
+        result = climate.last_regulation
+        return None if result is None else getattr(result, field, None)
+    return value
 
 
 TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
@@ -130,6 +143,36 @@ TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_summary("heating_rate_c_per_h"),
         needs_autotune=True,
+    ),
+    # The regulation trace (see the module docstring).
+    TuningSensorDescription(
+        key="regulation_command",
+        translation_key="regulation_command",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_regulation("target_for_tado_c"),
+    ),
+    TuningSensorDescription(
+        key="regulation_error",
+        translation_key="regulation_error",
+        # A temperature difference (setpoint − room): no temperature device
+        # class, so no unit-conversion offset.
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_regulation("error_c"),
+    ),
+    TuningSensorDescription(
+        key="regulation_mode",
+        translation_key="regulation_mode",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(MODES),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_regulation("mode"),
     ),
     TuningSensorDescription(
         key="autotune_last_overshoot",
