@@ -18,8 +18,15 @@ Architecture
 - ``TrvReading`` / ``read_trv`` / ``choose_trv`` / ``command_limits`` – read
   the configured TRV, or a fallback entity for the same room while it is
   unavailable, and keep commands inside the range it accepts right now
+- ``trv_on_schedule`` – a TRV back on its own (Tado app) schedule holds no
+  command of ours
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
+- ``heat_timer_duration`` / ``heat_timer_refresh_due`` / ``format_time_period``
+  – maximum commands to a cloud TRV as Tado timer overlays (fail cold)
+- ``cycle_stalled`` – the regulation watchdog's test
+- ``OutOfBandMonitor`` – a room stuck too hot or too cold (the out-of-band
+  binary sensor)
 - ``plausible_c`` / ``integration_step`` – guards against faulty readings and
   pauses
 - ``entity_problem`` / ``MissingEntityWatch`` / ``replace_entity_setting`` –
@@ -618,6 +625,11 @@ class TrvReading:
     # Read through a polled cloud API (e.g. the Tado integration): its
     # readings and setpoint can be minutes old.
     is_cloud: bool = False
+    # Back on its own schedule (Tado app), holding no overlay of ours: a
+    # timer overlay ran out, or the overlay was ended from the app (see
+    # trv_on_schedule).  Kept apart from ``off``: an OFF of ours is an
+    # overlay, an Off block of the schedule is not.
+    scheduled: bool = False
 
     @property
     def slow(self) -> bool:
@@ -628,6 +640,13 @@ class TrvReading:
     @property
     def usable(self) -> bool:
         return self.entity_id is not None and self.internal_c is not None
+
+    @property
+    def shut_without_setpoint(self) -> bool:
+        """The valve is shut with no setpoint to compare a command with: off,
+        or on an Off block of its schedule.  A frost-level command is then
+        already in effect."""
+        return self.off or (self.scheduled and self.setpoint_c is None)
 
 
 # Readings outside this range are sensor faults (a reboot reporting 0 °C, an
@@ -659,6 +678,32 @@ def read_trv(
         "max": _as_opt_float(attrs.get("max_temp")),
         "off": state == "off",
     }
+
+
+# The hvac mode of a TRV that follows its own schedule (Tado: smart schedule,
+# no overlay; HomeKit Tado: "auto").  Roomstat never sends it.
+_SCHEDULE_MODE = "auto"
+
+
+def trv_on_schedule(
+    state: str | None, internal_c: float | None, setpoint_c: float | None
+) -> bool:
+    """True when the TRV follows its own (Tado app) schedule, not a command.
+
+    Roomstat only ever sends a setpoint (with hvac mode heat) or off, so
+    ``auto``, or a reading with no setpoint while not off, means the overlay
+    is gone: a timer overlay ran out, or it was ended from the Tado app.
+    With the schedule at Off the Tado cloud entity then shows ``auto`` with
+    no setpoint (python-tado 0.18.16 sends no temperature for an Off block,
+    HA 2026.10.1); with it at 5 °C, ``auto`` at 5.  A missing or unavailable
+    entity is not on its schedule (nothing is known).  Read next to
+    ``read_trv`` by the coordinator.
+    """
+    if state is None or state in _UNAVAILABLE_STATES or state == "off":
+        return False
+    if state == _SCHEDULE_MODE:
+        return True
+    return internal_c is not None and setpoint_c is None
 
 
 def command_limits(
@@ -726,6 +771,7 @@ def trv_setpoint_drifted(
     *,
     trv_off: bool = False,
     floor_c: float = 5.0,
+    trv_scheduled: bool = False,
 ) -> bool:
     """True when the TRV no longer holds the last command.
 
@@ -734,11 +780,22 @@ def trv_setpoint_drifted(
     not worth a command.  A TRV that is off while the last command asked for
     heat (above ``floor_c``, the frost level Tado shows as off) was switched
     off from outside, e.g. in the Tado app.
+
+    A TRV back on its schedule (``trv_scheduled``, see trv_on_schedule)
+    holds no command of ours: a heat command is lost whatever the schedule
+    says, so it is sent again.  A frost-level command is still in effect
+    while the valve is shut by its schedule (an Off block, no setpoint, or a
+    block at the floor); a schedule block that heats does not hold it.  A
+    setpoint that is simply unknown (no reading either) is not drift.
     """
     if last_sent_c is None or since_sent_s < grace_s:
         return False
     if trv_off:
         return last_sent_c > floor_c + 0.05
+    if trv_scheduled:
+        if last_sent_c > floor_c + 0.05:
+            return True
+        return trv_setpoint_c is not None and abs(trv_setpoint_c - last_sent_c) >= threshold_c
     if trv_setpoint_c is None:
         return False
     return abs(trv_setpoint_c - last_sent_c) >= threshold_c
@@ -760,6 +817,179 @@ class CommandPacer:
         slot = max(now, self._next_free)
         self._next_free = slot + self.spacing_s
         return slot - now
+
+
+# ---------------------------------------------------------------------------
+# Fail cold: timer overlays for maximum commands, and the watchdog
+# ---------------------------------------------------------------------------
+
+# A command this close to the highest one the TRV takes is "the maximum".
+MAXIMUM_TOLERANCE_C = 0.05
+
+
+def is_maximum(target_c: float, max_c: float) -> bool:
+    """Whether *target_c* is the maximum command (*max_c*: the highest the TRV
+    takes right now, see command_limits)."""
+    return target_c >= max_c - MAXIMUM_TOLERANCE_C
+
+
+def heat_timer_duration(
+    target_c: float, max_c: float, *, cloud: bool, heat_timer_s: float
+) -> float | None:
+    """How long a timer overlay carrying *target_c* lasts, or None for a
+    Manual overlay (``climate.set_temperature``).
+
+    Only the maximum command to a cloud TRV (``tado.set_climate_timer``
+    exists only there) becomes a timer, and only with ``heat_timer_s`` > 0.
+    Everything else, the minimum included, stays Manual: shut is the safe
+    state, so it may last forever.
+    """
+    if heat_timer_s > 0 and cloud and is_maximum(target_c, max_c):
+        return heat_timer_s
+    return None
+
+
+def heat_timer_refresh_due(now: float, sent_ts: float | None, timer_s: float) -> bool:
+    """Whether the timer overlay must be renewed: half of it has passed, or
+    its start is unknown (after a reload or a TRV switch, or a Manual
+    maximum sent before the timer was enabled)."""
+    return sent_ts is None or now - sent_ts >= timer_s / 2.0
+
+
+def format_time_period(seconds: float) -> str:
+    """``HH:MM:SS`` for the Tado timer service's ``time_period``."""
+    total = max(0, int(round(seconds)))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def cycle_stalled(now: float, last_completed_ts: float, limit_s: float) -> bool:
+    """No regulation cycle has completed for *limit_s* (the watchdog)."""
+    return now - last_completed_ts >= limit_s
+
+
+# ---------------------------------------------------------------------------
+# Out-of-band alarm (binary_sensor.<room>_out_of_band)
+# ---------------------------------------------------------------------------
+
+BAND_HOT = "hot"
+BAND_COLD = "cold"
+# Setpoints move in steps of 0.1 °C or more; smaller changes are noise.
+_SETPOINT_CHANGE_C = 0.05
+# Readings are rounded to 0.01 °C: a difference this close to the band counts.
+_BAND_TOLERANCE_C = 1e-6
+
+
+@dataclass(frozen=True)
+class BandState:
+    """What the out-of-band sensor shows after an update."""
+
+    on: bool = False
+    reason: str | None = None          # BAND_HOT / BAND_COLD while on
+    since: float | None = None         # while on: when the excursion began
+    deviation_c: float | None = None   # room - setpoint
+    reference_c: float | None = None   # what "hot" is measured from
+
+
+class OutOfBandMonitor:
+    """Reports a room stuck too hot or too cold, outside the control loop.
+
+    Fed once per regulation cycle with the room reading and the effective
+    setpoint.  Only while *eligible* (heating on, no summer lock, no window
+    open, room sensor not degraded) does it time an excursion:
+
+    * **hot**: room >= ref + band for the hot delay, ref = max(setpoint,
+      ``min_since``).  ``min_since`` is the lowest reading since the setpoint
+      was last lowered, a running minimum every update, reset to the current
+      reading when the setpoint is lowered and on the very first update.  A
+      room still cooling after a setback therefore never counts, one that
+      warms by the band off its low does (a valve stuck open, sun), and once
+      the low reaches the setpoint, ref is the setpoint.  A setpoint rise
+      leaves it alone.
+    * **cold**: setpoint - room >= band for the cold delay, counted again
+      from every setpoint rise (and from a restart), so each schedule step
+      gets a full heat-up's allowance.
+
+    ``min_since`` and the setpoint it belongs to are persisted (``as_dict``
+    / ``restore``), so a reload in the middle of a setback keeps the low;
+    the excursion timers start again after a restart.
+    """
+
+    def __init__(self) -> None:
+        self.min_since: float | None = None
+        self.setpoint: float | None = None
+        self._hot_since: float | None = None
+        self._cold_since: float | None = None
+        self.state = BandState()
+
+    def update(
+        self,
+        now: float,
+        room_c: float | None,
+        setpoint_c: float | None,
+        *,
+        eligible: bool,
+        band_c: float,
+        hot_after_s: float,
+        cold_after_s: float,
+    ) -> BandState:
+        """Take one reading; return (and keep in ``state``) what to show."""
+        if room_c is None or setpoint_c is None:
+            # Nothing to judge (no reading): no excursion runs.
+            self._hot_since = self._cold_since = None
+            self.state = BandState()
+            return self.state
+
+        if self.setpoint is None or self.min_since is None:
+            if self.min_since is None:
+                self.min_since = room_c
+        elif setpoint_c < self.setpoint - _SETPOINT_CHANGE_C:
+            self.min_since = room_c
+        elif setpoint_c > self.setpoint + _SETPOINT_CHANGE_C:
+            self._cold_since = None            # a full allowance again
+        self.setpoint = setpoint_c
+        self.min_since = min(self.min_since, room_c)
+
+        reference = max(setpoint_c, self.min_since)
+        deviation = room_c - setpoint_c
+        hot = eligible and room_c - reference >= band_c - _BAND_TOLERANCE_C
+        cold = eligible and setpoint_c - room_c >= band_c - _BAND_TOLERANCE_C
+        if not hot:
+            self._hot_since = None
+        elif self._hot_since is None:
+            self._hot_since = now
+        if not cold:
+            self._cold_since = None
+        elif self._cold_since is None:
+            self._cold_since = now
+
+        on, reason, since = False, None, None
+        if self._hot_since is not None and now - self._hot_since >= hot_after_s:
+            on, reason, since = True, BAND_HOT, self._hot_since
+        elif self._cold_since is not None and now - self._cold_since >= cold_after_s:
+            on, reason, since = True, BAND_COLD, self._cold_since
+        self.state = BandState(
+            on=on,
+            reason=reason,
+            since=since,
+            deviation_c=round(deviation, 2),
+            reference_c=round(reference, 2),
+        )
+        return self.state
+
+    def as_dict(self) -> dict[str, Any]:
+        """The part that survives a restart (restore-state extra data)."""
+        return {"min_since": self.min_since, "setpoint": self.setpoint}
+
+    def restore(self, data: Any) -> None:
+        """Load ``as_dict`` output; anything unusable is ignored."""
+        if not isinstance(data, Mapping):
+            return
+        min_since = plausible_c(data.get("min_since"))
+        setpoint = plausible_c(data.get("setpoint"))
+        if min_since is not None and setpoint is not None:
+            self.min_since, self.setpoint = min_since, setpoint
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,14 @@ class BehaviourConfig:
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONTROL_INTERVAL_S: int = 60   # seconds between regulation cycles
+# The watchdog (RegulationConfig.cycle_watchdog_s) checks on its own timer,
+# never from the regulation cycle it watches.
+WATCHDOG_CHECK_INTERVAL_S: int = 60
+# The shortest timer overlay for a maximum command (RegulationConfig.
+# heat_timer_s).  It is renewed every half, so each halving of the timer
+# doubles the renewals (API calls, valve wake-ups) for a bound the watchdog
+# already gives at 10 min; below 15 min that is no longer worth it.
+HEAT_TIMER_MIN_S: float = 900.0
 FROST_PROTECT_C: float = 5.0           # target temperature when HVAC is OFF
 DEFAULT_SENSOR_GRACE_S: int = 300      # seconds to use last-valid room_temp when sensor is unavailable
 
@@ -306,3 +314,46 @@ class RegulationConfig:
     stop_lead_s: float = 600.0
     release_c: float = 0.02
     release_lead_s: float = 1200.0
+
+    # Fail cold (see CLAUDE.md "Failure handling").  Every command is an
+    # overlay that lasts until the next one, so a maximum command left in
+    # place by a dead Home Assistant, network or cloud keeps the valve open
+    # (with the negative valve offsets, 25 °C is a real 30-35 °C).  With
+    # heat_timer_s > 0 a maximum command to a cloud TRV
+    # (const.CLOUD_TRV_PLATFORMS) is a Tado timer overlay of this length
+    # instead: if nobody renews it, the zone falls back to its Tado app
+    # schedule, which must then be 5 °C or Off.  It is renewed once half of
+    # it has passed while the command is still the maximum (one extra
+    # command per heat_timer_s / 2 while heating).  0 = off: the
+    # integration cannot check the Tado schedule, so the owner enables it
+    # per room once the schedules are at the floor.  At least
+    # HEAT_TIMER_MIN_S when on.
+    heat_timer_s: float = 0.0
+    # No regulation cycle completed for this long (cycles stopped, or
+    # returning early every time): the room is reported as stalled, and a
+    # maximum command still in place is replaced by the minimum.
+    cycle_watchdog_s: float = 600.0
+
+
+# ---------------------------------------------------------------------------
+# Out-of-band alarm (binary_sensor.<room>_out_of_band)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OutOfBandConfig:
+    """When a room counts as stuck outside its target band.
+
+    Hot: the room is ``band_c`` or more above ``max(setpoint, the lowest
+    reading since the setpoint was last lowered)`` for ``band_min``.  The
+    second term keeps a room that is still cooling after a setback from
+    counting: on 11 Oct 2026 the living room went 20 -> 18 °C at 21:30 and
+    was still at 18.66 °C at 06:00, so "0.5 above the setpoint" alone would
+    have been on all night.
+    Cold: the room is ``band_c`` or more below the setpoint for
+    ``cold_band_min``, counted again from every setpoint rise, so a normal
+    heat-up never counts.
+    """
+
+    band_c: float = 0.5
+    band_min: float = 30.0
+    cold_band_min: float = 120.0

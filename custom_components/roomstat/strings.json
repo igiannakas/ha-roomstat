@@ -110,14 +110,15 @@
           },
           "trv_communication": {
             "name": "TRV Communication",
-            "description": "The thermostat, command timing, battery conservation, and a fallback for when the TRV is unavailable.",
+            "description": "The thermostat, command timing, battery conservation, a fallback for when the TRV is unavailable, and a time limit on full-power commands.",
             "data": {
               "source_entity_id": "Thermostat (TRV)",
               "min_command_interval_s": "Minimum command interval",
               "min_change_threshold_c": "Minimum change threshold",
               "overlay_refresh_s": "Overlay refresh interval",
               "fallback_entity_id": "Fallback thermostat",
-              "prefer_fallback": "Use the fallback first"
+              "prefer_fallback": "Use the fallback first",
+              "heat_timer_s": "Full-power time limit"
             },
             "data_description": {
               "source_entity_id": "The climate entity Roomstat reads and commands: the valve via HomeKit, or the room's Tado cloud thermostat. To stop using HomeKit, pick the cloud thermostat here; if it was the fallback, the fallback is removed. A cloud thermostat is updated by polling, so Roomstat waits longer before it re-sends a command that has not shown up.",
@@ -125,7 +126,22 @@
               "min_change_threshold_c": "Minimum difference to the current Tado setpoint before a new command is sent.",
               "overlay_refresh_s": "Periodically resend the setpoint to the TRV to keep cloud-API overlays alive. 0 = off. Not needed with HomeKit: Roomstat checks every minute that the TRV still holds its command and sends it again if not.",
               "fallback_entity_id": "Optional. Another climate entity for the same room, for example the room's Tado cloud thermostat. While the TRV above is unavailable (such as a HomeKit dropout), Roomstat reads and commands the room through this one instead, and switches back on its own. Auto-tune keeps learning from the room sensor meanwhile.",
-              "prefer_fallback": "Command the room through the fallback thermostat above (for example the Tado cloud), and through the TRV only while the fallback is unavailable. For when the local link drops out more often than the cloud. Every command then costs Tado API calls, so it needs enough daily quota (Auto-Assist). The TRV's own reading still feeds auto-tune while it is available."
+              "prefer_fallback": "Command the room through the fallback thermostat above (for example the Tado cloud), and through the TRV only while the fallback is unavailable. For when the local link drops out more often than the cloud. Every command then costs Tado API calls, so it needs enough daily quota (Auto-Assist). The TRV's own reading still feeds auto-tune while it is available.",
+              "heat_timer_s": "Tado cloud thermostats only. Full-power commands go to Tado as a timer of this length, renewed every half while still needed. If Home Assistant, the network or the Tado cloud stop, the zone falls back to its Tado app schedule within this time. Set every Roomstat zone's schedule in the Tado app to 5 °C or Off first, then 3600 s is a good value. 0 = off: full power lasts until the next command. Shorter than 900 s counts as 900 s."
+            }
+          },
+          "out_of_band": {
+            "name": "Out-of-band alarm",
+            "description": "The room's Out of band sensor turns on when the room stays too hot or too cold while heating is on (not in summer mode, with no window open and a working room sensor). Use it in a notification.",
+            "data": {
+              "band_c": "Band",
+              "band_min": "Too hot after",
+              "cold_band_min": "Too cold after"
+            },
+            "data_description": {
+              "band_c": "How far from the target counts as out of band.",
+              "band_min": "How long the room must stay this much too warm. A room still cooling down after the target was lowered (for example the Night setting) never counts; one that warms up again by this much does.",
+              "cold_band_min": "How long the room must stay this much too cold. Counted again from every rise of the target, so it should be longer than a normal heat-up."
             }
           },
           "behaviour": {
@@ -241,6 +257,9 @@
     "binary_sensor": {
       "sensor_degraded": {
         "name": "Sensor degraded"
+      },
+      "out_of_band": {
+        "name": "Out of band"
       }
     }
   },

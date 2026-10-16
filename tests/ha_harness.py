@@ -115,9 +115,24 @@ def _install_ha_stubs() -> None:
         HVACAction=HVACAction, ClimateEntity=ClimateEntity,
         ClimateEntityFeature=ClimateEntityFeature,
     )
+    class BinarySensorDeviceClass(str, enum.Enum):  # noqa: UP042
+        PROBLEM = "problem"
+
+    class BinarySensorEntity(_Entity):
+        pass
+
+    class EntityCategory(str, enum.Enum):  # noqa: UP042
+        DIAGNOSTIC = "diagnostic"
+
+    mod(
+        "homeassistant.components.binary_sensor",
+        BinarySensorDeviceClass=BinarySensorDeviceClass,
+        BinarySensorEntity=BinarySensorEntity,
+    )
     mod("homeassistant.config_entries", ConfigEntry=object)
     mod("homeassistant.const", ATTR_TEMPERATURE="temperature", PRECISION_TENTHS=0.1,
-        UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"))
+        UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"),
+        EntityCategory=EntityCategory)
     mod("homeassistant.core", CALLBACK_TYPE=object, HomeAssistant=object,
         callback=lambda f: f)
     mod("homeassistant.exceptions", HomeAssistantError=HomeAssistantError,
@@ -141,11 +156,12 @@ def _load_entity_package():
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [str(_ROOT)]
     sys.modules[pkg_name] = pkg
-    spec = importlib.util.spec_from_file_location(f"{pkg_name}.climate", _ROOT / "climate.py")
-    climate = importlib.util.module_from_spec(spec)
-    sys.modules[f"{pkg_name}.climate"] = climate
-    spec.loader.exec_module(climate)
-    return climate
+    for name in ("climate", "binary_sensor"):
+        spec = importlib.util.spec_from_file_location(f"{pkg_name}.{name}", _ROOT / f"{name}.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[f"{pkg_name}.{name}"] = module
+        spec.loader.exec_module(module)
+    return sys.modules[f"{pkg_name}.climate"]
 
 
 if not _HA_INSTALLED:
@@ -154,8 +170,10 @@ if not _HA_INSTALLED:
     # Commands are spaced in real time in production; tests send many in a
     # row and must not wait (test_trv_fallback.py covers the spacing).
     sys.modules["roomstat_e2e.climate_regulation"].COMMAND_PACER.spacing_s = 0.0
+    _binary_sensor = sys.modules["roomstat_e2e.binary_sensor"]
 else:  # pragma: no cover
     _climate = None
+    _binary_sensor = None
 
 e2e = pytest.mark.skipif(
     _HA_INSTALLED, reason="end-to-end stubs are only used when HA is not installed"

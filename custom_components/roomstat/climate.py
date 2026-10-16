@@ -45,6 +45,7 @@ from .autotune import (
 from .climate_controllers import (
     STARTUP_ARM_OPEN,
     STARTUP_RESTORE,
+    OutOfBandMonitor,
     PersistedAutomationState,
     PresenceAutomationController,
     SavedState,
@@ -52,6 +53,7 @@ from .climate_controllers import (
     TrvReading,
     WindowAutomationController,
     choose_trv,
+    is_maximum,
     normalize_restored_preset,
     presence_startup_action,
     resolve_boost_restore,
@@ -65,14 +67,18 @@ from .const import (
     CONF_AUTOTUNE_DERIVATIVE,
     CONF_AUTOTUNE_ENABLED,
     CONF_AWAY_TARGET,
+    CONF_BAND_C,
+    CONF_BAND_MIN,
     CONF_BOOST_DURATION,
     CONF_BOOST_TARGET,
+    CONF_COLD_BAND_MIN,
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
     CONF_ECO_TARGET,
     CONF_FALLBACK_ENTITY_ID,
     CONF_FROST_PROTECTION_TARGET,
+    CONF_HEAT_TIMER_S,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -95,9 +101,12 @@ from .const import (
 from .parameters import (
     DEFAULT_CONTROL_INTERVAL_S,
     DEFAULT_SENSOR_GRACE_S,
+    HEAT_TIMER_MIN_S,
+    WATCHDOG_CHECK_INTERVAL_S,
     AutotuneConfig,
     BehaviourConfig,
     CorrectionTuning,
+    OutOfBandConfig,
     PresetConfig,
     RegulationConfig,
 )
@@ -112,19 +121,27 @@ class _AutomationExtraData(ExtraStoredData):
     The auto-tuner's learned state rides along under the ``autotune`` key,
     so learned values survive restarts and config-entry reloads without
     ever being written to the config entry (which would trigger a reload).
+    The out-of-band monitor's low since the last setback rides along under
+    ``out_of_band``.
     """
 
     def __init__(
-        self, state: PersistedAutomationState, autotune: dict[str, Any] | None = None
+        self,
+        state: PersistedAutomationState,
+        autotune: dict[str, Any] | None = None,
+        out_of_band: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
+        self._out_of_band = out_of_band
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
         data = self._state.as_dict()
         if self._autotune is not None:
             data["autotune"] = self._autotune
+        if self._out_of_band is not None:
+            data["out_of_band"] = self._out_of_band
         return data
 
 
@@ -273,6 +290,23 @@ class RoomstatClimate(
         self._summer_active: bool = False
         self._summer_bypass_rate_limit: bool = False
 
+        # Fail cold (see climate_regulation.py): when the timer overlay of a
+        # maximum command was sent (None: no timer of ours known), whether
+        # its renewal already skipped the rate limit, and whether the last
+        # command the TRV took was the maximum (for the watchdog).
+        self._heat_timer_sent_ts: float | None = None
+        self._heat_timer_refresh_tried: bool = False
+        self._last_sent_was_max: bool = False
+        # Watchdog: when a regulation cycle last reached its decision.
+        self._last_cycle_completed_ts: float = time.time()
+        self._regulation_stalled: bool = False
+        self._watchdog_shut_tried: bool = False
+
+        # Out-of-band alarm (binary_sensor.<room>_out_of_band)
+        self._band_config = self._build_band_config(config_entry)
+        self._band_monitor = OutOfBandMonitor()
+        self._band_failed: bool = False         # its error is logged once
+
         # Diagnostics
         self._last_result = None
         self._last_reason = "startup"
@@ -315,7 +349,27 @@ class RoomstatClimate(
             config.integral_deadband_c = opts.get(
                 CONF_INTEGRAL_DEADBAND_C, config.integral_deadband_c
             )
+            # Too short a timer only costs renewals (see HEAT_TIMER_MIN_S).
+            heat_timer_s = safe_float(opts.get(CONF_HEAT_TIMER_S))
+            if heat_timer_s is not None and heat_timer_s > 0:
+                config.heat_timer_s = max(heat_timer_s, HEAT_TIMER_MIN_S)
         return config
+
+    @staticmethod
+    def _build_band_config(entry: ConfigEntry) -> OutOfBandConfig:
+        """Out-of-band thresholds, options over defaults (bad values ignored)."""
+        defaults = OutOfBandConfig()
+        opts = entry.options or {}
+
+        def positive(key: str, default: float) -> float:
+            value = safe_float(opts.get(key))
+            return value if value is not None and value > 0 else default
+
+        return OutOfBandConfig(
+            band_c=positive(CONF_BAND_C, defaults.band_c),
+            band_min=positive(CONF_BAND_MIN, defaults.band_min),
+            cold_band_min=positive(CONF_COLD_BAND_MIN, defaults.cold_band_min),
+        )
 
     def _configured_tuning(self) -> Tuning:
         """The Kp/Ki/Td from the options (the auto-tuner's baseline).
@@ -401,8 +455,15 @@ class RoomstatClimate(
         """Run when entity about to be added to HA."""
         await super().async_added_to_hass()
 
-        # Carry on a heat burst (or stop) the TRV is still holding.
-        self._reg_state.mode = resume_mode(self._active_trv().setpoint_c, self._config)
+        # Carry on a heat burst (or stop) the TRV is still holding.  What
+        # the TRV holds is the last command it took: a maximum is one the
+        # watchdog shuts if the cycle stops.
+        held = self._active_trv().setpoint_c
+        self._reg_state.mode = resume_mode(held, self._config)
+        self._last_sent_was_max = held is not None and is_maximum(
+            held, self._config.max_target_c
+        )
+        self._last_cycle_completed_ts = time.time()
 
         # Restore previous state
         last_state = await self.async_get_last_state()
@@ -416,6 +477,7 @@ class RoomstatClimate(
             if isinstance(extra_dict, dict):
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
+                self._band_monitor.restore(extra_dict.get("out_of_band"))
 
         if last_state:
             if last_state.state in (HVACMode.HEAT, HVACMode.OFF):
@@ -562,6 +624,14 @@ class RoomstatClimate(
                 datetime.timedelta(seconds=DEFAULT_CONTROL_INTERVAL_S),
             )
         )
+        # The watchdog on its own timer: it must not depend on the cycle's.
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass,
+                self._async_watchdog_check,
+                datetime.timedelta(seconds=WATCHDOG_CHECK_INTERVAL_S),
+            )
+        )
 
     def _startup_reconcile_presence(
         self,
@@ -651,7 +721,9 @@ class RoomstatClimate(
     def extra_restore_state_data(self) -> ExtraStoredData:
         """Persist automation and auto-tune state across restart/reload."""
         return _AutomationExtraData(
-            self._automation_snapshot(), self._autotuner.as_dict()
+            self._automation_snapshot(),
+            self._autotuner.as_dict(),
+            self._band_monitor.as_dict(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -697,6 +769,7 @@ class RoomstatClimate(
         self.__dict__.pop("min_temp", None)
         self.__dict__.pop("max_temp", None)
         self._behaviour = self._build_behaviour(entry)
+        self._band_config = self._build_band_config(entry)
         self._autotune_enabled = bool(entry.options.get(CONF_AUTOTUNE_ENABLED, False))
         self._autotuner.set_baseline(
             self._configured_tuning(),
@@ -922,6 +995,7 @@ class RoomstatClimate(
                 max_c=data.get(f"{prefix}_max_temp"),
                 off=bool(data.get(f"{prefix}_off")),
                 is_cloud=bool(data.get(f"{prefix}_cloud")),
+                scheduled=bool(data.get(f"{prefix}_scheduled")),
             )
 
         primary = reading(self._config_entry.data.get("source_entity_id"), "tado")
@@ -973,6 +1047,10 @@ class RoomstatClimate(
             "sensor_degraded": self._sensor_degraded,
             "summer_mode_active": self._summer_active,
             "overlay_refresh_s": self._overlay_refresh_s,
+            # Fail cold: timer overlays for maximum commands (0 = off), and
+            # the watchdog (no regulation cycle completed for 10 min).
+            "heat_timer_s": self._config.heat_timer_s,
+            "regulation_stalled": self._regulation_stalled,
             # Read by the dashboard card: boost length for its confirmation
             # text, and the Tado entity whose device holds the heating % sensor.
             "boost_duration_min": self._config.presets.boost_duration_min,

@@ -1,6 +1,7 @@
-"""Binary sensor entity for Roomstat sensor degradation."""
+"""Binary sensors for Roomstat: room sensor degraded, and room out of band."""
 from __future__ import annotations
 
+import datetime
 import time
 
 from homeassistant.components.binary_sensor import (
@@ -26,7 +27,9 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
     entity = RoomstatSensorDegradedBinarySensor(coordinator, entry)
     coordinator.binary_sensor_entity = entity
-    async_add_entities([entity])
+    band = RoomstatOutOfBandBinarySensor(coordinator, entry)
+    coordinator.out_of_band_entity = band
+    async_add_entities([entity, band])
 
 
 class RoomstatSensorDegradedBinarySensor(CoordinatorEntity, BinarySensorEntity):
@@ -81,3 +84,59 @@ class RoomstatSensorDegradedBinarySensor(CoordinatorEntity, BinarySensorEntity):
                 )
 
         return attrs
+
+
+class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
+    """The room is stuck too hot or too cold (``binary_sensor.<room>_out_of_band``).
+
+    Judged by the climate entity's OutOfBandMonitor (climate_controllers.py)
+    once per regulation cycle, outside the control loop's own decisions:
+    hot is measured from max(setpoint, the lowest reading since the setpoint
+    was last lowered), so a room cooling after a setback never counts; cold
+    is counted again from every setpoint rise, so a heat-up never counts.
+    Only while heating is on, with no summer lock, no window open and a
+    fresh room reading.  Meant for a notification (see the README).
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "out_of_band"
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the out-of-band binary sensor."""
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_out_of_band"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info so this entity appears on the same device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True while the room is out of band."""
+        climate = getattr(self.coordinator, "climate_entity", None)
+        if climate is None:
+            return None
+        return climate._band_monitor.state.on
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        """How far off the room is, since when, and why."""
+        climate = getattr(self.coordinator, "climate_entity", None)
+        if climate is None:
+            return {}
+        state = climate._band_monitor.state
+        return {
+            "deviation_c": state.deviation_c,
+            "since": (
+                datetime.datetime.fromtimestamp(state.since, tz=datetime.UTC).isoformat()
+                if state.since is not None
+                else None
+            ),
+            "reason": state.reason,
+            "reference_c": state.reference_c,
+        }

@@ -8,6 +8,7 @@
           "schedule": "mdi:calendar-clock",
           "pi_controller": "mdi:chart-bell-curve-cumulative",
           "trv_communication": "mdi:radiator",
+          "out_of_band": "mdi:thermometer-alert",
           "behaviour": "mdi:cog-outline"
         }
       }
@@ -71,6 +72,12 @@
     "binary_sensor": {
       "sensor_degraded": {
         "default": "mdi:alert-circle"
+      },
+      "out_of_band": {
+        "default": "mdi:thermometer-check",
+        "state": {
+          "on": "mdi:thermometer-alert"
+        }
       }
     },
     "button": {

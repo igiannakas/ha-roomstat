@@ -73,6 +73,19 @@ CONF_PREFER_FALLBACK = "prefer_fallback"
 # fallback (see climate_regulation.py).
 CLOUD_TRV_PLATFORMS = frozenset({"tado"})
 
+# Fail cold: a maximum command to a cloud TRV goes out as a Tado timer
+# overlay (``tado.set_climate_timer``: temperature plus time_period, which
+# excludes requested_overlay; HA core's set_timer then calls _control_hvac
+# with hvac_mode heat and a duration, a TIMER overlay).  Seconds; 0 = off.
+CONF_HEAT_TIMER_S = "heat_timer_s"
+TADO_DOMAIN = "tado"
+TADO_SERVICE_TIMER = "set_climate_timer"
+
+# Out-of-band alarm (binary_sensor.<room>_out_of_band; parameters.OutOfBandConfig)
+CONF_BAND_C = "band_c"
+CONF_BAND_MIN = "band_min"
+CONF_COLD_BAND_MIN = "cold_band_min"
+
 # Controller tuning keys (stored in options; see regulation.py).  Kp is the
 # gain near the target, the braking time how far ahead a heat-up predicts
 # its landing (minutes, 0 = no anticipation).  The keys keep their old names.

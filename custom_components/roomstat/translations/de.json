@@ -110,14 +110,15 @@
           },
           "trv_communication": {
             "name": "TRV-Kommunikation",
-            "description": "Das Thermostat, Befehlsintervalle, Batterieschonung und ein Ersatz, wenn das TRV nicht erreichbar ist.",
+            "description": "Das Thermostat, Befehlsintervalle, Batterieschonung, ein Ersatz, wenn das TRV nicht erreichbar ist, und ein Zeitlimit für Befehle mit voller Leistung.",
             "data": {
               "source_entity_id": "Thermostat (TRV)",
               "min_command_interval_s": "Mindest-Befehlsintervall",
               "min_change_threshold_c": "Mindest-Änderungsschwelle",
               "overlay_refresh_s": "Overlay-Refresh-Intervall",
               "fallback_entity_id": "Ersatz-Thermostat",
-              "prefer_fallback": "Ersatz-Thermostat zuerst verwenden"
+              "prefer_fallback": "Ersatz-Thermostat zuerst verwenden",
+              "heat_timer_s": "Zeitlimit für volle Leistung"
             },
             "data_description": {
               "source_entity_id": "Die Klima-Entität, die Roomstat liest und steuert: das Ventil über HomeKit oder das Tado-Cloud-Thermostat des Raums. Um HomeKit nicht mehr zu verwenden, hier das Cloud-Thermostat wählen; war es das Ersatz-Thermostat, wird der Ersatz entfernt. Ein Cloud-Thermostat wird per Abfrage aktualisiert, daher wartet Roomstat länger, bevor es einen nicht angekommenen Befehl erneut sendet.",
@@ -125,7 +126,22 @@
               "min_change_threshold_c": "Mindestdifferenz zum aktuellen Tado-Sollwert, bevor ein neuer Befehl gesendet wird.",
               "overlay_refresh_s": "Sollwert periodisch erneut an das TRV senden, um Cloud-API-Overlays aktiv zu halten. 0 = aus. Mit HomeKit nicht nötig: Roomstat prüft jede Minute, ob das TRV seinen Befehl noch hält, und sendet ihn sonst erneut.",
               "fallback_entity_id": "Optional. Eine weitere Klima-Entität für denselben Raum, zum Beispiel das Tado-Cloud-Thermostat des Raums. Solange das TRV oben nicht erreichbar ist (etwa bei einem HomeKit-Aussetzer), liest und steuert Roomstat den Raum über diese Entität und wechselt danach von selbst zurück. Die automatische Abstimmung lernt dabei über den Raumsensor weiter.",
-              "prefer_fallback": "Steuert den Raum über das Ersatz-Thermostat oben (zum Beispiel die Tado-Cloud) und über das TRV nur, solange das Ersatz-Thermostat nicht erreichbar ist. Für den Fall, dass die lokale Verbindung öfter ausfällt als die Cloud. Jeder Befehl kostet dann Tado-API-Aufrufe und braucht genug Tageskontingent (Auto-Assist). Die eigene Messung des TRV fließt weiter in die automatische Abstimmung, solange es erreichbar ist."
+              "prefer_fallback": "Steuert den Raum über das Ersatz-Thermostat oben (zum Beispiel die Tado-Cloud) und über das TRV nur, solange das Ersatz-Thermostat nicht erreichbar ist. Für den Fall, dass die lokale Verbindung öfter ausfällt als die Cloud. Jeder Befehl kostet dann Tado-API-Aufrufe und braucht genug Tageskontingent (Auto-Assist). Die eigene Messung des TRV fließt weiter in die automatische Abstimmung, solange es erreichbar ist.",
+              "heat_timer_s": "Nur für Tado-Cloud-Thermostate. Befehle mit voller Leistung gehen als Tado-Timer dieser Länge raus und werden nach der Hälfte erneuert, solange sie nötig sind. Fallen Home Assistant, das Netzwerk oder die Tado-Cloud aus, kehrt die Zone innerhalb dieser Zeit zu ihrem Zeitplan in der Tado-App zurück. Vorher den Zeitplan jeder Roomstat-Zone in der Tado-App auf 5 °C oder Aus stellen, dann sind 3600 s ein guter Wert. 0 = aus: volle Leistung bleibt bis zum nächsten Befehl. Weniger als 900 s zählt als 900 s."
+            }
+          },
+          "out_of_band": {
+            "name": "Alarm außerhalb des Bereichs",
+            "description": "Der Sensor „Außerhalb des Bereichs“ des Raums schaltet ein, wenn der Raum zu warm oder zu kalt bleibt, während geheizt wird (nicht im Sommermodus, kein Fenster offen, Raumsensor funktioniert). Für eine Benachrichtigung gedacht.",
+            "data": {
+              "band_c": "Bereich",
+              "band_min": "Zu warm nach",
+              "cold_band_min": "Zu kalt nach"
+            },
+            "data_description": {
+              "band_c": "Wie weit vom Zielwert entfernt als außerhalb des Bereichs gilt.",
+              "band_min": "Wie lange der Raum so viel zu warm sein muss. Ein Raum, der nach einer Absenkung des Zielwerts (etwa durch Nacht) noch abkühlt, zählt nie; einer, der sich wieder um so viel erwärmt, schon.",
+              "cold_band_min": "Wie lange der Raum so viel zu kalt sein muss. Zählt ab jeder Erhöhung des Zielwerts neu, sollte also länger als ein normales Aufheizen sein."
             }
           },
           "behaviour": {
@@ -241,6 +257,9 @@
     "binary_sensor": {
       "sensor_degraded": {
         "name": "Sensor beeinträchtigt"
+      },
+      "out_of_band": {
+        "name": "Außerhalb des Bereichs"
       }
     }
   },

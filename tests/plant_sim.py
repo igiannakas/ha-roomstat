@@ -25,6 +25,13 @@ What is simulated
 * **Proxy**: the real ``FeedforwardPiRegulator`` plus the send logic of
   ``climate_regulation.py`` (rate limit, change threshold, urgent decrease,
   0.1 °C command rounding).  Optionally the real ``Autotuner``.
+* **Timer overlays** (fail cold, ``ProxySettings.heat_timer_s`` > 0): a
+  maximum command is a Tado timer overlay that falls back to the zone's
+  Tado app schedule (``PlantParams.tado_schedule_c``: 5 °C, or None = Off)
+  when it runs out; the proxy renews it once half of it has passed while
+  the command is still the maximum.  ``RoomSim.kill()`` stops the proxy
+  (Home Assistant, the network or the cloud gone) while the room, the
+  radiator and the valve carry on.
 
 Calibrated against Home Assistant recorder data from four UK rooms
 (October 2026): room dead time 13–21 min, heat-up 1.3–3.2 °C/h, passive
@@ -70,6 +77,10 @@ class PlantParams:
     glitch_prob: float = 0.0          # chance per report of a wild reading
     glitch_size_c: float = 1.5
     extra_gain: Callable[[float], float] | None = None  # °C/h vs time (sun…)
+    # The zone's schedule in the Tado app, where a timer overlay falls back
+    # to when it runs out: a setpoint (5 °C), or None for Off (power off,
+    # valve shut).
+    tado_schedule_c: float | None = 5.0
 
 
 # Tado V3+ controller as measured (October 2026 heating-% data, see the
@@ -106,6 +117,9 @@ class ProxySettings:
     min_change_threshold_c: float = 0.1
     urgent_decrease_threshold_c: float = 1.0
     command_step_c: float = 0.1
+    # Fail cold: maximum commands as timer overlays of this length (0 = off,
+    # Manual overlays that last until the next command).
+    heat_timer_s: float = 0.0
 
 
 @dataclass
@@ -123,7 +137,10 @@ class SimTrace:
     ki: list[float] = field(default_factory=list)
     td: list[float] = field(default_factory=list)
     mode: list[str] = field(default_factory=list)
+    power: list[bool] = field(default_factory=list)       # TRV on (not Off)
     sends: int = 0
+    timer_renewals: int = 0                               # included in sends
+    timer_expiries: list[float] = field(default_factory=list)
 
     def window(self, t0: float, t1: float) -> list[int]:
         return [i for i, t in enumerate(self.t) if t0 <= t < t1]
@@ -193,6 +210,12 @@ class RoomSim:
         self.last_send = -1e9
         self.last_sent: float | None = None
         self.last_reg = 0.0
+        # Fail cold: the TRV's power (False: an Off schedule block), when its
+        # timer overlay runs out, and when the proxy last sent one.
+        self.trv_power = True
+        self.timer_end: float | None = None
+        self.timer_sent: float | None = None
+        self.alive = True
         self.trace = SimTrace()
 
     # -- device models ---------------------------------------------------
@@ -201,6 +224,13 @@ class RoomSim:
 
     def _tado_step(self) -> None:
         p = self.p
+        if not self.trv_power:
+            # Off: the valve stays shut (frost protection only acts near
+            # freezing, far below anything simulated here).
+            self.tado_prev = self._tado_reported()
+            self.tado_i = 0.0
+            self.valve = 0.0
+            return
         reading = self._tado_reported()
         dt_min = p.tado_period_s / 60.0
         rate = (reading - self.tado_prev) / dt_min          # °C/min
@@ -237,6 +267,37 @@ class RoomSim:
         if new != self.sensor_value:
             self.sensor_ts = self.t
         self.sensor_value = new
+
+    # -- Tado overlays ------------------------------------------------------
+    def _deliver(self, target: float) -> None:
+        """The TRV takes a command: a timer overlay for the maximum when
+        ``heat_timer_s`` > 0, else a Manual one."""
+        self.trv_power = True
+        self.trv_sp = min(self.cfg.max_target_c, max(self.cfg.min_target_c, target))
+        if self.proxy.heat_timer_s > 0 and self.trv_sp >= self.cfg.max_target_c - 0.05:
+            self.timer_end = self.t + self.proxy.heat_timer_s
+            self.timer_sent = self.t
+        else:
+            self.timer_end = self.timer_sent = None
+        self.last_sent = self.trv_sp
+        self.last_send = self.t
+        self.trace.sends += 1
+
+    def _timer_step(self) -> None:
+        """A timer overlay that runs out hands the zone back to its schedule."""
+        if self.timer_end is None or self.t < self.timer_end:
+            return
+        self.trace.timer_expiries.append(self.t)
+        self.timer_end = self.timer_sent = None
+        if self.p.tado_schedule_c is None:
+            self.trv_power = False
+        else:
+            self.trv_sp = self.p.tado_schedule_c
+
+    def kill(self) -> None:
+        """Home Assistant, the network or the cloud are gone: no more commands
+        (the room, radiator and valve carry on)."""
+        self.alive = False
 
     # -- proxy -------------------------------------------------------------
     def _control_step(self, sp: float, sample_extra: dict | None) -> None:
@@ -278,10 +339,15 @@ class RoomSim:
             else:
                 sent = True
         if sent:
-            self.trv_sp = min(25.0, max(5.0, target))
-            self.last_sent = self.trv_sp
-            self.last_send = self.t
-            self.trace.sends += 1
+            self._deliver(target)
+        elif (
+            self.timer_sent is not None
+            and target >= self.cfg.max_target_c - 0.05
+            and self.t - self.timer_sent >= self.proxy.heat_timer_s / 2.0
+        ):
+            # Still the maximum and half the timer gone: renew it.
+            self._deliver(target)
+            self.trace.timer_renewals += 1
 
         if self.tuner is not None:
             extra = dict(sample_extra or {})
@@ -306,6 +372,23 @@ class RoomSim:
         tr.ki.append(self.cfg.tuning.ki)
         tr.td.append(getattr(self.cfg.tuning, "td_s", 0.0))
         tr.mode.append(getattr(res, "mode", ""))
+        tr.power.append(self.trv_power)
+
+    def _record_dead(self, sp: float) -> None:
+        """Trace one control period while the proxy is gone."""
+        tr = self.trace
+        tr.t.append(self.t)
+        tr.sp.append(sp)
+        tr.y.append(self.sensor_value)
+        tr.y_true.append(self.y_true)
+        tr.tado.append(self._tado_reported())
+        tr.cmd.append(self.trv_sp)
+        tr.valve.append(self.valve)
+        tr.kp.append(self.cfg.tuning.kp)
+        tr.ki.append(self.cfg.tuning.ki)
+        tr.td.append(getattr(self.cfg.tuning, "td_s", 0.0))
+        tr.mode.append("dead")
+        tr.power.append(self.trv_power)
 
     def run(
         self,
@@ -319,9 +402,13 @@ class RoomSim:
             if self.t >= self.next_sensor:
                 self._sensor_step()
                 self.next_sensor += self.p.sensor_period_s
+            self._timer_step()
             if self.t >= self.next_control:
-                extra = {"eligible": eligible(self.t)} if eligible else None
-                self._control_step(setpoint(self.t), extra)
+                if self.alive:
+                    extra = {"eligible": eligible(self.t)} if eligible else None
+                    self._control_step(setpoint(self.t), extra)
+                else:
+                    self._record_dead(setpoint(self.t))
                 self.next_control += self.proxy.control_interval_s
             if self.t >= self.next_tado:
                 self._tado_step()

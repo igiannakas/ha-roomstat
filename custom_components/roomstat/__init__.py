@@ -19,6 +19,7 @@ from .climate_controllers import (
     migrate_options_v1_to_v2,
     plausible_c,
     read_trv,
+    trv_on_schedule,
 )
 from .const import (
     CLOUD_TRV_PLATFORMS,
@@ -134,6 +135,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_min_temp"] = trv["min"]
             data[f"{prefix}_max_temp"] = trv["max"]
             data[f"{prefix}_off"] = trv["off"]
+            # Back on its own schedule: our overlay ran out or was ended
+            # in the Tado app (the drift check sends the command again).
+            data[f"{prefix}_scheduled"] = trv_on_schedule(
+                state.state if state is not None else None,
+                trv["internal"],
+                trv["setpoint"],
+            )
             # Which integration provides it: a cloud one is polled, so its
             # values can be minutes old (slower drift grace).
             reg_entry = er.async_get(hass).async_get(entity_id) if entity_id else None

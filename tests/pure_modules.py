@@ -1,4 +1,5 @@
-"""Load the HA-free modules (parameters, regulation, autotune) for tests.
+"""Load the HA-free modules (parameters, regulation, autotune,
+climate_controllers) for tests.
 
 Not a test module.  Loads them as ``roomstat_pure.*`` so relative imports
 work without importing the package ``__init__`` (which needs Home Assistant).
@@ -33,3 +34,4 @@ if _PKG not in sys.modules:
 parameters = _load("parameters")
 regulation = _load("regulation")
 autotune = _load("autotune")
+climate_controllers = _load("climate_controllers")

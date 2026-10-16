@@ -11,12 +11,16 @@ from .climate_controllers import OBSOLETE_OPTIONS, change_trv
 from .const import (
     CONF_AUTOTUNE_DERIVATIVE,
     CONF_AUTOTUNE_ENABLED,
+    CONF_BAND_C,
+    CONF_BAND_MIN,
     CONF_BOOST_DURATION,
+    CONF_COLD_BAND_MIN,
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
+    CONF_HEAT_TIMER_S,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -37,7 +41,12 @@ from .const import (
     CONF_WINDOW_SENSOR_ID,
     DOMAIN,
 )
-from .parameters import DEFAULT_SENSOR_GRACE_S, BehaviourConfig, RegulationConfig
+from .parameters import (
+    DEFAULT_SENSOR_GRACE_S,
+    BehaviourConfig,
+    OutOfBandConfig,
+    RegulationConfig,
+)
 
 
 class RoomstatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -150,6 +159,7 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         data = self.config_entry.data
         defaults = RegulationConfig()
         beh_defaults = BehaviourConfig()
+        band_defaults = OutOfBandConfig()
 
         current_ext_temp = opts.get(
             CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
@@ -297,6 +307,19 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                         unit_of_measurement="s",
                     )
                 ),
+                # Fail cold: full-power commands to a Tado cloud thermostat
+                # as timer overlays of this length (0 = off).  Only with the
+                # zone's Tado app schedule at 5 °C or Off.
+                vol.Required(
+                    CONF_HEAT_TIMER_S,
+                    default=opts.get(CONF_HEAT_TIMER_S, defaults.heat_timer_s),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=14400, step=300,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="s",
+                    )
+                ),
                 # Another climate entity for the same room (e.g. the Tado
                 # cloud thermostat), used only while the TRV is unavailable.
                 vol.Optional(CONF_FALLBACK_ENTITY_ID): selector.EntitySelector(
@@ -434,6 +457,47 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 # Section: TRV Communication
                 vol.Required("trv_communication"): section(
                     trv_section_schema,
+                    {"collapsed": True},
+                ),
+
+                # Section: Out-of-band alarm
+                vol.Required("out_of_band"): section(
+                    vol.Schema(
+                        {
+                            vol.Required(
+                                CONF_BAND_C,
+                                default=opts.get(CONF_BAND_C, band_defaults.band_c),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(
+                                    min=0.2, max=3.0, step=0.1,
+                                    mode=selector.NumberSelectorMode.BOX,
+                                    unit_of_measurement="°C",
+                                )
+                            ),
+                            vol.Required(
+                                CONF_BAND_MIN,
+                                default=opts.get(CONF_BAND_MIN, band_defaults.band_min),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(
+                                    min=5, max=240, step=5,
+                                    mode=selector.NumberSelectorMode.BOX,
+                                    unit_of_measurement="min",
+                                )
+                            ),
+                            vol.Required(
+                                CONF_COLD_BAND_MIN,
+                                default=opts.get(
+                                    CONF_COLD_BAND_MIN, band_defaults.cold_band_min
+                                ),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(
+                                    min=15, max=720, step=15,
+                                    mode=selector.NumberSelectorMode.BOX,
+                                    unit_of_measurement="min",
+                                )
+                            ),
+                        }
+                    ),
                     {"collapsed": True},
                 ),
 

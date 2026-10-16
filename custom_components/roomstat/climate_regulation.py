@@ -14,10 +14,20 @@ from .climate_controllers import (
     CommandPacer,
     TrvReading,
     command_limits,
+    cycle_stalled,
+    format_time_period,
+    heat_timer_duration,
+    heat_timer_refresh_due,
     integration_step,
+    is_maximum,
     trv_setpoint_drifted,
 )
-from .const import CONF_FALLBACK_ENTITY_ID
+from .const import (
+    CONF_FALLBACK_ENTITY_ID,
+    CONF_WINDOW_SENSOR_ID,
+    TADO_DOMAIN,
+    TADO_SERVICE_TIMER,
+)
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
     MAX_INTEGRATION_STEP_S,
@@ -46,10 +56,14 @@ class RegulationMixin:
 
     def _write_state_with_binary_sensor(self) -> None:
         """Write HA state for this entity and linked sub-entities."""
+        self._update_out_of_band(time.time())
         self.async_write_ha_state()
         bs = getattr(self.coordinator, "binary_sensor_entity", None)
         if bs is not None:
             bs.async_write_ha_state()
+        band = getattr(self.coordinator, "out_of_band_entity", None)
+        if band is not None and band.hass is not None:
+            band.async_write_ha_state()
         for attr in ("sensor_entity", "schedule_sensor_entity"):
             se = getattr(self.coordinator, attr, None)
             if se is not None and se.hass is not None:
@@ -57,6 +71,55 @@ class RegulationMixin:
         for ent in getattr(self.coordinator, "tuning_entities", ()):
             if ent.hass is not None:
                 ent.async_write_ha_state()
+
+    def _window_open(self) -> bool:
+        """A window is open: the window sensor says so (also during its open
+        delay), or the window automation or its close delay is running."""
+        if self._window_ctrl.is_active or self._window_ctrl.close_delay_active:
+            return True
+        sensor = self._config_entry.options.get(CONF_WINDOW_SENSOR_ID)
+        state = self.hass.states.get(sensor) if sensor and self.hass is not None else None
+        return state is not None and state.state == "on"
+
+    def _update_out_of_band(self, now: float) -> None:
+        """Feed the out-of-band monitor (binary_sensor.<room>_out_of_band).
+
+        It judges only normal heating: heating on, no summer lock, no window
+        open and a fresh room reading.  A change is logged once.
+        """
+        cfg = self._band_config
+        was = self._band_monitor.state
+        try:
+            eligible = (
+                self._hvac_mode == HVACMode.HEAT
+                and not self._summer_active
+                and not self._sensor_degraded
+                and not self._window_open()
+            )
+            state = self._band_monitor.update(
+                now,
+                (self.coordinator.data or {}).get("room_temp"),
+                self._effective_setpoint(),
+                eligible=eligible,
+                band_c=cfg.band_c,
+                hot_after_s=cfg.band_min * 60.0,
+                cold_after_s=cfg.cold_band_min * 60.0,
+            )
+        except Exception:  # noqa: BLE001 - reporting must never stop the state writes
+            if not self._band_failed:
+                self._band_failed = True
+                _LOGGER.exception(
+                    "%s: the out-of-band check failed", self._config_entry.title
+                )
+            return
+        if state.on and (not was.on or was.reason != state.reason):
+            _LOGGER.warning(
+                "%s: out of band (%s): room %+.2f °C from the target for %d min",
+                self._config_entry.title, state.reason, state.deviation_c,
+                int((now - state.since) / 60) if state.since is not None else 0,
+            )
+        elif was.on and not state.on:
+            _LOGGER.info("%s: back within the band", self._config_entry.title)
 
     def _autotune_eligible(self) -> bool:
         """Whether this cycle is normal heating the auto-tuner may learn from.
@@ -130,14 +193,21 @@ class RegulationMixin:
         # clock caught up again.
         if self._last_command_sent_ts > now:
             self._last_command_sent_ts = now - self._config.min_command_interval_s
+        # Likewise a timer "sent in the future" would not be renewed before it
+        # runs out: its start counts as unknown, so it is renewed now.
+        if self._heat_timer_sent_ts is not None and self._heat_timer_sent_ts > now:
+            self._heat_timer_sent_ts = None
 
-        # Summer mode: no regulation, hold the TRV at a fixed 5 °C.
+        # Summer mode: no regulation, hold the TRV at a fixed 5 °C.  The lock
+        # is this cycle's decision (the watchdog counts it as completed).
         if self._summer_active:
+            self._note_cycle_completed(now)
             await self._async_summer_enforce(now)
             return
 
         # Off: no regulation, but make sure the TRV is off too.
         if self._hvac_mode == HVACMode.OFF:
+            self._note_cycle_completed(now)
             await self._async_keep_trv_off(now)
             return
 
@@ -201,16 +271,26 @@ class RegulationMixin:
                 self._config_entry.title, int(missing_for / 60),
             )
 
-        if sensor_lost and tado_internal is not None and self._reg_state.mode == MODE_HEAT:
-            # A heat-up's maximum command is never left in place without a
-            # room reading: it is ended (coast) before the room is left alone.
-            # Until the TRV has taken the stop, it is tried again (once per
-            # rate-limit interval).
-            await self._async_decide_and_send(
-                now, trv, self._config.min_target_c, strong=True
-            )
-            if self._last_reason.startswith("sent(") or self._last_reason == "already_at_target":
-                self._reg_state.mode = MODE_COAST
+        if sensor_lost and tado_internal is not None:
+            # Without its sensor the room is not regulated: a deliberate
+            # pause, reported by the warning above and the repair, so this
+            # cycle has done its job (the watchdog does not report it again).
+            # A maximum command is never left in place meanwhile: a heat-up,
+            # or any maximum the TRV took (a hold clamped at 25), is ended
+            # (coast).  Until the TRV has taken the stop, it is tried again
+            # (once per rate-limit interval).
+            if self._reg_state.mode == MODE_HEAT or self._last_sent_was_max:
+                await self._async_decide_and_send(
+                    now, trv, self._config.min_target_c, strong=True
+                )
+                if (
+                    self._last_reason.startswith("sent(")
+                    or self._last_reason == "already_at_target"
+                ):
+                    self._reg_state.mode = MODE_COAST
+            else:
+                self._last_reason = "waiting_for_sensors"
+            self._note_cycle_completed(now)
             self._write_state_with_binary_sensor()
             return
 
@@ -267,6 +347,7 @@ class RegulationMixin:
             result,
         )
 
+        self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()
 
     async def _async_decide_and_send(
@@ -288,9 +369,9 @@ class RegulationMixin:
         # is known (e.g. after a quick HVAC OFF → HEAT cycle).
         time_since_last = now - self._last_command_sent_ts
         # A TRV that no longer holds our last command (lost on the way, a
-        # Tado schedule block ended the override, or it was switched off in
-        # the Tado app) is compared with what it actually holds, so the
-        # command goes out again.
+        # Tado schedule block or an expired timer overlay ended the override,
+        # or it was switched off in the Tado app) is compared with what it
+        # actually holds, so the command goes out again.
         if trv_setpoint_drifted(
             self._last_sent_setpoint,
             trv.setpoint_c,
@@ -299,19 +380,20 @@ class RegulationMixin:
             self._config.min_change_threshold_c,
             trv_off=trv.off,
             floor_c=self._config.min_target_c,
+            trv_scheduled=trv.scheduled,
         ):
             _LOGGER.info(
                 "%s: %s holds %s, not the %.1f °C sent; sending again",
-                self._config_entry.title, trv.entity_id,
-                "off" if trv.off else f"{trv.setpoint_c:.1f} °C",
+                self._config_entry.title, trv.entity_id, _held_text(trv),
                 self._last_sent_setpoint,
             )
             self._last_sent_setpoint = None
 
-        # A valve that is off already does what a frost-level command asks
-        # (Tado shows its 5 °C setpoint as off), and Home Assistant refuses a
-        # setpoint below 7 °C for a HomeKit valve that is off.
-        if trv.off and target <= self._config.min_target_c + 0.05:
+        # A valve that is off, or on an Off block of its schedule, already
+        # does what a frost-level command asks (Tado shows its 5 °C setpoint
+        # as off), and Home Assistant refuses a setpoint below 7 °C for a
+        # HomeKit valve that is off.
+        if trv.shut_without_setpoint and target <= self._config.min_target_c + 0.05:
             self._last_reason = "already_at_target"
             return
 
@@ -321,6 +403,19 @@ class RegulationMixin:
             self._config.min_target_c, self._config.max_target_c, trv.min_c, trv.max_c
         )
         target = max(lo, min(hi, target))
+
+        # Fail cold: the maximum to a cloud TRV is a timer overlay, renewed
+        # once half of it has passed while the command is still the maximum
+        # (whatever the mode: heat, or a hold clamped there).  If Home
+        # Assistant, the network or the cloud stop renewing it, the zone
+        # falls back to its Tado schedule (5 °C or Off) on its own.
+        maximum = is_maximum(target, hi)
+        timer_s = heat_timer_duration(
+            target, hi, cloud=trv.is_cloud, heat_timer_s=self._config.heat_timer_s
+        )
+        timer_refresh_due = timer_s is not None and heat_timer_refresh_due(
+            now, self._heat_timer_sent_ts, timer_s
+        )
 
         current_tado_setpoint = (
             self._last_sent_setpoint
@@ -354,7 +449,17 @@ class RegulationMixin:
                 and time_since_last >= self._overlay_refresh_s
             )
 
-            if diff < self._config.min_change_threshold_c and not overlay_refresh_due:
+            if diff < self._config.min_change_threshold_c and timer_refresh_due:
+                # A strong command: it skips the rate limit once; a renewal
+                # that failed waits for the interval like any other retry.
+                if is_rate_limited and self._heat_timer_refresh_tried:
+                    remaining = int(self._config.min_command_interval_s - time_since_last)
+                    reason = f"rate_limited({remaining}s)"
+                else:
+                    should_send = True
+                    reason = "heat_timer_refresh"
+                    self._heat_timer_refresh_tried = True
+            elif diff < self._config.min_change_threshold_c and not overlay_refresh_due:
                 reason = "already_at_target"
             elif diff < self._config.min_change_threshold_c and overlay_refresh_due:
                 should_send = True
@@ -389,7 +494,9 @@ class RegulationMixin:
             return
         # A failed command still counts for the rate limit, so an outage
         # costs one attempt per interval, not one per cycle.
-        sent = await self._async_send_to_tado(target, trv.entity_id)
+        sent = await self._async_send_to_tado(
+            target, trv.entity_id, timer_s=timer_s, maximum=maximum
+        )
         self._last_command_sent_ts = now
         self._last_attempt_c = target
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
@@ -438,6 +545,10 @@ class RegulationMixin:
             return
         self._trv_fallback_active = trv.is_fallback
         self._last_sent_setpoint = None
+        # Whether the newly used entity holds a timer, and since when, is not
+        # known: a maximum it holds is renewed as a timer straight away.
+        self._heat_timer_sent_ts = None
+        self._heat_timer_refresh_tried = False
         source_id = self._config_entry.data.get("source_entity_id")
         fallback_id = self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID)
         prefer_fallback = self._prefer_fallback()
@@ -482,22 +593,26 @@ class RegulationMixin:
             _LOGGER.error("%s: %s", title, message, exc_info=err)
         self._last_command_error = message
 
-    async def _async_call_trv(self, entity_id: str, service: str, data: dict) -> bool:
-        """Call a climate service on the TRV.  Never raises (except when the
-        task is cancelled): a failed command must not stop the cycle."""
+    async def _async_call_trv(
+        self, entity_id: str, service: str, data: dict, *, domain: str = "climate"
+    ) -> bool:
+        """Call a service on the TRV (``climate`` by default, ``tado`` for a
+        timer overlay).  Never raises (except when the task is cancelled): a
+        failed command must not stop the cycle."""
         await _wait_for_command_slot()
+        what = service if domain == "climate" else f"{domain}.{service}"
         try:
             async with asyncio.timeout(TRV_COMMAND_TIMEOUT_S):
                 await self.hass.services.async_call(
-                    domain="climate",
+                    domain=domain,
                     service=service,
                     service_data={"entity_id": entity_id, **data},
                     blocking=True,
                 )
         except Exception as err:  # noqa: BLE001 - any failure is reported, never raised
-            self._note_command_result(entity_id, service, err)
+            self._note_command_result(entity_id, what, err)
             return False
-        self._note_command_result(entity_id, service, None)
+        self._note_command_result(entity_id, what, None)
         return True
 
     async def _async_send_hvac_mode_to_tado(self, mode: HVACMode) -> bool:
@@ -515,27 +630,166 @@ class RegulationMixin:
         if mode == HVACMode.OFF:
             # Whatever happens, the TRV no longer holds a known setpoint.
             self._last_sent_setpoint = None
-        return await self._async_call_trv(
+        sent = await self._async_call_trv(
             source_entity, "set_hvac_mode", {"hvac_mode": mode}
         )
+        if sent and mode == HVACMode.OFF:
+            # An OFF overlay replaces any timer: nothing to renew or shut.
+            self._heat_timer_sent_ts = None
+            self._last_sent_was_max = False
+        return sent
 
-    async def _async_send_to_tado(self, target_c: float, entity_id: str | None = None) -> bool:
+    async def _async_send_to_tado(
+        self,
+        target_c: float,
+        entity_id: str | None = None,
+        *,
+        timer_s: float | None = None,
+        maximum: bool = False,
+    ) -> bool:
         """Send a temperature command to the TRV (default: the configured one).
 
-        Returns whether the TRV took it.  A failed command is retried by the
-        next cycle once the rate limit allows (no baseline, or the drift check).
+        With ``timer_s`` it is a Tado timer overlay of that length
+        (``tado.set_climate_timer``), else a Manual one
+        (``climate.set_temperature``).  ``maximum``: the command is the
+        highest the TRV takes (the watchdog replaces such a command if the
+        cycle stops).  Returns whether the TRV took it.  A failed command is
+        retried by the next cycle once the rate limit allows (no baseline,
+        or the drift check).
         """
         source_entity = entity_id or self._config_entry.data.get("source_entity_id")
         if not source_entity:
             _LOGGER.warning("No source_entity_id configured – cannot send command to Tado")
             return False
 
-        _LOGGER.debug("Sending %.1f°C to %s", target_c, source_entity)
-        sent = await self._async_call_trv(
-            source_entity,
-            "set_temperature",
-            {"temperature": target_c, "hvac_mode": HVACMode.HEAT},
-        )
+        if timer_s:
+            _LOGGER.debug(
+                "Sending %.1f°C to %s as a %d s timer", target_c, source_entity, int(timer_s)
+            )
+            # temperature + time_period only: the timer service rejects
+            # anything else (requested_overlay excludes time_period, and its
+            # set_timer always heats).
+            sent = await self._async_call_trv(
+                source_entity,
+                TADO_SERVICE_TIMER,
+                {"temperature": target_c, "time_period": format_time_period(timer_s)},
+                domain=TADO_DOMAIN,
+            )
+        else:
+            _LOGGER.debug("Sending %.1f°C to %s", target_c, source_entity)
+            sent = await self._async_call_trv(
+                source_entity,
+                "set_temperature",
+                {"temperature": target_c, "hvac_mode": HVACMode.HEAT},
+            )
         if sent:
             self._last_sent_setpoint = target_c
+            self._last_sent_was_max = maximum
+            if timer_s:
+                # The renewal clock starts when the TRV took the timer.
+                self._heat_timer_sent_ts = time.time()
+                self._heat_timer_refresh_tried = False
+            else:
+                # A Manual overlay replaced any timer.
+                self._heat_timer_sent_ts = None
         return sent
+
+    # ------------------------------------------------------------------
+    # Watchdog (fail cold when the cycle stops)
+    # ------------------------------------------------------------------
+
+    def _note_cycle_completed(self, now: float) -> None:
+        """A regulation cycle reached its decision (see the watchdog)."""
+        self._last_cycle_completed_ts = now
+        if self._regulation_stalled:
+            self._regulation_stalled = False
+            self._watchdog_shut_tried = False
+            _LOGGER.info("%s: regulation is running again", self._config_entry.title)
+
+    async def _async_watchdog_check(self, _now=None) -> None:
+        """Periodic watchdog, on its own timer (never the cycle's).
+
+        No regulation cycle has reached a decision for
+        ``cycle_watchdog_s``: the cycles stopped, or every one ends early
+        (no TRV or room reading, the coordinator failing, an unexpected
+        error).  The room is reported as stalled (warning once, attribute
+        ``regulation_stalled``), and a maximum command still in place is
+        replaced by the minimum: a strong command, which skips the rate limit
+        once; a failed one is tried again once per rate-limit interval.
+        """
+        now = time.time()
+        if not cycle_stalled(now, self._last_cycle_completed_ts, self._config.cycle_watchdog_s):
+            return
+        if not self._regulation_stalled:
+            self._regulation_stalled = True
+            _LOGGER.warning(
+                "%s: no regulation cycle has completed for %d min (last reason: %s)%s",
+                self._config_entry.title,
+                int((now - self._last_cycle_completed_ts) / 60),
+                self._last_reason,
+                "; shutting the valve" if self._last_sent_was_max else "",
+            )
+        if self._last_sent_was_max:
+            await self._async_watchdog_shut(now)
+        self._write_state_with_binary_sensor()
+
+    async def _async_watchdog_shut(self, now: float) -> None:
+        """Replace a maximum command left in place by the minimum.
+
+        Only a valve that can be reached (it gives a reading: Home Assistant
+        silently skips a service call to an unavailable entity) and that
+        still holds the maximum.  One that is off, back on its schedule or at
+        any lower setpoint no longer holds our maximum, and a frost-level
+        command could turn an off valve on (a HomeKit valve that is off
+        accepts only 7-35 °C).
+        """
+        if (
+            self._watchdog_shut_tried
+            and now - self._last_command_sent_ts < self._config.min_command_interval_s
+        ):
+            return
+        if self._regulation_lock.locked():
+            # A cycle is running right now: it decides this time.
+            return
+        async with self._regulation_lock:
+            trv = self._active_trv()
+            if not self._last_sent_was_max or not trv.usable:
+                return
+            lo, hi = command_limits(
+                self._config.min_target_c, self._config.max_target_c, trv.min_c, trv.max_c
+            )
+            if (
+                trv.shut_without_setpoint
+                or trv.setpoint_c is None
+                or not is_maximum(trv.setpoint_c, hi)
+            ):
+                self._last_sent_was_max = False
+                _LOGGER.info(
+                    "%s: watchdog: %s holds %s, not the maximum; nothing to shut",
+                    self._config_entry.title, trv.entity_id, _held_text(trv),
+                )
+                return
+            self._watchdog_shut_tried = True
+            sent = await self._async_send_to_tado(lo, trv.entity_id)
+            self._last_command_sent_ts = now
+            self._last_attempt_c = lo
+            self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
+            if sent:
+                self._reg_state.mode = MODE_COAST
+                _LOGGER.warning(
+                    "%s: watchdog sent %.1f °C to %s", self._config_entry.title,
+                    lo, trv.entity_id,
+                )
+
+
+def _held_text(trv: TrvReading) -> str:
+    """What the TRV holds instead of our command, for the log."""
+    if trv.off:
+        return "off"
+    if trv.scheduled:
+        if trv.setpoint_c is None:
+            return "its schedule (off)"
+        return f"its schedule ({trv.setpoint_c:.1f} °C)"
+    if trv.setpoint_c is None:
+        return "no setpoint"
+    return f"{trv.setpoint_c:.1f} °C"

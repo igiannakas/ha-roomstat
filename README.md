@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.4.1-blue)
+![Version](https://img.shields.io/badge/version-2.5.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -44,7 +44,14 @@ changes.
 - **Handles failures.** A valve that is off isn't sent temperatures it would
   refuse. A failed command is tried again a few minutes later and logged
   once, not every time; the thermostat's `last_command_error` attribute shows
-  it. **Off** stays off and is sent again if the valve doesn't take it.
+  it. **Off** stays off and is sent again if the valve doesn't take it. A
+  valve put back on its Tado schedule (from the app, or by an expired timer)
+  gets its command again.
+- **Fails cold.** Full power on a Tado cloud thermostat can be a timer, so a
+  dead Home Assistant, network or cloud can't leave a radiator on for hours.
+  A watchdog shuts the valve if regulation stops, and an **Out of band**
+  sensor per room reports a room stuck too warm or too cold. See
+  [Fail safe](#fail-safe).
 - **Repairs for lost entities.** If the valve, the room sensor or any helper
   a room uses is deleted, renamed or disabled, a repair appears under
   **Settings → Repairs** after 5 minutes. **Fix** lets you pick the entity to
@@ -153,6 +160,67 @@ every room.
 - **On:** every room is held at 5 °C. Changes from Home Assistant are refused,
   and a turn of the dial on the radiator is put back.
 - **Off:** every room goes back to its schedule, or to Comfort.
+
+## Fail safe
+
+Every command Roomstat sends stays on the valve until the next one. If Home
+Assistant, the network or the Tado cloud stop while a room heats at full
+power, the valve stays open. With Tado cloud thermostats, full power can
+expire on its own:
+
+1. In the Tado app, set the schedule of every zone Roomstat controls to
+   **5 °C or Off**, all day. When full power expires, or you end Roomstat's
+   setting in the app, the zone goes back to this schedule, and Roomstat
+   sends its command again once it notices.
+2. Then, per room, set **Configure → TRV Communication → Full-power time
+   limit** to 3600 s. Full power then goes to Tado as a one-hour timer,
+   renewed every half hour while it's still needed (one extra command per
+   half hour of heating). Everything else, 5 °C included, stays until the
+   next command. 0, the default, leaves full power on until the next command.
+
+If no regulation cycle completes for 10 minutes (Home Assistant busy, no
+reading from the valve, an error), Roomstat logs a warning, sets the
+thermostat's `regulation_stalled` attribute, and replaces a full-power
+command with 5 °C.
+
+"5 °C" isn't 5 °C in the room if you set negative temperature offsets on the
+valves in the Tado app (they read low by that much). The valve then opens
+when the room falls to about 10–15 °C. That applies to the frost preset,
+summer mode, a 5 °C schedule, and possibly Off.
+
+**Out of band.** Each room has an **Out of band** sensor
+(`binary_sensor.<room>_out_of_band`). It turns on when the room stays 0.5 °C
+too warm for 30 minutes, or 0.5 °C too cold for 2 hours, while heating is on,
+with no summer mode, no window open and a working room sensor:
+
+- A room still cooling down after its target was lowered (Night) isn't too
+  warm. One that warms up again by 0.5 °C from its lowest point is.
+- The 2 hours start again with each rise of the target, so a heat-up doesn't
+  count.
+- Attributes: `reason` (`hot` or `cold`), `deviation_c` (room minus target)
+  and `since` (when it went out of band, set only while the sensor is on).
+- Change the limits under **Configure → Out-of-band alarm**.
+
+A notification for it:
+
+```yaml
+alias: Room out of band
+triggers:
+  - trigger: state
+    entity_id:
+      - binary_sensor.living_room_thermostat_out_of_band
+      - binary_sensor.study_thermostat_out_of_band
+    to: "on"
+actions:
+  - action: notify.notify
+    data:
+      title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}"
+      message: >-
+        Too {{ state_attr(trigger.entity_id, 'reason') }}:
+        {{ state_attr(trigger.entity_id, 'deviation_c') }} °C off the target
+        since {{ as_timestamp(state_attr(trigger.entity_id, 'since'))
+        | timestamp_custom('%H:%M') }}.
+```
 
 ## Dashboard card
 

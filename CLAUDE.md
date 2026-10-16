@@ -53,7 +53,9 @@ the HA modules.
 - `autotune.py`: background tuning of Kp, Ki and the braking time Td.
 - `climate_controllers.py`: window, presence, summer and schedule state
   machines, restart persistence helpers, `choose_trv` (configured TRV or
-  its fallback), and the config entry option migration.
+  its fallback), `trv_on_schedule`, the fail-cold helpers (timer overlays,
+  watchdog test, `OutOfBandMonitor`), and the config entry option
+  migration.
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
   feeding the auto-tuner.
@@ -63,7 +65,7 @@ the HA modules.
 - `climate_summer.py`: summer lock (5 °C, service calls refused, TRV held).
 - `number.py`: preset temperatures. `sensor.py`: boost remaining, schedule
   override remaining, auto-tune sensors. `button.py`: resume schedule, reset
-  auto-tune. `binary_sensor.py`: sensor degraded.
+  auto-tune. `binary_sensor.py`: sensor degraded, out of band.
 - `config_flow.py`: setup and the options flow (sections).
 - `repairs.py`: repairs for entity settings whose entity was deleted, renamed
   or disabled, with a fix flow to pick a replacement.
@@ -112,8 +114,8 @@ Read this before changing `regulation.py` or `parameters.py`.
 
   Everything but hold is a strong command: it skips the rate limit once
   (not on retries). A reload resumes from what the TRV holds
-  (`resume_mode`: maximum → heat, minimum → coast). A heat-up is ended
-  (coast) when the room sensor is lost.
+  (`resume_mode`: maximum → heat, minimum → coast). A heat-up, or any
+  maximum the TRV holds, is ended (coast) when the room sensor is lost.
   Why this shape (simulated in the fitted rooms below, valve modulating or
   pulsing): only 25/5 (2.1's first version) can't dose, so near the target
   it is a relay (0.06–0.12 °C RMS); the high-gain hold with the firm stop
@@ -199,7 +201,8 @@ Read this before changing `regulation.py` or `parameters.py`.
   on the way and a Tado schedule block that ended the override, so blind
   overlay refreshes are not needed with HomeKit (`overlay_refresh_s` 0).
   A valve that is off while the last command asked for heat (switched off in
-  the Tado app) counts as drifted too.
+  the Tado app) counts as drifted too, and so does a valve back on its
+  schedule (see "Failure handling").
 
 ## Failure handling
 
@@ -226,17 +229,55 @@ is updating.
 - **Room sensor lost:** the room sensor is meant to be reliable (owner's
   decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
-  nothing is sent and the TRV keeps its last setpoint; the loss is logged
-  once, and after `ROOM_SENSOR_UNAVAILABLE_REPORT_S` (15 min) it becomes a
-  repair. Don't hold the room on the TRV's own reading: the Tado offsets
-  (−5 to −9.9 °C here) and the radiator's heat make its relation to the
-  room swing by 10 °C, so any fixed "target + offset" overheats some rooms.
+  the TRV keeps its last setpoint, except a maximum (heat, or a hold clamped
+  at 25), which is ended; the loss is logged once, and after
+  `ROOM_SENSOR_UNAVAILABLE_REPORT_S` (15 min) it becomes a repair. Don't
+  hold the room on the TRV's own reading: the Tado offsets (−5 to −9.9 °C
+  here) and the radiator's heat make its relation to the room swing by
+  10 °C, so any fixed "target + offset" overheats some rooms.
 - **Pauses and the clock:** the integral covers at most
   `MAX_INTEGRATION_STEP_S` (2 cycles) per cycle (`integration_step`). A last
   command time in the future (clock went back) is reset, so commands are not
   blocked until the clock catches up.
 - **Faulty readings:** room and TRV readings outside −30…60 °C are treated as
   missing (`plausible_c`).
+- **Fail cold (timer overlays):** a maximum command left behind by a dead
+  HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
+  (TRV option, default 0: the safe landing needs the Tado app schedule at
+  5 °C or Off, which Roomstat cannot check), a maximum (≥ the TRV's max −
+  0.05, any mode) to a cloud TRV is `tado.set_climate_timer` {temperature,
+  time_period}; everything else, 5 °C included, stays Manual. Renewed at
+  half life while the target is still the maximum (strong: skips the rate
+  limit once); with the start unknown (reload, TRV switch, clock back) at
+  once. At least `HEAT_TIMER_MIN_S` (900 s: shorter only costs renewals).
+  Simulated kill mid heat-up (3600 s): valve shut 3,660 s after the last
+  command, peak 20.1 / 19.3 °C vs 26.2 / 23.4 °C Manual; running, the room's
+  path is unchanged and renewals add 1–4 commands/day.
+- **A TRV back on its schedule** (hvac_mode `auto`, or a reading without a
+  setpoint; `trv_on_schedule`, `TrvReading.scheduled`, kept apart from
+  `off`) holds no command of ours: a timer ran out or the app ended it. An
+  Off block shows `auto` with no setpoint, which the drift check used to
+  ignore, stalling a heat-up shut. Now a heat command is re-sent (as a timer
+  when enabled); a frost-level one counts as done while the schedule keeps
+  the valve shut (no setpoint, or a block at the floor) and is re-sent
+  against a block that heats. An unknown setpoint with no reading is still
+  not drift.
+- **Watchdog** (own `async_track_time_interval` callback, never the
+  cycle's; `cycle_watchdog_s` 600 s, deliberately not an option): no cycle
+  reached its decision (regulated, summer lock, off, or the room-sensor
+  pause with the TRV readable) for 10 min → one warning, attribute
+  `regulation_stalled`, and if the last command the TRV took was the maximum
+  the minimum is sent (strong; retried per rate-limit interval), only to a
+  valve that gives a reading and still shows the maximum (a 7 °C command
+  would turn an off HomeKit valve on).
+- **Out-of-band sensor** (`binary_sensor.<room>_out_of_band`, reporting
+  only): while heating, no summer lock, no window open and a fresh room
+  reading. Hot: room ≥ max(setpoint, `min_since`) + 0.5 °C for 30 min,
+  `min_since` = the lowest reading since the setpoint was last lowered
+  (persisted; the first reading when nothing is saved). The 11 Oct setback
+  (20 → 18 at 21:30, still 18.66 at 06:00) never fires; "setpoint + 0.5"
+  alone was on all night. Cold: 0.5 °C below for 120 min, restarted by every
+  setpoint rise. `since` is set only while on.
 - **Entity gone:** every coordinator update checks the entity settings (TRV,
   room sensor, fallback, window, presence, summer, schedule). One with
   neither a state nor a registry entry (deleted, renamed), or disabled in the
@@ -330,8 +371,13 @@ ruff check .
 
 - `tests/ha_harness.py` provides a minimal HA stub, so end-to-end tests run the
   real `RoomstatClimate` code (`test_frost_preset_persistence.py`,
-  `test_summer_mode.py`, `test_schedule.py`, `test_autotune_climate.py`). It
-  needs Python ≥ 3.11 (`asyncio.timeout`); CI uses 3.12.
+  `test_summer_mode.py`, `test_schedule.py`, `test_autotune_climate.py`,
+  `test_fail_cold_entity.py`) and the binary sensors. It needs Python ≥ 3.11
+  (`asyncio.timeout`); CI uses 3.12.
+- `tests/plant_sim.py` models timer overlays (`ProxySettings.heat_timer_s`,
+  `PlantParams.tado_schedule_c`: 5 °C, or None for Off) and
+  `RoomSim.kill()` (the proxy stops, the room and valve carry on); the
+  fail-cold checks are in `tests/test_fail_cold.py`.
 - Tests bypass `__init__.py` by loading modules with
   `importlib.util.spec_from_file_location`.
 
