@@ -167,12 +167,18 @@ NIGHT_11_OCT = [
 ]
 
 
-def _feed(mon, start, readings, setpoint, *, step=60.0, eligible=True):
-    """Feed one reading per minute (each value held for its step)."""
+def _feed(mon, start, readings, setpoint, *, step=60.0, eligible=True,
+          heating=None, trv=None):
+    """Feed one reading per minute (each value held for its step).
+
+    ``heating``: what the valve reports (None: nothing known); ``trv``: the
+    TRV's own reading, a value or a callable of the room reading."""
     t = start
     states = []
     for room in readings:
-        states.append(mon.update(t, room, setpoint, eligible=eligible, **BAND))
+        trv_c = trv(room) if callable(trv) else trv
+        states.append(mon.update(t, room, setpoint, eligible=eligible,
+                                 valve_heating=heating, trv_c=trv_c, **BAND))
         t += step
     return t, states
 
@@ -260,6 +266,101 @@ class TestOutOfBandHot:
         mon = C.OutOfBandMonitor()
         mon.restore(data)
         assert mon.min_since is None and mon.setpoint is None
+
+
+class TestOutOfBandRadiatorEvidence:
+    """Hot needs the radiator to be the cause; a room warmed by the sun with
+    the valve shut is "warm": reported, not an alarm.  On 16 Oct 2026 four
+    rooms rose 1.5-2.3 °C in a sunny afternoon with every valve at 0 %."""
+
+    # Living room, 16 Oct 2026, 13:05 to 15:05: 5-minute means of the room
+    # sensor; the valve reported idle throughout and its reading followed
+    # the room (10.1 -> 12.3 with the -9.9 offset: no radiator heat).
+    SUNNY_AFTERNOON = [
+        20.10, 20.10, 20.11, 20.15, 20.20, 20.29, 20.40, 20.42, 20.39, 20.42, 20.56,
+        20.71, 20.82, 21.06, 21.28, 21.37, 21.40, 21.50, 21.55, 21.72, 22.00, 22.22,
+        22.34, 22.41, 22.33,
+    ]
+
+    def test_sun_with_the_valve_shut_is_warm_not_hot(self):
+        mon = C.OutOfBandMonitor()
+        t = 0.0
+        states = []
+        for room in self.SUNNY_AFTERNOON:
+            t, more = _feed(mon, t, [room] * 5, 20.0, heating=False, trv=lambda r: r - 10.1)
+            states += more
+        assert not any(s.on for s in states)
+        warm = [s for s in states if s.reason == C.BAND_WARM]
+        assert warm and warm[0].radiator_heated is False
+        assert warm[0].since is not None
+
+    def test_valve_heating_during_the_excursion_is_hot(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, _ = _feed(mon, t, [20.5] * 10, 20.0, heating=False, trv=10.0)
+        t, _ = _feed(mon, t, [20.5] * 5, 20.0, heating=True, trv=10.0)     # a pulse
+        t, states = _feed(mon, t, [20.5] * 16, 20.0, heating=False, trv=10.0)
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+        assert states[-1].radiator_heated is True
+
+    def test_valve_that_heated_just_before_the_excursion_is_the_cause(self):
+        """The radiator's heat reaches the room after the valve shut (the
+        16 Oct evening: full power 19:58-20:12, the room over the band from
+        20:25): heating within the look-back still counts."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [19.6] * 14, 20.0, heating=True, trv=10.0)   # heats
+        t, _ = _feed(mon, t, [19.9, 20.1, 20.3, 20.4] * 3, 20.0, heating=False, trv=12.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=12.3)
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+
+    def test_valve_that_heated_long_before_is_not_the_cause(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [19.6] * 5, 20.0, heating=True, trv=10.0)
+        t, _ = _feed(mon, t, [19.9] * 40, 20.0, heating=False, trv=10.0)   # 40 min idle
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=10.0)
+        assert not states[-1].on and states[-1].reason == C.BAND_WARM
+
+    def test_trv_reading_tells_a_hot_radiator_the_valve_does_not_report(self):
+        """A stuck pin: the Tado reports 0 % but the radiator is hot, so the
+        valve's own reading climbs far more than the room."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.5] * 31, 20.0, heating=False,
+                          trv=lambda r: 10.0 + 4.0)                       # +4 on the TRV
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+        assert states[-1].radiator_heated is True
+
+    def test_trv_reading_following_the_room_is_the_sun(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.5] * 31, 20.0, heating=False, trv=10.5)
+        assert not states[-1].on and states[-1].reason == C.BAND_WARM
+
+    def test_trv_reading_decides_when_the_valve_says_nothing(self):
+        """No hvac_action at all (another TRV): the TRV's reading is still
+        read; climbing with the room, it is the sun."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, trv=10.0)
+        t, states = _feed(mon, t, [20.5] * 31, 20.0, trv=10.5)
+        assert not states[-1].on and states[-1].reason == C.BAND_WARM
+        t, states = _feed(mon, t, [20.6] * 5, 20.0, trv=13.0)
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+
+    def test_nothing_known_keeps_the_plain_rule(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0)
+        t, states = _feed(mon, t, [20.5] * 31, 20.0)
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+        assert states[-1].radiator_heated is None
+
+    def test_warm_ends_like_hot(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, _ = _feed(mon, t, [20.5] * 31, 20.0, heating=False, trv=10.5)
+        assert mon.state.reason == C.BAND_WARM
+        state = mon.update(t, 20.3, 20.0, eligible=True, valve_heating=False,
+                           trv_c=10.3, **BAND)
+        assert state.reason is None and state.since is None and state.radiator_heated is None
 
 
 class TestOutOfBandCold:

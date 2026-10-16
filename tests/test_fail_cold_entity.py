@@ -50,12 +50,13 @@ class _Clock:
         self.now += s
 
 
-def _feed(ent, room, internal, setpoint, *, cloud=True, scheduled=False, off=False):
+def _feed(ent, room, internal, setpoint, *, cloud=True, scheduled=False, off=False,
+          heating=None):
     ent.coordinator.data = {
         "room_temp": room, "room_temp_ts": None,
         "tado_internal_temp": internal, "tado_setpoint": setpoint,
         "tado_min_temp": 5.0, "tado_max_temp": 25.0, "tado_off": off,
-        "tado_cloud": cloud, "tado_scheduled": scheduled,
+        "tado_cloud": cloud, "tado_scheduled": scheduled, "tado_heating": heating,
         "fallback_internal_temp": None, "fallback_setpoint": None,
     }
 
@@ -342,10 +343,10 @@ def _band_entity(ent):
     return _binary_sensor.RoomstatOutOfBandBinarySensor(ent.coordinator, ent._config_entry)
 
 
-def _minutes(ent, clock, minutes, room, *, internal=15.0, setpoint=None):
+def _minutes(ent, clock, minutes, room, *, internal=15.0, setpoint=None, heating=None):
     for _ in range(minutes):
         clock.tick(60)
-        _feed(ent, room, internal, setpoint)
+        _feed(ent, room, internal, setpoint, heating=heating)
         _cycle(ent)
 
 
@@ -369,14 +370,47 @@ class TestOutOfBandEntity:
             start, tz=datetime.UTC).isoformat()
 
     def test_hot_after_30_min_above_the_band(self, monkeypatch):
+        """The valve says it is heating (hvac_action): the radiator is the
+        cause, so it is an alarm."""
         clock = _Clock(monkeypatch)
         ent = _entity()
         band = _band_entity(ent)
-        _feed(ent, 20.5, 15.0, None)
+        _feed(ent, 20.5, 15.0, None, heating=True)
         _cycle(ent)
-        _minutes(ent, clock, 30, 21.0)
+        _minutes(ent, clock, 30, 21.0, heating=True)
         assert band.is_on is False
-        _minutes(ent, clock, 1, 21.0)
+        _minutes(ent, clock, 1, 21.0, heating=True)
+        assert band.is_on is True
+        attrs = band.extra_state_attributes
+        assert attrs["reason"] == "hot" and attrs["radiator_heated"] is True
+
+    def test_warm_with_the_valve_shut_is_not_an_alarm(self, monkeypatch, caplog):
+        """The 16 Oct afternoon: the room climbs with the valve at 0 % and
+        its reading following the room (the sun)."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        band = _band_entity(ent)
+        _feed(ent, 20.5, 10.4, None, heating=False)
+        _cycle(ent)
+        caplog.set_level(logging.INFO)
+        _minutes(ent, clock, 31, 21.0, internal=10.9, heating=False)
+        assert band.is_on is False
+        attrs = band.extra_state_attributes
+        assert attrs["reason"] == "warm" and attrs["radiator_heated"] is False
+        assert attrs["since"] is not None
+        assert not any(r.levelno == logging.WARNING and "out of band" in r.getMessage()
+                       for r in caplog.records)
+        assert any("radiator cold" in r.getMessage() for r in caplog.records)
+
+    def test_hot_when_the_trv_reading_climbs_with_the_valve_silent(self, monkeypatch):
+        """No hvac_action from the entity, but the TRV's own reading climbs
+        far more than the room: a hot radiator."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        band = _band_entity(ent)
+        _feed(ent, 20.5, 10.4, None)
+        _cycle(ent)
+        _minutes(ent, clock, 31, 21.0, internal=14.0)
         assert band.is_on is True
         assert band.extra_state_attributes["reason"] == "hot"
 

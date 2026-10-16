@@ -140,7 +140,7 @@
             },
             "data_description": {
               "band_c": "How far from the target counts as out of band.",
-              "band_min": "How long the room must stay this much too warm. A room still cooling down after the target was lowered (for example the Night setting) never counts; one that warms up again by this much does.",
+              "band_min": "How long the room must stay this much too warm. A room still cooling down after the target was lowered (for example the Night setting) never counts; one that warms up again by this much does, if the radiator did it. A room warmed by the sun with the radiator cold is reported as warm, not as an alarm.",
               "cold_band_min": "How long the room must stay this much too cold. Counted again from every rise of the target, so it should be longer than a normal heat-up."
             }
           },

@@ -274,10 +274,22 @@ is updating.
   only): while heating, no summer lock, no window open and a fresh room
   reading. Hot: room ≥ max(setpoint, `min_since`) + 0.5 °C for 30 min,
   `min_since` = the lowest reading since the setpoint was last lowered
-  (persisted; the first reading when nothing is saved). The 11 Oct setback
+  (persisted; the first reading when nothing is saved), **and the radiator
+  is the cause**: the TRV reported heating (`TrvReading.heating`, the
+  entity's `hvac_action`; the Tado cloud derives it from the zone's heating
+  power, HomeKit from the valve) during the excursion or within 30 min
+  before it (`HEATED_LOOKBACK_S`: the heat arrives after the valve shut), or
+  the TRV − room gap stands ≥ 1 °C (`RADIATOR_RISE_C`) above its lowest of
+  the last 3 h (`GAP_WINDOW_S`: the radiator cold; a hot radiator lifts the
+  valve's reading far more than the room, the sun lifts both). Otherwise the
+  state is `warm`: attributes only, sensor off, one info log. 16 Oct 2026:
+  a sunny afternoon lifted four rooms 1.5–2.3 °C with every valve at 0 %
+  and produced four hot alarms under the plain rule; the replay in
+  `tests/test_fail_cold.py` is warm. With nothing known about the valve
+  (no `hvac_action`, no reading) hot needs no evidence. The 11 Oct setback
   (20 → 18 at 21:30, still 18.66 at 06:00) never fires; "setpoint + 0.5"
   alone was on all night. Cold: 0.5 °C below for 120 min, restarted by every
-  setpoint rise. `since` is set only while on.
+  setpoint rise. `since` is set while on or warm.
 - **Entity gone:** every coordinator update checks the entity settings (TRV,
   room sensor, fallback, window, presence, summer, schedule). One with
   neither a state nor a registry entry (deleted, renamed), or disabled in the

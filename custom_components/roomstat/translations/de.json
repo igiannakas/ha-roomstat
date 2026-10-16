@@ -140,7 +140,7 @@
             },
             "data_description": {
               "band_c": "Wie weit vom Zielwert entfernt als außerhalb des Bereichs gilt.",
-              "band_min": "Wie lange der Raum so viel zu warm sein muss. Ein Raum, der nach einer Absenkung des Zielwerts (etwa durch Nacht) noch abkühlt, zählt nie; einer, der sich wieder um so viel erwärmt, schon.",
+              "band_min": "Wie lange der Raum so viel zu warm sein muss. Ein Raum, der nach einer Absenkung des Zielwerts (etwa durch Nacht) noch abkühlt, zählt nie; einer, der sich wieder um so viel erwärmt, schon – wenn der Heizkörper die Ursache ist. Ein von der Sonne erwärmter Raum mit kaltem Heizkörper wird als warm gemeldet, nicht als Alarm.",
               "cold_band_min": "Wie lange der Raum so viel zu kalt sein muss. Zählt ab jeder Erhöhung des Zielwerts neu, sollte also länger als ein normales Aufheizen sein."
             }
           },

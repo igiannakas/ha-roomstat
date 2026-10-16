@@ -651,14 +651,27 @@ class TestTrvSource:
         assert read_trv("heat", {"current_temperature": 20.4, "temperature": "21.5",
                                  "min_temp": 5, "max_temp": 25}) == {
             "internal": 20.4, "setpoint": 21.5, "min": 5.0, "max": 25.0, "off": False,
+            "heating": None,
         }
+
+    @pytest.mark.parametrize("action, heating", [
+        ("heating", True), ("idle", False), ("off", False), (None, None),
+    ])
+    def test_reads_what_the_valve_says_it_is_doing(self, action, heating):
+        """hvac_action: the Tado cloud derives it from the zone's heating
+        power, HomeKit reports the valve's own state; absent when the entity
+        has none."""
+        attrs = {"current_temperature": 20.4, "temperature": 21.5}
+        if action is not None:
+            attrs["hvac_action"] = action
+        assert read_trv("heat", attrs)["heating"] is heating
 
     @pytest.mark.parametrize("state", [None, "unavailable", "unknown"])
     def test_unavailable_gives_nothing_even_with_stale_attributes(self, state):
         r = read_trv(state, {"current_temperature": 20.4, "temperature": 21.5,
                              "min_temp": 5, "max_temp": 25})
         assert r == {"internal": None, "setpoint": None, "min": None, "max": None,
-                     "off": False}
+                     "off": False, "heating": None}
 
     @pytest.mark.parametrize("bad", ["x", float("nan"), float("inf"), True, None])
     def test_bad_values_are_none(self, bad):
@@ -675,7 +688,7 @@ class TestTrvSource:
         r = read_trv("off", {"current_temperature": 19.0, "min_temp": 7,
                              "max_temp": 35})
         assert r == {"internal": 19.0, "setpoint": None, "min": 7.0, "max": 35.0,
-                     "off": True}
+                     "off": True, "heating": None}
 
     def test_primary_wins_when_usable(self):
         p = TrvReading(HOMEKIT, 20.0, 21.0)

@@ -11,6 +11,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .autotune import AutotuneSample
 from .climate_controllers import (
+    BAND_WARM,
     CommandPacer,
     TrvReading,
     command_limits,
@@ -85,7 +86,9 @@ class RegulationMixin:
         """Feed the out-of-band monitor (binary_sensor.<room>_out_of_band).
 
         It judges only normal heating: heating on, no summer lock, no window
-        open and a fresh room reading.  A change is logged once.
+        open and a fresh room reading.  The active TRV's own word (heating or
+        not) and reading tell a hot radiator from the sun.  A change is
+        logged once; "warm" (too warm, radiator not the cause) at info.
         """
         cfg = self._band_config
         was = self._band_monitor.state
@@ -96,6 +99,7 @@ class RegulationMixin:
                 and not self._sensor_degraded
                 and not self._window_open()
             )
+            trv = self._active_trv()
             state = self._band_monitor.update(
                 now,
                 (self.coordinator.data or {}).get("room_temp"),
@@ -104,6 +108,8 @@ class RegulationMixin:
                 band_c=cfg.band_c,
                 hot_after_s=cfg.band_min * 60.0,
                 cold_after_s=cfg.cold_band_min * 60.0,
+                valve_heating=trv.heating,
+                trv_c=trv.internal_c,
             )
         except Exception:  # noqa: BLE001 - reporting must never stop the state writes
             if not self._band_failed:
@@ -112,14 +118,20 @@ class RegulationMixin:
                     "%s: the out-of-band check failed", self._config_entry.title
                 )
             return
+        minutes = int((now - state.since) / 60) if state.since is not None else 0
         if state.on and (not was.on or was.reason != state.reason):
             _LOGGER.warning(
                 "%s: out of band (%s): room %+.2f °C from the target for %d min",
-                self._config_entry.title, state.reason, state.deviation_c,
-                int((now - state.since) / 60) if state.since is not None else 0,
+                self._config_entry.title, state.reason, state.deviation_c, minutes,
             )
         elif was.on and not state.on:
             _LOGGER.info("%s: back within the band", self._config_entry.title)
+        elif state.reason == BAND_WARM and was.reason != BAND_WARM:
+            _LOGGER.info(
+                "%s: room %+.2f °C from the target for %d min with the radiator "
+                "cold (sun or another source); not an alarm",
+                self._config_entry.title, state.deviation_c, minutes,
+            )
 
     def _autotune_eligible(self) -> bool:
         """Whether this cycle is normal heating the auto-tuner may learn from.

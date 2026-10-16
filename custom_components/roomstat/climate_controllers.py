@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -630,6 +631,10 @@ class TrvReading:
     # trv_on_schedule).  Kept apart from ``off``: an OFF of ours is an
     # overlay, an Off block of the schedule is not.
     scheduled: bool = False
+    # The valve says it is heating (the entity's ``hvac_action``: the Tado
+    # cloud reports it from the zone's heating power, HomeKit from the
+    # valve itself).  None when the entity does not say.
+    heating: bool | None = None
 
     @property
     def slow(self) -> bool:
@@ -666,17 +671,24 @@ def read_trv(
     state: str | None, attributes: Mapping[str, Any] | None
 ) -> dict[str, Any]:
     """Everything Roomstat uses from a TRV climate entity: own reading,
-    setpoint, accepted range and whether it is off.  Missing or unavailable
-    gives no values (an unavailable entity may keep stale attributes)."""
+    setpoint, accepted range, whether it is off, and whether it says it is
+    heating (``hvac_action``; None when the entity has none).  Missing or
+    unavailable gives no values (an unavailable entity may keep stale
+    attributes)."""
     if state is None or state in _UNAVAILABLE_STATES:
-        return {"internal": None, "setpoint": None, "min": None, "max": None, "off": False}
+        return {
+            "internal": None, "setpoint": None, "min": None, "max": None,
+            "off": False, "heating": None,
+        }
     attrs = attributes or {}
+    action = attrs.get("hvac_action")
     return {
         "internal": plausible_c(attrs.get("current_temperature")),
         "setpoint": _as_opt_float(attrs.get("temperature")),
         "min": _as_opt_float(attrs.get("min_temp")),
         "max": _as_opt_float(attrs.get("max_temp")),
         "off": state == "off",
+        "heating": None if action is None else str(action) == "heating",
     }
 
 
@@ -875,10 +887,24 @@ def cycle_stalled(now: float, last_completed_ts: float, limit_s: float) -> bool:
 
 BAND_HOT = "hot"
 BAND_COLD = "cold"
+# Too warm, but the radiator is not the cause (the valve has not heated, the
+# TRV's reading has not climbed): sun, people, an appliance.  Reported in
+# the attributes, never an alarm.
+BAND_WARM = "warm"
 # Setpoints move in steps of 0.1 °C or more; smaller changes are noise.
 _SETPOINT_CHANGE_C = 0.05
 # Readings are rounded to 0.01 °C: a difference this close to the band counts.
 _BAND_TOLERANCE_C = 1e-6
+# The radiator's heat reaches the room sensor well after the valve shut (the
+# coast is 10–20 min, the lag 30–35 min): a valve that heated this long
+# before the room went hot is still the cause.
+HEATED_LOOKBACK_S = 1800.0
+# A hot radiator lifts the TRV's own reading several degrees above the room;
+# the sun lifts both alike.  The gap (TRV − room) opening this much above
+# its lowest value of the last GAP_WINDOW_S (the radiator cold) is radiator
+# heat, even when the valve reports none (a stuck pin).
+RADIATOR_RISE_C = 1.0
+GAP_WINDOW_S = 3 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -886,10 +912,14 @@ class BandState:
     """What the out-of-band sensor shows after an update."""
 
     on: bool = False
-    reason: str | None = None          # BAND_HOT / BAND_COLD while on
-    since: float | None = None         # while on: when the excursion began
+    reason: str | None = None          # BAND_HOT / BAND_COLD while on; BAND_WARM (off)
+    since: float | None = None         # when the excursion began (on, or warm)
     deviation_c: float | None = None   # room - setpoint
     reference_c: float | None = None   # what "hot" is measured from
+    # Whether the radiator heated during (or just before) a hot or warm
+    # excursion: the valve said so, or the TRV's reading climbed.  None when
+    # there is no excursion, or nothing is known about the valve.
+    radiator_heated: bool | None = None
 
 
 class OutOfBandMonitor:
@@ -900,13 +930,21 @@ class OutOfBandMonitor:
     open, room sensor not degraded) does it time an excursion:
 
     * **hot**: room >= ref + band for the hot delay, ref = max(setpoint,
-      ``min_since``).  ``min_since`` is the lowest reading since the setpoint
-      was last lowered, a running minimum every update, reset to the current
-      reading when the setpoint is lowered and on the very first update.  A
-      room still cooling after a setback therefore never counts, one that
-      warms by the band off its low does (a valve stuck open, sun), and once
-      the low reaches the setpoint, ref is the setpoint.  A setpoint rise
-      leaves it alone.
+      ``min_since``), *and the radiator is the cause*.  ``min_since`` is the
+      lowest reading since the setpoint was last lowered, a running minimum
+      every update, reset to the current reading when the setpoint is
+      lowered and on the very first update.  A room still cooling after a
+      setback therefore never counts, and once the low reaches the setpoint,
+      ref is the setpoint.  A setpoint rise leaves it alone.  The radiator
+      is the cause when the valve reported heating during the excursion or
+      within ``HEATED_LOOKBACK_S`` before it, or when the TRV's own reading
+      stands ``RADIATOR_RISE_C`` further above the room than at its lowest
+      in the last ``GAP_WINDOW_S`` (a hot radiator next to a valve that
+      reports nothing).  Otherwise the room
+      was warmed by something else (sun, people, an appliance: on 16 Oct
+      2026 four rooms rose 1.5–2.3 °C with every valve shut) and the state
+      is **warm**: reported, not an alarm.  With nothing ever known about
+      the valve (no ``hvac_action``), hot does not need the evidence.
     * **cold**: setpoint - room >= band for the cold delay, counted again
       from every setpoint rise (and from a restart), so each schedule step
       gets a full heat-up's allowance.
@@ -921,6 +959,12 @@ class OutOfBandMonitor:
         self.setpoint: float | None = None
         self._hot_since: float | None = None
         self._cold_since: float | None = None
+        # Radiator evidence: when the valve last reported heating, whether
+        # it ever reported anything, and the TRV − room gap over the last
+        # GAP_WINDOW_S (its minimum is the radiator cold).
+        self._last_heated_ts: float | None = None
+        self._heating_known: bool = False
+        self._gaps: deque[tuple[float, float]] = deque()
         self.state = BandState()
 
     def update(
@@ -933,8 +977,25 @@ class OutOfBandMonitor:
         band_c: float,
         hot_after_s: float,
         cold_after_s: float,
+        valve_heating: bool | None = None,
+        trv_c: float | None = None,
     ) -> BandState:
-        """Take one reading; return (and keep in ``state``) what to show."""
+        """Take one reading; return (and keep in ``state``) what to show.
+
+        ``valve_heating``: what the valve reports this update (None: not
+        known); ``trv_c``: the TRV's own reading (None: not known).
+        """
+        if valve_heating is not None:
+            self._heating_known = True
+            if valve_heating:
+                self._last_heated_ts = now
+        if room_c is not None and trv_c is not None:
+            if self._gaps and (now < self._gaps[-1][0] or now - self._gaps[-1][0] > GAP_WINDOW_S):
+                self._gaps.clear()               # clock went back, or a long gap
+            self._gaps.append((now, trv_c - room_c))
+            while self._gaps and now - self._gaps[0][0] > GAP_WINDOW_S:
+                self._gaps.popleft()
+
         if room_c is None or setpoint_c is None:
             # Nothing to judge (no reading): no excursion runs.
             self._hot_since = self._cold_since = None
@@ -964,9 +1025,14 @@ class OutOfBandMonitor:
         elif self._cold_since is None:
             self._cold_since = now
 
-        on, reason, since = False, None, None
+        on, reason, since, heated = False, None, None, None
         if self._hot_since is not None and now - self._hot_since >= hot_after_s:
-            on, reason, since = True, BAND_HOT, self._hot_since
+            heated = self._radiator_heated()
+            since = self._hot_since
+            if heated is None or heated:
+                on, reason = True, BAND_HOT
+            else:
+                reason = BAND_WARM
         elif self._cold_since is not None and now - self._cold_since >= cold_after_s:
             on, reason, since = True, BAND_COLD, self._cold_since
         self.state = BandState(
@@ -975,8 +1041,29 @@ class OutOfBandMonitor:
             since=since,
             deviation_c=round(deviation, 2),
             reference_c=round(reference, 2),
+            radiator_heated=heated,
         )
         return self.state
+
+    def _radiator_heated(self) -> bool | None:
+        """Whether the radiator is behind the current hot excursion: the
+        valve reported heating since shortly before it began, or the TRV's
+        reading stands clearly further above the room than when the radiator
+        was last cold.  None when neither the valve nor its reading is known."""
+        if self._hot_since is None:
+            return None
+        if (
+            self._last_heated_ts is not None
+            and self._last_heated_ts >= self._hot_since - HEATED_LOOKBACK_S
+        ):
+            return True
+        if self._gaps:
+            # The TRV's reading tells on its own: a radiator hot enough to
+            # lift the room lifts the valve next to it far more.
+            gap_now = self._gaps[-1][1]
+            gap_cold = min(g for _, g in self._gaps)
+            return gap_now - gap_cold >= RADIATOR_RISE_C
+        return False if self._heating_known else None
 
     def as_dict(self) -> dict[str, Any]:
         """The part that survives a restart (restore-state extra data)."""

@@ -996,6 +996,7 @@ class RoomstatClimate(
                 off=bool(data.get(f"{prefix}_off")),
                 is_cloud=bool(data.get(f"{prefix}_cloud")),
                 scheduled=bool(data.get(f"{prefix}_scheduled")),
+                heating=data.get(f"{prefix}_heating"),
             )
 
         primary = reading(self._config_entry.data.get("source_entity_id"), "tado")

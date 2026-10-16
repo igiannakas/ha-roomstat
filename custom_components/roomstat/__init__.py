@@ -135,6 +135,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_min_temp"] = trv["min"]
             data[f"{prefix}_max_temp"] = trv["max"]
             data[f"{prefix}_off"] = trv["off"]
+            # What the valve says it is doing (hvac_action), for the
+            # out-of-band sensor: None when the entity does not say.
+            data[f"{prefix}_heating"] = trv["heating"]
             # Back on its own schedule: our overlay ran out or was ended
             # in the Tado app (the drift check sends the command again).
             data[f"{prefix}_scheduled"] = trv_on_schedule(

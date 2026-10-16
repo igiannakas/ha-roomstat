@@ -92,10 +92,13 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
     Judged by the climate entity's OutOfBandMonitor (climate_controllers.py)
     once per regulation cycle, outside the control loop's own decisions:
     hot is measured from max(setpoint, the lowest reading since the setpoint
-    was last lowered), so a room cooling after a setback never counts; cold
-    is counted again from every setpoint rise, so a heat-up never counts.
-    Only while heating is on, with no summer lock, no window open and a
-    fresh room reading.  Meant for a notification (see the README).
+    was last lowered), so a room cooling after a setback never counts, and
+    needs the radiator to be the cause (the valve heated, or the TRV's own
+    reading climbed), so a room warmed by the sun is "warm" in the
+    attributes and not an alarm; cold is counted again from every setpoint
+    rise, so a heat-up never counts.  Only while heating is on, with no
+    summer lock, no window open and a fresh room reading.  Meant for a
+    notification (see the README).
     """
 
     _attr_has_entity_name = True
@@ -139,4 +142,5 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
             ),
             "reason": state.reason,
             "reference_c": state.reference_c,
+            "radiator_heated": state.radiator_heated,
         }

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.5.0-blue)
+![Version](https://img.shields.io/badge/version-2.5.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -188,20 +188,25 @@ valves in the Tado app (they read low by that much). The valve then opens
 when the room falls to about 10–15 °C. That applies to the frost preset,
 summer mode, a 5 °C schedule, and possibly Off.
 
-**Out of band.** Each room has an **Out of band** sensor
-(`binary_sensor.<room>_out_of_band`). It turns on when the room stays 0.5 °C
-too warm for 30 minutes, or 0.5 °C too cold for 2 hours, while heating is on,
-with no summer mode, no window open and a working room sensor:
+**Out of band.** Each room has an **Out of band** sensor (named after the
+room's device: look under **Settings → Devices**). It turns on when the room
+stays 0.5 °C too warm for 30 minutes, or 0.5 °C too cold for 2 hours, while
+heating is on, with no summer mode, no window open and a working room sensor:
 
 - A room still cooling down after its target was lowered (Night) isn't too
-  warm. One that warms up again by 0.5 °C from its lowest point is.
+  warm. One that warms up again by 0.5 °C from its lowest point is — if the
+  radiator did it: the valve reported heating, or the valve's own reading
+  climbed well above the room. A room warmed by the sun or an appliance with
+  the radiator cold is **warm**, not an alarm: the sensor stays off and
+  `reason` says `warm`.
 - The 2 hours start again with each rise of the target, so a heat-up doesn't
   count.
-- Attributes: `reason` (`hot` or `cold`), `deviation_c` (room minus target)
-  and `since` (when it went out of band, set only while the sensor is on).
+- Attributes: `reason` (`hot`, `cold`, or `warm` while off), `deviation_c`
+  (room minus target), `since` (when it went out of band, set while on or
+  warm) and `radiator_heated`.
 - Change the limits under **Configure → Out-of-band alarm**.
 
-A notification for it:
+A notification for it (put your own entity ids in):
 
 ```yaml
 alias: Room out of band
