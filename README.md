@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.6.0-blue)
+![Version](https://img.shields.io/badge/version-2.7.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -64,9 +64,11 @@ changes.
   only stays shut when asked for much less, and in between reacts late and
   partly. So Roomstat heats up at full power and shuts the valve early
   enough for the radiator's leftover heat to reach the target. Near the
-  target it adjusts the valve firmly (**Kp**, 4 by default), and shuts it a
-  little ahead of an overshoot. Rooms hold within about 0.05 °C. Settings
-  under **Configure → Controller**.
+  target it adjusts the valve firmly (**Kp**, 4 by default), shuts it a
+  little ahead of an overshoot, and keeps it shut until the room needs heat
+  again: a Tado asked for just under its own reading trickles heat into a
+  room that is already warm enough. Rooms hold within about 0.05 °C.
+  Settings under **Configure → Controller**.
 - **Heat-up braking.** **Heat-up braking time** (10 minutes by default) is
   how far ahead Roomstat predicts where the radiator's leftover heat will
   carry the room, so heating stops before the target rather than after it.
@@ -77,7 +79,9 @@ changes.
 - **A trace per room.** Diagnostic sensors for the command sent to the valve,
   the room error and the regulation mode, updated every cycle. The first two
   keep long-term statistics, so you can look at a room's behaviour weeks later
-  even after the recorder has purged the detail.
+  even after the recorder has purged the detail. With debug logging on for
+  `custom_components.roomstat`, every cycle also writes one line to the log
+  with its whole decision.
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual

@@ -359,6 +359,22 @@ class RegulationMixin:
             result,
         )
 
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            # One line per cycle: the whole decision, so a week of a room's
+            # behaviour can be read back from the log (enable debug logging
+            # for custom_components.roomstat; the coordinator's own refresh
+            # chatter is on custom_components.roomstat.coordinator).
+            _LOGGER.debug(
+                "%s: %s | sp %.1f room %.2f %s | trv %.1f%s | cmd %.1f (%+.1f vs trv)"
+                " P %+.2f I %+.2f | %s",
+                self._config_entry.title, result.mode, setpoint, room_temp,
+                "no slope" if slope is None else f"{slope * 3600:+.2f} °C/h",
+                tado_internal,
+                "" if trv.heating is None else (" heating" if trv.heating else " idle"),
+                result.target_for_tado_c, result.target_for_tado_c - tado_internal,
+                result.p_correction_c, result.i_correction_c, self._last_reason,
+            )
+
         self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()
 

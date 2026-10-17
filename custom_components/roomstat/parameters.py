@@ -305,14 +305,19 @@ class RegulationConfig:
     # Near the target, a firm stop (the minimum) once the room is predicted
     # to be stop_over_c over the target within the braking time Td, but at
     # least stop_lead_s, so the radiator's leftover heat lands at most
-    # there (the coast is the same however the heat got there).  Released once the room
-    # is predicted to fall back within release_c of the target in
-    # release_lead_s, so the radiator is warm again when needed.  Without
-    # the firm stop the valve keeps heating just below its reading
+    # there (the coast is the same however the heat got there).  Released
+    # only once the room is predicted to *need* heat: release_below_c
+    # below the target within release_lead_s (a falling room is released
+    # that far ahead, so the radiator is warm again in time; a flat one
+    # waits until it is there).  Until 2.7 the release came while the room
+    # was still 0.02 above the target: the hold then commanded 0.2-0.5
+    # below the valve's reading, where a Tado trickles on its own (17 Oct
+    # 2026, three rooms: 16 % for 10 min, +0.2-0.4 °C for the next 1-2 h).
+    # Without the firm stop the valve keeps heating just below its reading
     # (0.05-0.08 °C RMS, +0.3 °C peaks).
     stop_over_c: float = 0.1
     stop_lead_s: float = 600.0
-    release_c: float = 0.02
+    release_below_c: float = 0.05
     release_lead_s: float = 1200.0
 
     # Fail cold (see CLAUDE.md "Failure handling").  Every command is an

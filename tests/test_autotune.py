@@ -936,18 +936,23 @@ class TestClosedLoop:
 
     def test_calms_an_oscillating_room(self):
         """A sluggish valve and too much integral: it swings; the tuner
-        calms it."""
+        calms it.  14 days: since 2.7 the stop is released only when the
+        room needs heat, so this room spends most of its time shut and the
+        tuner sees a hold window about half as often (0.66 after 7 days,
+        0.53 after 10, 0.44 after 14; untuned it stays at 0.8)."""
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8, mix_lag_min=6)
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
+        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=14, sched=flat)
+        _, fixed = _closed_loop(plant, 4.0, 0.01, days=14, sched=flat, tune=False)
 
-        def p2p(d0, d1):
-            idx = tr.window(d0 * DAY, d1 * DAY)
-            e = [tr.sp[i] - tr.y_true[i] for i in idx]
+        def p2p(trace, d0, d1):
+            idx = trace.window(d0 * DAY, d1 * DAY)
+            e = [trace.sp[i] - trace.y_true[i] for i in idx]
             return max(e) - min(e)
 
-        assert p2p(0.5, 2) > 0.7
-        assert p2p(5, 7) < 0.55
+        assert p2p(tr, 0.5, 2) > 0.7
+        assert p2p(tr, 12, 14) < 0.55
+        assert p2p(tr, 12, 14) < p2p(fixed, 12, 14) - 0.25
         a = tuner.active_tuning()
         assert a.kp < 4.0 and a.ki < 0.01
 

@@ -240,11 +240,29 @@ class TestModes:
         assert res.target_for_tado_c == pytest.approx(20.0 + (17.0 - 19.8) + 4 * 0.2)
 
     def test_coast_into_the_target_becomes_a_firm_stop(self):
+        """Whatever the slope: the hold would park the command at the
+        valve's reading, where a Tado trickles (17 Oct 2026)."""
         reg = make_regulator()
         res, _ = step(reg, RegulationState(mode="coast"), 20.0, slope_c_per_h=1.0)
         assert res.mode == "stop"             # 0.15 °C over within 10 min
         res, _ = step(reg, RegulationState(mode="coast"), 20.0, slope_c_per_h=0.3)
-        assert res.mode == "hold"             # only 0.03 °C more: fine control
+        assert res.mode == "stop"             # at the target: shut, not hold
+        res, _ = step(reg, RegulationState(mode="coast"), 20.05)
+        assert res.mode == "stop"             # flat, 0.05 over
+        res, _ = step(reg, RegulationState(mode="coast"), 19.95)
+        assert res.mode == "hold"             # stalled 0.05 short: push
+
+    def test_shut_valve_resumed_above_the_target_stays_shut(self):
+        """After a restart the TRV holds the minimum, so the room resumes
+        in coast; at 0.06 over with no slope yet that must not fall through
+        to hold (every restart on 17 Oct 2026 did, into the trickle)."""
+        reg = make_regulator()
+        res = reg.compute(setpoint_c=20.0, room_temp_c=20.06, tado_internal_c=16.0,
+                          time_delta_s=60.0, state=RegulationState(mode="coast"),
+                          room_slope_c_per_s=None)
+        assert res.mode == "stop" and res.target_for_tado_c == 5.0
+        res, _ = step(reg, res.new_state, 20.06)
+        assert res.mode == "stop"             # and the stop's own rule keeps it
 
     def test_firm_stop_ahead_of_an_overshoot(self):
         """Stopped while still 0.05 °C below the target, because at 1.2 °C/h
@@ -272,15 +290,38 @@ class TestModes:
             res, _ = step(reg, RegulationState(), 19.95, slope_c_per_h=1.2)
             assert res.mode == "stop"
 
-    def test_firm_stop_lasts_until_the_room_heads_back_to_the_target(self):
+    def test_firm_stop_lasts_until_the_room_needs_heat(self):
+        """Released 0.05 °C below the target, or when a falling room will
+        be there within 20 min; never while it is still above."""
         reg = make_regulator()
         stop = RegulationState(mode="stop")
         res, _ = step(reg, stop, 20.08)
         assert res.mode == "stop"             # flat, 0.08 °C over
         res, _ = step(reg, stop, 20.08, slope_c_per_h=-0.4)
-        assert res.mode == "hold"             # back at the target in 20 min
+        assert res.mode == "stop"             # 20 min ahead: 0.02 over, still shut
+        res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.6)
+        assert res.mode == "hold"             # 20 min ahead: 0.12 under: warm up
         res, _ = step(reg, stop, 20.01)
-        assert res.mode == "hold"             # at the target
+        assert res.mode == "stop"             # at the target, flat: shut
+        res, _ = step(reg, stop, 19.96)
+        assert res.mode == "stop"             # 0.04 under, flat: not yet
+        res, _ = step(reg, stop, 19.95)
+        assert res.mode == "hold"             # 0.05 under: release
+
+    def test_release_is_hysteresis_not_a_band(self):
+        """A room that drifts between 0.05 under and 0.1 over does not
+        toggle: the stop needs a predicted overshoot, the release a need."""
+        reg = make_regulator()
+        res, st = step(reg, RegulationState(mode="stop"), 19.95)
+        assert res.mode == "hold"
+        res, st = step(reg, st, 19.98)
+        assert res.mode == "hold"             # not stopped at the target
+        res, st = step(reg, st, 20.02)
+        assert res.mode == "hold"             # 0.02 over, flat: the hold holds
+        res, st = step(reg, st, 20.10)
+        assert res.mode == "stop"             # 0.1 over: the firm stop
+        res, st = step(reg, st, 20.02)
+        assert res.mode == "stop"             # back to 0.02 over: still shut
 
     def test_rising_room_is_not_heated(self):
         """Rising fast enough to get there anyway (e.g. sun): no heat-up."""

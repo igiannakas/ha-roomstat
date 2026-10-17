@@ -3,6 +3,8 @@ from the climate entity each cycle so a season of behaviour survives the
 recorder's purge in the 5-minute statistics."""
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from tests.ha_harness import (
@@ -97,3 +99,33 @@ class TestTraceSensors:
         _run(ent._async_regulation_cycle("timer"))
         assert all(getattr(s, "state_writes", 0) >= 1 for s in sensors.values())
         assert TRV  # the harness TRV id is what the heat-up was sent to
+
+
+class TestTraceLog:
+
+    def test_one_debug_line_per_cycle(self, caplog):
+        """With debug logging on, every cycle logs its whole decision on one
+        line: mode, setpoint, room and slope, the valve's reading and
+        state, the command relative to that reading, P, I and the send
+        reason."""
+        ent = _make_entity()
+        _run(_start(ent))
+        logger_name = type(ent).__module__.rsplit(".", 1)[0] + ".climate_regulation"
+        caplog.set_level(logging.DEBUG, logger=logger_name)
+        _feed(ent, 18.0, 9.0, 8.0)
+        _run(ent._async_regulation_cycle("timer"))
+        lines = [r.getMessage() for r in caplog.records
+                 if r.name == logger_name and "| sp " in r.getMessage()]
+        assert len(lines) == 1
+        line = lines[0]
+        assert ": heat | sp 20.5 room 18.00 no slope | trv 9.0 idle | cmd 25.0 (+16.0 vs trv)" in line
+        assert "P +10.00 I +0.00 | sent(" in line
+
+    def test_quiet_without_debug(self, caplog):
+        ent = _make_entity()
+        _run(_start(ent))
+        logger_name = type(ent).__module__.rsplit(".", 1)[0] + ".climate_regulation"
+        caplog.set_level(logging.INFO, logger=logger_name)
+        _feed(ent, 18.0, 9.0, 8.0)
+        _run(ent._async_regulation_cycle("timer"))
+        assert not any("| sp " in r.getMessage() for r in caplog.records)

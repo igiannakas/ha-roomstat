@@ -35,21 +35,28 @@ Strong commands where they matter, fine ones near the target:
   error - Td * rise_rate <= ``heatup_exit_c``.  Td is the braking time
   (configured, or learned by auto-tune from exactly this coast).
 * ``coast``: after a heat-up, the minimum (valve shut) while the room is
-  below the target and still rising, so the leftover heat lands it.
+  below the target and still rising, so the leftover heat lands it.  A
+  coast that reaches the target becomes a stop; one that stalls short
+  hands over to the hold.
 * ``hold``: near the target, the feedforward + PI command above.  A Tado
   answers small pushes late and partly, so kp is high (4 by default).
 * ``stop``: the minimum, ahead of an overshoot: once the room is predicted
   to be ``stop_over_c`` over the target within the braking time Td (at
   least ``stop_lead_s``), the radiator's coast being the same however the
-  heat got there.  Released
-  (back to hold) once it is predicted to fall back within ``release_c`` of
-  the target in ``release_lead_s``, so the radiator is warm again by the
-  time the room needs it.
+  heat got there.  Released (back to hold) only once the room is predicted
+  to need heat: ``release_below_c`` below the target within
+  ``release_lead_s``.  A falling room is released that far ahead, so the
+  radiator is warm again in time; a flat one at or just above the target
+  stays shut.  A hold entered while the room is still above the target
+  commands just below the valve's own reading, where a Tado trickles by
+  itself (17 Oct 2026: 16 % for 10 min, +0.2-0.4 °C for the next hour or
+  two); the same happened after every restart, when a shut valve resumed
+  as coast and fell through to hold.
 
 The heat-up's end and the stop use the room's rise rate only while it
 rises (one-sided); only the release looks at a fall, and it only hands back
 to the hold.  In two rooms fitted to real data this holds within
-0.04-0.05 °C RMS on average (only full/shut commands: 0.06-0.12;
+0.03-0.05 °C RMS on average (only full/shut commands: 0.06-0.12;
 parameters.py).
 
 Integral
@@ -114,7 +121,9 @@ def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
 
     A reload (e.g. a preset temperature change) or a restart in the middle of
     a heat-up carries it on (and it ends as usual), and one while the valve
-    is shut lets the coast finish.  Anything else starts in hold.
+    is shut lets the coast finish: it becomes a stop if the room is at or
+    above the target, a hold if it stalled short.  Anything else starts in
+    hold.
     """
     if trv_setpoint_c is None or not math.isfinite(trv_setpoint_c):
         return MODE_HOLD
@@ -157,16 +166,22 @@ class FeedforwardPiRegulator:
             return MODE_HEAT
         if mode == MODE_COAST and error_c > 0 and rising > 0:
             return MODE_COAST
+        # A coast that has reached the target (or a shut valve resumed after
+        # a restart with the room at or above it) stays shut until the room
+        # needs heat; falling through to hold would park the command just
+        # below the valve's reading, where it trickles.
+        if mode == MODE_COAST and error_c <= 0:
+            return MODE_STOP
         # Near the target: fine adjustments, with a firm stop ahead of an
-        # overshoot that lasts until the room is heading back to the target.
-        # It looks at least as far ahead as a heat-up: the radiator's coast
-        # (Td) is the same however the heat got there.
+        # overshoot that lasts until the room needs heat again.  It looks at
+        # least as far ahead as a heat-up: the radiator's coast (Td) is the
+        # same however the heat got there.
         stop_lead_s = max(config.stop_lead_s, lead_s)
         if error_c - stop_lead_s * rising <= -config.stop_over_c:
             return MODE_STOP
         if (
             mode == MODE_STOP
-            and error_c + config.release_lead_s * falling < -config.release_c
+            and error_c + config.release_lead_s * falling < config.release_below_c
         ):
             return MODE_STOP
         return MODE_HOLD

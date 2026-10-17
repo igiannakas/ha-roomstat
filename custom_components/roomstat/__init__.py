@@ -35,6 +35,7 @@ from .parameters import (
 from .repairs import async_check_entities, async_delete_entity_issues
 
 _LOGGER = logging.getLogger(__name__)
+_COORDINATOR_LOGGER = logging.getLogger(f"{__name__}.coordinator")
 
 # List the platforms that you want to support.
 PLATFORMS: list[Platform] = [
@@ -158,10 +159,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         return data
 
-    # 3. Create the Coordinator
+    # 3. Create the Coordinator.  It gets its own logger: at debug it
+    # reports every refresh ("Finished fetching ... data"), one a minute per
+    # room, which buries the regulation trace when the package is set to
+    # debug.  Leave custom_components.roomstat.coordinator at info.
     coordinator = DataUpdateCoordinator(
         hass,
-        _LOGGER,
+        _COORDINATOR_LOGGER,
         name=f"{DOMAIN}_{entry.title}",
         update_method=async_update_data,
         update_interval=timedelta(seconds=60), # Poll every 60s as backup

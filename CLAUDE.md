@@ -58,7 +58,13 @@ the HA modules.
   migration.
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
-  feeding the auto-tuner.
+  feeding the auto-tuner. At debug it logs one line per cycle with the
+  whole decision (mode, setpoint, room and slope, the valve's reading and
+  state, the command relative to that reading, P, I, send reason). The
+  coordinator's own refresh chatter is on
+  `custom_components.roomstat.coordinator`: set the package to debug and
+  that logger to info (the owner does it with a `logger.set_level`
+  automation on HA start).
 - `climate_presets.py`: presets, boost timer, window and presence actions.
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
@@ -103,7 +109,8 @@ Read this before changing `regulation.py` or `parameters.py`.
     coast is predicted to land within `heatup_exit_c` (0.1 °C): error −
     Td × rise ≤ 0.1, Td = the braking time (default 10 min, 0 = no lead).
   - `coast` (minimum): after a heat-up, while the room is below the target
-    and still rising.
+    and still rising. One that reaches the target (error ≤ 0) becomes a
+    stop; one that stalls short hands over to hold.
   - `hold`: the feedforward + PI command. Kp is the gain near the target:
     high (default 4) because a Tado answers small pushes late and partly.
     The integral only moves in hold.
@@ -111,14 +118,27 @@ Read this before changing `regulation.py` or `parameters.py`.
     max(`stop_lead_s` (10 min), Td) × rise ≤ −`stop_over_c` (0.1 °C): the
     radiator's coast is the same however the heat got there (11 Oct: a
     0.6 °C step handled by hold got a 10-min look-ahead while the coast was
-    19 min, +0.5 °C peak). Released once
-    error + `release_lead_s` (20 min) × fall ≥ −`release_c` (0.02 °C), so
-    the radiator is warm again in time.
+    19 min, +0.5 °C peak). Released only once the room is predicted to
+    need heat: error + `release_lead_s` (20 min) × fall ≥
+    `release_below_c` (0.05 °C below the target). A falling room is
+    released 20 min ahead, so the radiator is warm again in time; a flat
+    one at or just above the target stays shut. **Never release above the
+    target** (until 2.7 it released 0.02 above): a hold entered there
+    commands 0.2–0.5 below the valve's reading, where a Tado trickles on
+    its own (17 Oct 2026, three rooms, trace sensors: 16 % for 10 min,
+    valve reading +2.8 °C, room +0.2…+0.4 for the next 1–2 h with the valve
+    shut again). The same trickle followed every HA restart, when a shut
+    valve resumed as coast and fell through to hold — hence coast → stop
+    above. In the simulator the two changes are neutral (fitted rooms
+    0.030 → 0.025 °C RMS, generic living room +0.01, commands unchanged);
+    the simulator does not reproduce the trickle, so the live traces are
+    the evidence.
 
   Everything but hold is a strong command: it skips the rate limit once
   (not on retries). A reload resumes from what the TRV holds
-  (`resume_mode`: maximum → heat, minimum → coast). A heat-up, or any
-  maximum the TRV holds, is ended (coast) when the room sensor is lost.
+  (`resume_mode`: maximum → heat, minimum → coast, which the next cycle
+  turns into stop or hold). A heat-up, or any maximum the TRV holds, is
+  ended (coast) when the room sensor is lost.
   Why this shape (simulated in the fitted rooms below, valve modulating or
   pulsing): only 25/5 (2.1's first version) can't dose, so near the target
   it is a relay (0.06–0.12 °C RMS); the high-gain hold with the firm stop
