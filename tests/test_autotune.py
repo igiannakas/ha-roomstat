@@ -936,14 +936,18 @@ class TestClosedLoop:
 
     def test_calms_an_oscillating_room(self):
         """A sluggish valve and too much integral: it swings; the tuner
-        calms it.  14 days: since 2.7 the stop is released only when the
-        room needs heat, so this room spends most of its time shut and the
-        tuner sees a hold window about half as often (0.66 after 7 days,
-        0.53 after 10, 0.44 after 14; untuned it stays at 0.8)."""
-        plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8, mix_lag_min=6)
+        calms it.  On a cold day (0 °C): the hold judgement needs the valve
+        on 20 % of the time (hold_min_heating_fraction; passive cool-downs
+        are not holds), and since 2.7.1 the stop is released only 0.1 °C
+        under the target, so this swinging room heats 6-7 % of the time at
+        12 °C outside and the tuner stands back, by design (it did the same
+        in the owner's rooms on a mild day).  At 0 °C it heats 21 % of the
+        time: Ki 0.01 → 0.0006, Kp 4 → 2.1, swing 0.80 → 0.58 in a week."""
+        plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8, mix_lag_min=6,
+                     t_out_c=0.0)
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=14, sched=flat)
-        _, fixed = _closed_loop(plant, 4.0, 0.01, days=14, sched=flat, tune=False)
+        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
+        _, fixed = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, tune=False)
 
         def p2p(trace, d0, d1):
             idx = trace.window(d0 * DAY, d1 * DAY)
@@ -951,8 +955,8 @@ class TestClosedLoop:
             return max(e) - min(e)
 
         assert p2p(tr, 0.5, 2) > 0.7
-        assert p2p(tr, 12, 14) < 0.55
-        assert p2p(tr, 12, 14) < p2p(fixed, 12, 14) - 0.25
+        assert p2p(tr, 5, 7) < 0.65
+        assert p2p(tr, 5, 7) < p2p(fixed, 5, 7) - 0.15
         a = tuner.active_tuning()
         assert a.kp < 4.0 and a.ki < 0.01
 

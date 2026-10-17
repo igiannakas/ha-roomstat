@@ -313,11 +313,15 @@ class RegulationConfig:
     # was still 0.02 above the target: the hold then commanded 0.2-0.5
     # below the valve's reading, where a Tado trickles on its own (17 Oct
     # 2026, three rooms: 16 % for 10 min, +0.2-0.4 °C for the next 1-2 h).
-    # Without the firm stop the valve keeps heating just below its reading
-    # (0.05-0.08 °C RMS, +0.3 °C peaks).
+    # 0.1 below (owner's choice, 2.7.1): the room spends part of its time a
+    # little under the target instead of always a little over.  Simulated
+    # (fitted rooms, auto-tune on): hold RMS +0.01, overshoot and commands
+    # unchanged, time more than 0.05 under 4 -> 8 %; 0.15 doubles the RMS
+    # in the generic rooms.  Without the firm stop the valve keeps heating
+    # just below its reading (0.05-0.08 °C RMS, +0.3 °C peaks).
     stop_over_c: float = 0.1
     stop_lead_s: float = 600.0
-    release_below_c: float = 0.05
+    release_below_c: float = 0.10
     release_lead_s: float = 1200.0
 
     # Fail cold (see CLAUDE.md "Failure handling").  Every command is an

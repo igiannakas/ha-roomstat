@@ -120,7 +120,11 @@ Read this before changing `regulation.py` or `parameters.py`.
     0.6 °C step handled by hold got a 10-min look-ahead while the coast was
     19 min, +0.5 °C peak). Released only once the room is predicted to
     need heat: error + `release_lead_s` (20 min) × fall ≥
-    `release_below_c` (0.05 °C below the target). A falling room is
+    `release_below_c` (0.1 °C below the target; 0.05 in 2.7.0, 0.1 since
+    2.7.1 by the owner's choice: some time a little under rather than
+    always a little over. Simulated: hold RMS +0.01, overshoot and
+    commands unchanged, time > 0.05 under 4 → 8 % in the fitted living
+    room; 0.15 doubles the RMS in the generic rooms). A falling room is
     released 20 min ahead, so the radiator is warm again in time; a flat
     one at or just above the target stays shut. **Never release above the
     target** (until 2.7 it released 0.02 above): a hold entered there
@@ -363,7 +367,14 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
     badly swinging rooms (0.31 → 0.14 °C RMS) but made moderately swinging
     ones worse (up to +0.03 °C RMS);
   - **holds** (steady setpoint, valve actually heating) give offset and
-    oscillation.
+    oscillation. "Actually heating" is `hold_min_heating_fraction` (20 %
+    of the 3-h window): on a mild day the owner's rooms heat 4–7 % of the
+    time and the tuner stands back, by design (see "tried and dropped"
+    above). Since the stop is released only 0.1 °C under the target
+    (2.7.1), a badly set room swings with the valve shut most of the time
+    too, so it is only calmed on cold days (`test_calms_an_oscillating_room`
+    runs at 0 °C: 21 % heating, Ki 0.01 → 0.0006 in a week; at 12 °C, 7 %
+    and nothing happens).
 
   Heat-ups cut short by the schedule are kept when they carry enough
   information.

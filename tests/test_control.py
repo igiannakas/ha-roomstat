@@ -165,7 +165,7 @@ def test_works_without_auto_tune():
     s = _summary(_sim(LIVING, tune=False)[1])
     assert s["reach"] < 60
     assert s["overshoot"] < 0.25
-    assert s["hold_sd"] < 0.1
+    assert s["hold_sd"] < 0.11    # 0.100 since the stop is released 0.1 °C under
 
 
 # ---------------------------------------------------------------------------

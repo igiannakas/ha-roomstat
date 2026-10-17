@@ -442,8 +442,13 @@ def _kill_mid_heat_up(plant, kill_h, *, timer_s, schedule_c, after_h=6.0):
     sim.kill()
     tr = sim.run(after_h, SCHED)
     after = [k for k, t in enumerate(tr.t) if t >= kill_h * HOUR]
+    # Shut for good: closed from k to the end, and for at least 20 min (a
+    # valve pulsing at its own 25 °C setpoint in a 26 °C room is not shut,
+    # even when the last sample happens to be a closed one).
     shut = next(
-        (tr.t[k] for k in after if all(tr.valve[j] == 0.0 for j in after if j >= k)), None
+        (tr.t[k] for k in after
+         if tr.t[-1] - tr.t[k] >= 1200.0
+         and all(tr.valve[j] == 0.0 for j in after if j >= k)), None
     )
     return sim, last_cmd, shut, max(tr.y_true[k] for k in after)
 
@@ -476,7 +481,9 @@ def test_killed_mid_heat_up_without_the_timer_the_valve_stays_open(plant, kill_h
     """Why the timer exists: a Manual 25 °C overlay outlives the proxy."""
     sim, _, shut, peak = _kill_mid_heat_up(plant, kill_h, timer_s=0.0, schedule_c=5.0)
     assert shut is None
-    assert sim.valve > 0.0
+    # Six hours on, in a 26 °C room, the valve still pulses at its own
+    # 25 °C setpoint (any sample may be a closed one).
+    assert max(sim.trace.valve[-30:]) > 0.0
     assert peak > 20.0 + 3.0
 
 

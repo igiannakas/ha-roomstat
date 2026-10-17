@@ -291,7 +291,7 @@ class TestModes:
             assert res.mode == "stop"
 
     def test_firm_stop_lasts_until_the_room_needs_heat(self):
-        """Released 0.05 °C below the target, or when a falling room will
+        """Released 0.1 °C below the target, or when a falling room will
         be there within 20 min; never while it is still above."""
         reg = make_regulator()
         stop = RegulationState(mode="stop")
@@ -299,20 +299,22 @@ class TestModes:
         assert res.mode == "stop"             # flat, 0.08 °C over
         res, _ = step(reg, stop, 20.08, slope_c_per_h=-0.4)
         assert res.mode == "stop"             # 20 min ahead: 0.02 over, still shut
-        res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.6)
-        assert res.mode == "hold"             # 20 min ahead: 0.12 under: warm up
+        res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.5)
+        assert res.mode == "stop"             # 20 min ahead: 0.08 under: not yet
+        res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.7)
+        assert res.mode == "hold"             # 20 min ahead: 0.15 under: warm up
         res, _ = step(reg, stop, 20.01)
         assert res.mode == "stop"             # at the target, flat: shut
-        res, _ = step(reg, stop, 19.96)
-        assert res.mode == "stop"             # 0.04 under, flat: not yet
-        res, _ = step(reg, stop, 19.95)
-        assert res.mode == "hold"             # 0.05 under: release
+        res, _ = step(reg, stop, 19.91)
+        assert res.mode == "stop"             # 0.09 under, flat: not yet
+        res, _ = step(reg, stop, 19.90)
+        assert res.mode == "hold"             # 0.1 under: release
 
     def test_release_is_hysteresis_not_a_band(self):
-        """A room that drifts between 0.05 under and 0.1 over does not
+        """A room that drifts between 0.1 under and 0.1 over does not
         toggle: the stop needs a predicted overshoot, the release a need."""
         reg = make_regulator()
-        res, st = step(reg, RegulationState(mode="stop"), 19.95)
+        res, st = step(reg, RegulationState(mode="stop"), 19.90)
         assert res.mode == "hold"
         res, st = step(reg, st, 19.98)
         assert res.mode == "hold"             # not stopped at the target
@@ -320,8 +322,8 @@ class TestModes:
         assert res.mode == "hold"             # 0.02 over, flat: the hold holds
         res, st = step(reg, st, 20.10)
         assert res.mode == "stop"             # 0.1 over: the firm stop
-        res, st = step(reg, st, 20.02)
-        assert res.mode == "stop"             # back to 0.02 over: still shut
+        res, st = step(reg, st, 19.95)
+        assert res.mode == "stop"             # 0.05 under: still shut
 
     def test_rising_room_is_not_heated(self):
         """Rising fast enough to get there anyway (e.g. sun): no heat-up."""
