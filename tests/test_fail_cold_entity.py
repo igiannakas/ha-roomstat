@@ -688,3 +688,68 @@ class TestRoomSensorLost:
             _watchdog(ent)
         assert ent._last_reason == "waiting_for_sensors"
         assert ent.extra_state_attributes["regulation_stalled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Resuming after a restart when the TRV entity loads late
+# ---------------------------------------------------------------------------
+
+class TestResumeWithALateTrv:
+    """18 Oct 2026, right after the 2.8.0 restart: the Tado entity had no
+    state when the room was added, the resume defaulted to hold, and the
+    first cycle (room 0.07 above the target) pushed the study's valve into
+    its grey zone.  An unknown valve now resumes as stop, and the mode is
+    decided again from the valve on the first cycle that sees it."""
+
+    def _late(self, monkeypatch):
+        _Clock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))                       # the coordinator has no TRV data yet
+        assert ent._reg_state.mode == "stop"
+        assert ent._resume_pending
+        return ent
+
+    def test_shut_valve_above_target_stays_shut(self, monkeypatch):
+        ent = self._late(monkeypatch)
+        _feed(ent, 20.57, 18.6, 5.0)            # comfort 20.5, room 0.07 over
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop"
+        assert _temps(ent) == []
+        assert not ent._resume_pending
+
+    def test_shut_valve_below_target_resumes_the_coast(self, monkeypatch):
+        ent = self._late(monkeypatch)
+        _feed(ent, 20.3, 18.6, 5.0)
+        _cycle(ent)
+        assert ent._reg_state.mode in ("coast", "hold")
+
+    def test_open_valve_carries_on_the_heat_up(self, monkeypatch):
+        ent = self._late(monkeypatch)
+        _feed(ent, 18.5, 12.0, 25.0)
+        _cycle(ent)
+        assert ent._reg_state.mode == "heat"
+        assert ent._last_sent_was_max
+        assert _temps(ent) == []                # already at target
+
+    def test_middle_setpoint_resumes_in_hold(self, monkeypatch):
+        ent = self._late(monkeypatch)
+        _feed(ent, 20.45, 18.0, 18.3)
+        _cycle(ent)
+        assert ent._reg_state.mode == "hold"
+
+    def test_decided_once(self, monkeypatch):
+        ent = self._late(monkeypatch)
+        _feed(ent, 20.57, 18.6, 5.0)
+        _cycle(ent)
+        _feed(ent, 20.57, 18.6, 25.0)           # a stray reading later is not a resume
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop"
+        assert not ent._last_sent_was_max
+
+    def test_known_valve_at_start_needs_no_second_look(self, monkeypatch):
+        _Clock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _feed(ent, 18.5, 12.0, 25.0)
+        _run(_start(ent))
+        assert ent._reg_state.mode == "heat"
+        assert not ent._resume_pending

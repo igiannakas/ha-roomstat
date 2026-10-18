@@ -156,6 +156,9 @@ class TestValveOff:
         _run(ent.async_set_temperature(temperature=6.0))
         ent.hass.service_calls.clear()
         ent._last_command_sent_ts = 0.0
+        # An off valve has no setpoint, so the room resumed in stop (which
+        # leaves it off); this test is about the hold's command range.
+        ent._reg_state.mode = "hold"
         clock.tick(300)
         _feed_off(ent, room=6.0, internal=6.0)
         _cycle(ent)
@@ -347,10 +350,24 @@ class TestRoomSensorLost:
         clock = _Clock(monkeypatch)
         ent = _entity()
         for _ in range(10):
-            _feed(ent, room=None, internal=19.0, setpoint=25.0)
+            _feed(ent, room=None, internal=19.0, setpoint=20.0)
             _cycle(ent)
             clock.tick(60)
         assert ent.hass.service_calls == []
+        assert ent._last_reason == "waiting_for_sensors"
+
+    def test_dead_sensor_after_restart_ends_a_maximum_the_valve_holds(self, monkeypatch):
+        """The valve was left at 25 by a heat-up before the restart: once the
+        sensor counts as lost, that maximum is ended like any other (the
+        resume is read from the valve on the first cycle that sees it)."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        for _ in range(10):
+            _feed(ent, room=None, internal=19.0, setpoint=25.0)
+            _cycle(ent)
+            clock.tick(60)
+        assert _sent(ent) == [5.0]
+        assert ent._reg_state.mode == "coast"
         assert ent._last_reason == "waiting_for_sensors"
 
     def test_regulation_resumes_when_the_sensor_is_back(self, monkeypatch, caplog):

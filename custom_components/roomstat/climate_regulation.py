@@ -36,7 +36,7 @@ from .parameters import (
     TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
 )
-from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD
+from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -258,6 +258,20 @@ class RegulationMixin:
         self._note_trv_source(trv)
         tado_internal = trv.internal_c
 
+        # The TRV had no setpoint when the entity was added (its integration
+        # still loading after a restart): decide the resume mode now, from
+        # what the valve holds, before anything is sent (18 Oct 2026: the
+        # study resumed in hold 0.07 above the target and pushed its valve
+        # into the grey zone; a shut valve must resume as coast → stop).
+        if self._resume_pending and trv.setpoint_c is not None:
+            self._resume_pending = False
+            self._reg_state.mode = resume_mode(trv.setpoint_c, self._config)
+            self._last_sent_was_max = is_maximum(trv.setpoint_c, self._config.max_target_c)
+            _LOGGER.debug(
+                "%s: resuming as %s from the valve's setpoint %.1f",
+                self._config_entry.title, self._reg_state.mode, trv.setpoint_c,
+            )
+
         # Sensor resilience: bridge short gaps with last-valid value
         sensor_lost = False
         if room_temp is not None:
@@ -331,6 +345,10 @@ class RegulationMixin:
             self._last_reason = "waiting_for_sensors"
             self._write_state_with_binary_sensor()
             return
+
+        # 1b. From here on the cycle regulates and may send: whatever the TRV
+        # reports later is our own command, not a resume.
+        self._resume_pending = False
 
         # 2. Time delta, capped so a pause cannot add a large integral step.
         dt = integration_step(now, self._last_regulation_ts, MAX_INTEGRATION_STEP_S)

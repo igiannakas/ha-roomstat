@@ -122,11 +122,16 @@ def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
     A reload (e.g. a preset temperature change) or a restart in the middle of
     a heat-up carries it on (and it ends as usual), and one while the valve
     is shut lets the coast finish: it becomes a stop if the room is at or
-    above the target, a hold if it stalled short.  Anything else starts in
-    hold.
+    above the target, a hold if it stalled short.  Any other setpoint starts
+    in hold.  An unknown one (the TRV entity not loaded yet after a restart,
+    an off valve) starts in stop: a hold entered 0.07 above the target
+    pushed the study's valve into the grey zone right after the 2.8.0
+    restart (18 Oct 2026), and a stop still releases, or heats, as soon as
+    the room needs it.  The entity re-evaluates this on the first cycle that
+    sees the valve.
     """
     if trv_setpoint_c is None or not math.isfinite(trv_setpoint_c):
-        return MODE_HOLD
+        return MODE_STOP
     if trv_setpoint_c >= config.max_target_c - 0.05:
         return MODE_HEAT
     if trv_setpoint_c <= config.min_target_c + 0.05:

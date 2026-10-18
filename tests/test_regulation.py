@@ -366,10 +366,27 @@ class TestModes:
 class TestResumeMode:
     @pytest.mark.parametrize("held, mode", [
         (25.0, "heat"), (24.96, "heat"), (5.0, "coast"), (18.5, "hold"),
-        (None, "hold"), (float("nan"), "hold"),
+        (None, "stop"), (float("nan"), "stop"),
     ])
     def test_from_what_the_trv_holds(self, held, mode):
+        """An unknown setpoint (TRV entity not loaded yet, valve off) resumes
+        as stop: nothing is pushed into the valve's grey zone, and a stop
+        still releases or heats as soon as the room needs it."""
         assert _reg.resume_mode(held, RegulationConfig()) == mode
+
+    def test_unknown_valve_still_heats_a_cold_room(self):
+        reg = make_regulator()
+        res = reg.compute(setpoint_c=20.0, room_temp_c=18.5, tado_internal_c=15.0,
+                          time_delta_s=60.0, state=RegulationState(mode="stop"),
+                          room_slope_c_per_s=None)
+        assert res.mode == "heat"
+
+    def test_unknown_valve_releases_a_cooling_room(self):
+        reg = make_regulator()
+        res = reg.compute(setpoint_c=20.0, room_temp_c=19.95, tado_internal_c=15.0,
+                          time_delta_s=60.0, state=RegulationState(mode="stop"),
+                          room_slope_c_per_s=-0.5 / 3600)
+        assert res.mode == "hold"
 
 
 # -----------------------------------------------------------------------

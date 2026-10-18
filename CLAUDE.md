@@ -143,8 +143,16 @@ Read this before changing `regulation.py` or `parameters.py`.
   Everything but hold is a strong command: it skips the rate limit once
   (not on retries). A reload resumes from what the TRV holds
   (`resume_mode`: maximum → heat, minimum → coast, which the next cycle
-  turns into stop or hold). A heat-up, or any maximum the TRV holds, is
-  ended (coast) when the room sensor is lost.
+  turns into stop or hold; unknown → stop, since 2.8.1). After a restart
+  the TRV entity may not have loaded when the room is added
+  (`_resume_pending`): the mode is then decided again from the valve on
+  the first cycle that sees it, before anything is sent. 18 Oct 2026,
+  right after the 2.8.0 restart: the study's valve held 5 but its entity
+  had no state yet, the resume defaulted to hold, and the first cycle
+  (0.07 above the target) commanded 0.3 below the valve's reading — the
+  grey zone again. A heat-up, or any maximum the TRV holds, is ended
+  (coast) when the room sensor is lost — also one found on the valve after
+  a restart with the sensor dead.
   Why this shape (simulated in the fitted rooms below, valve modulating or
   pulsing): only 25/5 (2.1's first version) can't dose, so near the target
   it is a relay (0.06–0.12 °C RMS); the high-gain hold with the firm stop

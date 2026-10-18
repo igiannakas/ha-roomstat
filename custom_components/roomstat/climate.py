@@ -299,6 +299,9 @@ class RoomstatClimate(
         self._heat_timer_sent_ts: float | None = None
         self._heat_timer_refresh_tried: bool = False
         self._last_sent_was_max: bool = False
+        # The resume mode is decided again on the first regulation cycle that
+        # sees the TRV when it had no setpoint at startup (entity not loaded).
+        self._resume_pending: bool = False
         # Watchdog: when a regulation cycle last reached its decision.
         self._last_cycle_completed_ts: float = time.time()
         self._regulation_stalled: bool = False
@@ -465,9 +468,12 @@ class RoomstatClimate(
 
         # Carry on a heat burst (or stop) the TRV is still holding.  What
         # the TRV holds is the last command it took: a maximum is one the
-        # watchdog shuts if the cycle stops.
+        # watchdog shuts if the cycle stops.  After a restart the TRV entity
+        # may not have loaded yet: then this is decided again on the first
+        # regulation cycle that sees it (_resume_pending).
         held = self._active_trv().setpoint_c
         self._reg_state.mode = resume_mode(held, self._config)
+        self._resume_pending = held is None
         self._last_sent_was_max = held is not None and is_maximum(
             held, self._config.max_target_c
         )
