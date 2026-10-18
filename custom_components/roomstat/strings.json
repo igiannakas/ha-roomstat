@@ -53,7 +53,7 @@
             "data_description": {
               "window_sensor_id": "Binary sensor that detects an open window. When triggered, heating is paused.",
               "window_delay_s": "Delay before heating is paused after the window opens.",
-              "window_close_delay_s": "Delay before heating resumes after the window closes."
+              "window_close_delay_s": "Minimum delay before heating resumes after the window closes. Heating then waits until the room has stopped re-warming on its own (rising below 1 °C/h), at most 30 minutes after the close. 0 resumes at once."
             }
           },
           "presence_sensor": {

@@ -53,7 +53,7 @@
             "data_description": {
               "window_sensor_id": "Binärsensor zur Fenstererkennung. Bei Auslösung wird die Heizung pausiert.",
               "window_delay_s": "Verzögerung bevor die Heizung pausiert wird, nachdem das Fenster geöffnet wurde.",
-              "window_close_delay_s": "Verzögerung bevor die Heizung fortgesetzt wird, nachdem das Fenster geschlossen wurde."
+              "window_close_delay_s": "Mindestverzögerung bevor die Heizung fortgesetzt wird, nachdem das Fenster geschlossen wurde. Danach wartet die Heizung, bis sich der Raum nicht mehr von selbst erwärmt (Anstieg unter 1 °C/h), höchstens 30 Minuten nach dem Schließen. 0 setzt sofort fort."
             }
           },
           "presence_sensor": {

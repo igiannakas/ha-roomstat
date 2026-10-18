@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.7.1-blue)
+![Version](https://img.shields.io/badge/version-2.8.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -74,6 +74,12 @@ changes.
   carry the room, so heating stops before the target rather than after it.
   Near the target the valve is shut at least 10 minutes ahead. 0 = no
   anticipation in heat-ups. Auto-tune can learn it.
+- **After a window closes, the room gets time to re-warm by itself.** The
+  walls, furniture and radiator kept their heat; only the air went, and it
+  comes back on its own within 15–40 minutes. **Window close delay** is the
+  minimum: heating then waits until the room is rising less than 1 °C/h
+  (at most 30 minutes after the close). 0 resumes at once. Auto-tune does
+  not learn from the heating that follows a window.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
 - **A trace per room.** Diagnostic sensors for the command sent to the valve,

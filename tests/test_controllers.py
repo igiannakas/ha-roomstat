@@ -254,6 +254,83 @@ class TestWindowController:
         assert c.get_saved().preset == "eco"
         assert not c.is_active
 
+    # --- close delay extension (room re-warming on its own) ---
+
+    def test_close_records_when_the_window_closed(self):
+        c = self._ctrl()
+        c.activate("comfort", 20.0)
+        c.handle_window_closed(None, 300, lambda now: None, call_later=FakeCallLater(), now=1000.0)
+        assert c.close_delay_elapsed_s(1300.0) == 300.0
+        assert c.close_delay_elapsed_s(900.0) == 0.0      # clock went back: never negative
+
+    def test_elapsed_is_zero_without_a_close_delay(self):
+        c = self._ctrl()
+        assert c.close_delay_elapsed_s(5000.0) == 0.0
+        c.activate("comfort", 20.0)
+        c.handle_window_closed(None, 0, lambda now: None, call_later=FakeCallLater(), now=1000.0)
+        assert c.close_delay_elapsed_s(2000.0) == 0.0
+
+    def test_extend_keeps_the_delay_active_and_the_close_time(self):
+        c = self._ctrl()
+        c.activate("comfort", 20.0)
+        fake = FakeCallLater()
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=1000.0)
+        fake.trigger(0)                                   # the configured delay ran out
+        c.extend_close_delay(None, 60, lambda now: None, call_later=fake)
+        assert c.close_delay_active
+        assert c.is_active
+        assert fake.scheduled_count == 2 and fake.calls[1]["delay"] == 60
+        assert c.close_delay_elapsed_s(1400.0) == 400.0  # counted from the close
+
+    def test_extend_without_window_mode_does_nothing(self):
+        c = self._ctrl()
+        fake = FakeCallLater()
+        c.extend_close_delay(None, 60, lambda now: None, call_later=fake)
+        assert fake.scheduled_count == 0
+        assert not c.close_delay_active
+
+    def test_restore_and_reopen_forget_the_close_time(self):
+        c = self._ctrl()
+        c.activate("comfort", 20.0)
+        fake = FakeCallLater()
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=1000.0)
+        c.restore()
+        assert c.close_delay_elapsed_s(2000.0) == 0.0
+        c.activate("comfort", 20.0)
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=3000.0)
+        c.handle_window_opened(None, 30, lambda now: None, call_later=fake)
+        assert c.close_delay_elapsed_s(4000.0) == 0.0
+        assert not c.close_delay_active
+
+
+class TestWindowRecoveryWait:
+    """After a window closes the room re-warms on its own; heating waits."""
+
+    wait = staticmethod(_ctrl_mod.window_recovery_wait)
+    KW = dict(sensor_ok=True, max_wait_s=1800.0, rate_c_per_h=1.0)
+
+    def test_waits_while_the_fresh_slope_is_unknown(self):
+        assert self.wait(None, 300.0, **self.KW)
+        assert self.wait(float("nan"), 300.0, **self.KW)
+
+    def test_waits_while_rising_fast(self):
+        assert self.wait(2.5 / 3600, 600.0, **self.KW)
+        assert self.wait(1.0 / 3600, 600.0, **self.KW)       # at the rate: still waiting
+
+    def test_resumes_once_the_rise_has_slowed_or_turned(self):
+        assert not self.wait(0.9 / 3600, 600.0, **self.KW)
+        assert not self.wait(0.0, 600.0, **self.KW)
+        assert not self.wait(-0.5 / 3600, 600.0, **self.KW)
+
+    def test_gives_up_at_the_cap(self):
+        assert not self.wait(5.0 / 3600, 1800.0, **self.KW)
+        assert not self.wait(None, 1800.0, **self.KW)
+
+    def test_no_sensor_no_wait(self):
+        kw = dict(self.KW, sensor_ok=False)
+        assert not self.wait(None, 300.0, **kw)
+        assert not self.wait(5.0 / 3600, 300.0, **kw)
+
 
 # ---------------------------------------------------------------------------
 # PresenceAutomationController

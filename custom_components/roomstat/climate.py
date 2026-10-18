@@ -282,6 +282,8 @@ class RoomstatClimate(
         # State-machine controllers (hold their own timer + saved-state)
         self._window_ctrl = WindowAutomationController()
         self._presence_ctrl = PresenceAutomationController()
+        # The window close wait (room re-warming on its own) is logged once.
+        self._window_recovery_logged: bool = False
 
         # Schedule following (see climate_schedule.py)
         self._schedule_ctrl = ScheduleController()

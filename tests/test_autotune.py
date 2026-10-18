@@ -893,6 +893,86 @@ class TestEpisodeAcrossRestart:
         assert [pb.kp, pb.ki, pb.td_s] == pytest.approx([pa.kp, pa.ki, pa.td_s], rel=0.02)
 
 
+def _window(t, ts, room, minutes):
+    """A window open (frost 5 °C, not eligible) for *minutes* from *ts*;
+    returns the time of the last window cycle."""
+    for k in range(minutes):
+        t.observe(A.AutotuneSample(ts + k * 60.0, 5.0, room, 20.0, 5.0,
+                                   eligible=False, window=True))
+    return ts + (minutes - 1) * 60.0
+
+
+class TestWindowRecoveryIsNotLearned:
+    """18 Oct 2026: heating that resumes after a window started a heat-up
+    episode, and the room's own re-warming (3.7 °C/h, a 5-min "coast", a
+    -1.16 °C "overshoot") went into the medians."""
+
+    def test_restore_after_a_window_starts_no_episode(self):
+        t = _tuner()
+        for k in range(5):
+            _feed(t, k * 60.0, 20.0, 20.0)
+        last = _window(t, 300.0, 17.0, 8)
+        # Heating resumes with the room 2 °C short and recovering fast.
+        _feed(t, last + 60.0, 20.0, 18.0)
+        assert t.phase != A.PHASE_HEATUP
+        assert t.last_event == "heat-up after a window: not analysed"
+        for k in range(2, 20):
+            _feed(t, last + k * 60.0, 20.0, min(20.0, 18.0 + 0.15 * k))
+        assert t.phase != A.PHASE_HEATUP
+        assert t._counters["heatups"] == 0
+
+    def test_schedule_step_soon_after_a_window_is_skipped_too(self):
+        t = _tuner()
+        _feed(t, 0.0, 18.0, 18.5)
+        last = _window(t, 60.0, 17.5, 5)
+        _feed(t, last + 60.0, 18.0, 17.8)             # restored to eco
+        _feed(t, last + 600.0, 20.0, 18.0)            # the schedule steps up 10 min later
+        assert t.phase != A.PHASE_HEATUP
+
+    def test_step_after_the_settle_time_counts(self):
+        t = _tuner()
+        _feed(t, 0.0, 18.0, 18.5)
+        last = _window(t, 60.0, 17.5, 5)
+        settle = CFG.window_settle_s
+        _feed(t, last + 60.0, 18.0, 17.8)
+        _feed(t, last + settle + 60.0, 18.0, 18.2)
+        _feed(t, last + settle + 120.0, 20.0, 18.2)   # a real step, room settled
+        assert t.phase == A.PHASE_HEATUP
+
+    def test_resume_without_a_window_still_counts(self):
+        """Presence away / summer / off: the room really cooled, heating
+        resuming is a heat-up (unchanged behaviour)."""
+        t = _tuner()
+        _feed(t, 0.0, 20.0, 20.0)
+        for k in range(1, 6):
+            _feed(t, k * 60.0, 16.0, 19.0 - 0.2 * k, eligible=False)
+        _feed(t, 360.0, 20.0, 18.0)
+        assert t.phase == A.PHASE_HEATUP
+
+    def test_window_opening_ends_the_episode_in_progress(self):
+        t = _tuner()
+        last = _heating(t, minutes=10)
+        _window(t, last + 60.0, 17.0, 3)
+        assert t.phase != A.PHASE_HEATUP
+        assert t._counters["heatups"] == 0            # too short to keep
+
+    def test_settle_time_survives_a_restart(self):
+        t = _tuner()
+        _feed(t, 0.0, 20.0, 20.0)
+        last = _window(t, 60.0, 17.0, 5)
+        t2 = _restart(t)
+        _feed(t2, last + 120.0, 20.0, 18.0)
+        assert t2.phase != A.PHASE_HEATUP
+        assert t2.last_event == "heat-up after a window: not analysed"
+        # State saved by the previous version: no window known, so the
+        # restore counts as a heat-up as before (nothing worse than today).
+        d = t.as_dict()
+        del d["episode"]["last_window_ts"]
+        t3 = _tuner(stored=d)
+        _feed(t3, last + 120.0, 20.0, 18.0)
+        assert t3.phase == A.PHASE_HEATUP
+
+
 # ---------------------------------------------------------------------------
 # 3. Closed loop
 # ---------------------------------------------------------------------------

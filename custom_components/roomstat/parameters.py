@@ -68,6 +68,21 @@ ENTITY_MISSING_REPORT_S: float = 300.0
 # setpoint it was sent (the room sensor is expected to be reliable).
 ROOM_SENSOR_UNAVAILABLE_REPORT_S: float = 900.0
 
+# After a window closes the room re-warms on its own: the walls, furniture
+# and radiator are still warm, only the air was changed (18 Oct 2026: the
+# study +1.9 °C in 9 min after a 3.5 °C dip, the living room +2.8 °C in
+# 8 min, all four rooms decelerating over 15-40 min).  Heating that joins in
+# overshoots (a 3-min full-power burst on a room rising 2.5 °C/h), and for
+# 15 min the slope estimate still carries the dip.  So once the configured
+# close delay has run, heating waits until the room's own rise (measured
+# from fresh readings since the close) has slowed below this rate - faster
+# than any radiator here heats, 1.4-2.2 °C/h at full power - polling every
+# WINDOW_RECOVERY_POLL_S, for at most WINDOW_RECOVERY_MAX_S after the close.
+# A close delay of 0 skips the wait.
+WINDOW_RECOVERY_RATE_C_PER_H: float = 1.0
+WINDOW_RECOVERY_MAX_S: float = 1800.0
+WINDOW_RECOVERY_POLL_S: float = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Tuning (the three values in the options flow, and what auto-tune learns)
@@ -82,7 +97,13 @@ class CorrectionTuning:
         In the two rooms fitted to real data (tests/plant_sim.py) 3-6 all
         hold within about 0.03 °C; above 4 commands rise fast for little
         gain.
-    ki: integral gain near the target, for a lasting offset.
+    ki: integral gain near the target, for a lasting offset.  0.001 since
+        2.8.0 (0.003 before): with the stop released only once the room is
+        0.1 °C under the target, the integral winds up while the room waits
+        there and the hold then pushes above it (17 Oct 2026: +0.2 in 9 min
+        at 0.003); 0.001 keeps a slow correction for a lasting offset and
+        leaves the auto-tuner's SIMC Ki (learned from the dead time) to
+        raise it where a room needs more.
     td_s: the braking time: how far ahead a heat-up predicts where the heat
         still in the radiator will carry the room (lead x rise rate), and so
         how early it stops.  0 = no anticipation.  Auto-tune learns it from
@@ -90,7 +111,7 @@ class CorrectionTuning:
     """
 
     kp: float = 4.0
-    ki: float = 0.003
+    ki: float = 0.001
     td_s: float = 600.0
 
 
@@ -165,6 +186,12 @@ class AutotuneConfig:
     # A longer gap between two regulation cycles ends the episode in
     # progress.  This also decides whether a heat-up survives a restart.
     max_gap_s: float = 600.0
+    # No heat-up episode starts within this long after a window was open:
+    # the room's rise is its own recovery, not the radiator's (18 Oct 2026,
+    # living room: a heating rate of 3.7 °C/h, a "coast" of 5 min and an
+    # overshoot of -1.16 °C learned from the 10 min after a window closed;
+    # the study booked its whole 45-min recovery as coast).
+    window_settle_s: float = 1800.0
 
     # Hold windows (steady setpoint, room near target, heating active).
     hold_window_s: float = 3 * 3600.0  # evaluated every window

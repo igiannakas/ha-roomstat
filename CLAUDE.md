@@ -52,10 +52,11 @@ the HA modules.
 - `regulation.py`: the controller (modes heat / coast / hold / stop).
 - `autotune.py`: background tuning of Kp, Ki and the braking time Td.
 - `climate_controllers.py`: window, presence, summer and schedule state
-  machines, restart persistence helpers, `choose_trv` (configured TRV or
-  its fallback), `trv_on_schedule`, the fail-cold helpers (timer overlays,
-  watchdog test, `OutOfBandMonitor`), and the config entry option
-  migration.
+  machines (`window_recovery_wait`: the close delay runs on until the room
+  has stopped re-warming by itself), restart persistence helpers,
+  `choose_trv` (configured TRV or its fallback), `trv_on_schedule`, the
+  fail-cold helpers (timer overlays, watchdog test, `OutOfBandMonitor`),
+  and the config entry option migration.
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
   feeding the auto-tuner. At debug it logs one line per cycle with the
@@ -65,7 +66,8 @@ the HA modules.
   `custom_components.roomstat.coordinator`: set the package to debug and
   that logger to info (the owner does it with a `logger.set_level`
   automation on HA start).
-- `climate_presets.py`: presets, boost timer, window and presence actions.
+- `climate_presets.py`: presets, boost timer, window and presence actions
+  (the window close action polls the recovery, see "Windows" below).
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
 - `climate_summer.py`: summer lock (5 °C, service calls refused, TRV held).
@@ -183,7 +185,15 @@ Read this before changing `regulation.py` or `parameters.py`.
   Sunny days overshoot with every variant (nothing can cool). Re-check
   against these presets when changing them (`tests/test_control.py`).
 - **Integral deadband (0.3 °C):** the integral only accumulates near the
-  target, and decays outside it, so a heat-up never winds it up.
+  target, and decays outside it, so a heat-up never winds it up. **Ki
+  default 0.001** (2.8.0; 0.003 before): with the stop released only 0.1 °C
+  under the target the integral winds up while the room waits there (17 Oct
+  2026: +0.2 in 9 min at 0.003) and the hold then pushes above it; 0.001
+  was the owner's choice on 17 Oct for all four rooms (simulated sweep: a
+  hold RMS within 0.01 of 0.003, fewer commands), and the auto-tuner's
+  SIMC Ki raises it where a room's dead time asks for more. Draining or
+  resetting the integral in stop was rejected (it hurts cold, high-loss
+  rooms with the tuner on).
 - **Anti-windup:** no integration outside hold or while the command is
   saturated, plus the deadband decay above. The integral is clamped to
   ±2 °C.
@@ -276,6 +286,25 @@ is updating.
   blocked until the clock catches up.
 - **Faulty readings:** room and TRV readings outside −30…60 °C are treated as
   missing (`plausible_c`).
+- **Windows (2.8.0):** while the window sensor is on, or the window
+  automation is active and not yet in its close delay, the room readings are
+  the draught: the slope history is dropped each cycle (`_window_airing`)
+  and refilled from the close on. The configured close delay is a minimum:
+  when its timer fires, `_async_window_close_action` asks
+  `window_recovery_wait` and re-arms the timer every
+  `WINDOW_RECOVERY_POLL_S` (60 s) while the fresh slope is unknown (6
+  samples, 7.5 min) or ≥ `WINDOW_RECOVERY_RATE_C_PER_H` (1 °C/h, faster than
+  any radiator here heats), up to `WINDOW_RECOVERY_MAX_S` (30 min) after
+  the close; a room sensor that has never read, or is degraded, ends the
+  wait at the configured delay, and a close delay of 0 skips it. Evidence
+  (18 Oct 2026, four rooms): the air comes back 60–90 % within 10–20 min
+  of the close (study +1.9 °C in 9 min after a 3.5 °C dip), decelerating
+  over 15–40 min; at the end of a 5-min delay the slope still carried the
+  dip, so a hold pushed full power for 3 min on a room rising 2.5 °C/h by
+  itself (master bedroom), and the living room flapped heat → coast →
+  heat on a 7–11 °C/h recovery slope. The auto-tuner starts no heat-up
+  episode within `window_settle_s` (30 min) of a window (see "Auto-tune").
+  The simulator has no windows; this is judged on the trace sensors.
 - **Fail cold (timer overlays):** a maximum command left behind by a dead
   HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
   (TRV option, default 0: the safe landing needs the Tado app schedule at
@@ -377,7 +406,15 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
     and nothing happens).
 
   Heat-ups cut short by the schedule are kept when they carry enough
-  information.
+  information. **No episode starts within `window_settle_s` (30 min) of a
+  window** (open, or in its close delay; `AutotuneSample.window`, the time
+  is persisted with the episode): heating resuming after a window used to
+  count as a heat-up (`resumed`), but the room's rise is its own recovery.
+  18 Oct 2026, living room: the 10 min after a close gave a heating rate
+  of 3.73 °C/h (real 1.4–2.2), a 5-min "coast" and an overshoot of −1.16
+  (one stall vote); the study's episode would have booked its 45-min
+  recovery as coast. Resuming after presence-away, summer or off still
+  counts: there the room really cooled.
 - **SIMC is used only for Ti** (= 4(τc + θ), τc = 1.5 θ), as a basis for Ki,
   and as the justification for Td ≈ coast. **SIMC's Kc is not used:** the only
   gain estimate (rate / demand) is self-referential, because the demand is

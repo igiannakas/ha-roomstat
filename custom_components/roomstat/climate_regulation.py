@@ -73,14 +73,34 @@ class RegulationMixin:
             if ent.hass is not None:
                 ent.async_write_ha_state()
 
+    def _window_sensor_on(self) -> bool:
+        sensor = self._config_entry.options.get(CONF_WINDOW_SENSOR_ID)
+        state = self.hass.states.get(sensor) if sensor and self.hass is not None else None
+        return state is not None and state.state == "on"
+
     def _window_open(self) -> bool:
         """A window is open: the window sensor says so (also during its open
         delay), or the window automation or its close delay is running."""
         if self._window_ctrl.is_active or self._window_ctrl.close_delay_active:
             return True
-        sensor = self._config_entry.options.get(CONF_WINDOW_SENSOR_ID)
-        state = self.hass.states.get(sensor) if sensor and self.hass is not None else None
-        return state is not None and state.state == "on"
+        return self._window_sensor_on()
+
+    def _window_airing(self) -> bool:
+        """Air is being exchanged right now: the sensor is on, or the window
+        automation is active and not yet in its close delay.  The room
+        readings then show the draught, not the room, and the slope history
+        is dropped so the predictions after the close start from fresh
+        readings (18 Oct 2026: with the dip still in the 15-min window a hold
+        pushed full power on a room rising 2.5 °C/h on its own)."""
+        if self._window_ctrl.is_active and not self._window_ctrl.close_delay_active:
+            return True
+        return self._window_sensor_on()
+
+    def _room_recovery_slope(self) -> tuple[float | None, bool]:
+        """The fresh room slope (°C/s, None while unknown) for the window
+        close wait, and whether the room sensor can show a recovery at all."""
+        sensor_ok = self._last_valid_room_temp is not None and not self._sensor_degraded
+        return (self._slope.slope_c_per_s() if sensor_ok else None), sensor_ok
 
     def _update_out_of_band(self, now: float) -> None:
         """Feed the out-of-band monitor (binary_sensor.<room>_out_of_band).
@@ -173,6 +193,7 @@ class RegulationMixin:
                     eligible=self._autotune_eligible(),
                     command_saturated=result.is_saturated,
                     room_temp_ts=self.coordinator.data.get("room_temp_ts"),
+                    window=self._window_open(),
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop
@@ -320,8 +341,12 @@ class RegulationMixin:
 
         # 3b. Robust room slope for the heat-up and stop predictions (only on fresh
         # readings; a bridged/stale value must not look like a flat room).
+        # While a window is open the readings are the draught: the history is
+        # dropped, and refilled from the close on (the close wait reads it).
         slope = None
-        if not self._sensor_degraded:
+        if self._window_airing():
+            self._slope.reset()
+        elif not self._sensor_degraded:
             self._slope.add(now, room_temp, self.coordinator.data.get("room_temp_ts"))
             slope = self._slope.slope_c_per_s()
 

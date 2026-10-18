@@ -69,7 +69,7 @@ class TestDefaults:
         """Kp is the gain near the target; the braking time looks 10 min
         ahead (parameters.py)."""
         t = CorrectionTuning()
-        assert (t.kp, t.ki, t.td_s) == (4.0, 0.003, 600.0)
+        assert (t.kp, t.ki, t.td_s) == (4.0, 0.001, 600.0)
 
     def test_command_range(self):
         cfg = RegulationConfig()
@@ -137,7 +137,7 @@ class TestIntegral:
         reg, state = make_regulator(), RegulationState()
         for _ in range(5):
             res, state = step(reg, state, 20.8, sp=21.0, trv=22.0)
-        assert res.i_correction_c == pytest.approx(5 * 0.2 * 0.003 * 60, abs=0.01)
+        assert res.i_correction_c == pytest.approx(5 * 0.2 * 0.001 * 60, abs=0.005)
 
     def test_does_not_accumulate_outside_the_deadband(self):
         reg, state = make_regulator(), RegulationState()

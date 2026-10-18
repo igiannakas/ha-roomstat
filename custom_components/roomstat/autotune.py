@@ -25,7 +25,10 @@ The tuner therefore learns from naturally occurring episodes, never from
 injected test signals:
 
 * **Heat-ups** (setpoint step up) give the dead time theta (tangent
-  method), the heating rate, the coast time and the overshoot.
+  method), the heating rate, the coast time and the overshoot.  Not the
+  heating that resumes after a window: the room then re-warms on its own
+  (walls, furniture and radiator kept their heat) and its rise, coast and
+  peak say nothing about the radiator (``AutotuneConfig.window_settle_s``).
 * **Holds** (steady setpoint after a heat-up) give the mean offset and
   any oscillation.
 
@@ -208,6 +211,9 @@ class AutotuneSample:
     eligible: bool = True              # False: window/summer/off/degraded...
     command_saturated: bool = False
     room_temp_ts: float | None = None  # sensor report time (dedupes re-reads)
+    # A window is open, or its close delay runs: the room will re-warm on
+    # its own afterwards, so no heat-up episode starts for a while.
+    window: bool = False
 
     @property
     def demand_c(self) -> float | None:
@@ -730,6 +736,9 @@ class Autotuner:
         self._prev_eligible = True
         self._sp_since_ts: float | None = None
         self._last_heatup_end_ts = -math.inf
+        # When a window was last open (or in its close delay): the room then
+        # re-warms on its own, which no heat-up episode may learn from.
+        self._last_window_ts = -math.inf
         self._reset_learning()
         if stored is not None:
             self._load(stored)
@@ -898,11 +907,18 @@ class Autotuner:
             room = self._spikes.update(s.ts, room, s.room_temp_ts)
         s = AutotuneSample(s.ts, sp, room, s.tado_internal_c, s.tado_setpoint_c,
                            s.eligible and sp is not None, s.command_saturated,
-                           s.room_temp_ts if _finite(s.room_temp_ts) else None)
+                           s.room_temp_ts if _finite(s.room_temp_ts) else None,
+                           window=bool(s.window))
         resumed = (
             self._prev_ts is not None
             and (not self._prev_eligible or s.ts - self._prev_ts > self.cfg.max_gap_s)
         )
+        if s.window:
+            self._last_window_ts = s.ts
+        # After a window the room re-warms on its own for a while: its rise,
+        # coast and peak say nothing about the radiator (18 Oct 2026, see
+        # AutotuneConfig.window_settle_s), so no heat-up episode starts.
+        after_window = s.ts - self._last_window_ts < self.cfg.window_settle_s
 
         if self._heatup is not None:
             st = self._heatup.add(s)
@@ -932,7 +948,8 @@ class Autotuner:
                 self._hold = None
 
         # Start of a heat-up: a setpoint step up (or heating resuming after a
-        # window / summer / off period) with the room well below target.
+        # summer / off / away period) with the room well below target.  Not
+        # after a window: the room is recovering by itself.
         if (
             self._heatup is None and s.eligible and room is not None
             and sp - room >= self.cfg.heatup_min_error_c
@@ -941,7 +958,10 @@ class Autotuner:
                 self._prev_sp is not None
                 and sp - self._prev_sp >= self.cfg.heatup_min_step_c
             )
-            if step_up or resumed:
+            if (step_up or resumed) and after_window:
+                self._hold = None
+                self.last_event = "heat-up after a window: not analysed"
+            elif step_up or resumed:
                 self._hold = None
                 self._heatup = _HeatupTracker(s.ts, sp, self.cfg)
                 self._heatup.add(s)
@@ -1305,6 +1325,8 @@ class Autotuner:
                 "sp_since_ts": self._sp_since_ts,
                 "last_heatup_end_ts": (self._last_heatup_end_ts
                                        if _finite(self._last_heatup_end_ts) else None),
+                "last_window_ts": (self._last_window_ts
+                                   if _finite(self._last_window_ts) else None),
             },
         }
 
@@ -1380,12 +1402,15 @@ class Autotuner:
             self._sp_since_ts = opt("sp_since_ts")
             end = opt("last_heatup_end_ts")
             self._last_heatup_end_ts = end if end is not None else -math.inf
+            window = opt("last_window_ts")
+            self._last_window_ts = window if window is not None else -math.inf
             self._heatup = _HeatupTracker.from_dict(e.get("heatup"), self.cfg)
         except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             self._heatup = None
             self._prev_sp = self._prev_ts = self._sp_since_ts = None
             self._prev_eligible = True
             self._last_heatup_end_ts = -math.inf
+            self._last_window_ts = -math.inf
             return
         if self._heatup is not None:
             self.last_event = "heat-up continued after a restart"

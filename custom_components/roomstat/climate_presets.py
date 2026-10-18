@@ -16,6 +16,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.core import callback
 
+from .climate_controllers import window_recovery_wait
 from .const import (
     CONF_COMFORT_TARGET,
     CONF_PRESENCE_AWAY_DELAY_S,
@@ -29,7 +30,12 @@ from .const import (
     PRESET_SCHEDULE,
     safe_float,
 )
-from .parameters import FROST_PROTECT_C
+from .parameters import (
+    FROST_PROTECT_C,
+    WINDOW_RECOVERY_MAX_S,
+    WINDOW_RECOVERY_POLL_S,
+    WINDOW_RECOVERY_RATE_C_PER_H,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,6 +75,7 @@ class PresetMixin:
             return
 
         if new_state.state == "on":  # window opened
+            self._window_recovery_logged = False
             delay = self._config_entry.options.get(CONF_WINDOW_DELAY_S, 30)
             self._window_ctrl.handle_window_opened(
                 self.hass, delay, self._async_window_action
@@ -121,7 +128,44 @@ class PresetMixin:
         await self._async_regulation_cycle(trigger="window_open")
 
     async def _async_window_close_action(self, _now) -> None:
-        """Restore previous preset after window-close delay expired."""
+        """Restore the previous preset once the close delay has run and the
+        room has stopped re-warming on its own.
+
+        The configured delay is the minimum.  After it the room is usually
+        still recovering the air the window took (the walls, furniture and
+        radiator kept their heat): heating that joins in overshoots, so the
+        wait is extended, one poll at a time, while fresh readings since the
+        close show the room rising at WINDOW_RECOVERY_RATE_C_PER_H or more,
+        for at most WINDOW_RECOVERY_MAX_S after the close.
+        """
+        now = time.time()
+        waited = self._window_ctrl.close_delay_elapsed_s(now)
+        slope, sensor_ok = self._room_recovery_slope()
+        if window_recovery_wait(
+            slope, waited, sensor_ok=sensor_ok,
+            max_wait_s=WINDOW_RECOVERY_MAX_S, rate_c_per_h=WINDOW_RECOVERY_RATE_C_PER_H,
+        ):
+            if not self._window_recovery_logged:
+                self._window_recovery_logged = True
+                _LOGGER.info(
+                    "%s: window closed, the room is re-warming on its own%s; "
+                    "heating waits until that slows below %.1f °C/h (at most "
+                    "%d min)",
+                    self._config_entry.title,
+                    "" if slope is None else f" at {slope * 3600:+.1f} °C/h",
+                    WINDOW_RECOVERY_RATE_C_PER_H, int(WINDOW_RECOVERY_MAX_S / 60),
+                )
+            self._window_ctrl.extend_close_delay(
+                self.hass, WINDOW_RECOVERY_POLL_S, self._async_window_close_action
+            )
+            return
+        if self._window_recovery_logged:
+            _LOGGER.info(
+                "%s: room recovery over after %d min%s",
+                self._config_entry.title, int(waited / 60),
+                "" if slope is None else f" ({slope * 3600:+.1f} °C/h)",
+            )
+        self._window_recovery_logged = False
         self._restore_window_state()
 
     def _restore_window_state(self, notify: bool = True) -> None:

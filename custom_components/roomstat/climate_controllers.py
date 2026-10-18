@@ -6,7 +6,9 @@ timers), so a plain ``import`` in tests works without an HA bootstrap.
 
 Architecture
 ------------
-- ``WindowAutomationController``  – window-open/close delays & state
+- ``WindowAutomationController``  – window-open/close delays & state;
+  ``window_recovery_wait`` keeps heating off after a close while the room is
+  still re-warming on its own
 - ``PresenceAutomationController`` – presence-away delay & state
 - ``SavedState``                  – lightweight snapshot dataclass
 - ``PersistedAutomationState``    – automation snapshot that survives an HA
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -75,6 +78,36 @@ class SavedState:
 # Window automation
 # ---------------------------------------------------------------------------
 
+def _time_now() -> float:
+    return time.time()
+
+
+def window_recovery_wait(
+    slope_c_per_s: float | None,
+    waited_s: float,
+    *,
+    sensor_ok: bool,
+    max_wait_s: float,
+    rate_c_per_h: float,
+) -> bool:
+    """Whether heating should keep waiting after a window closed.
+
+    After the configured close delay the room is usually still re-warming on
+    its own (the walls, furniture and radiator kept their heat; 18 Oct 2026:
+    +1.9 °C in 9 min, decelerating over 15-40 min).  Heating that joins in
+    overshoots, and for 15 min the slope still carries the dip, so the
+    predictions are blind.  Wait while the fresh slope (readings since the
+    close) is unknown or shows the room rising at ``rate_c_per_h`` or more;
+    give up waiting after ``max_wait_s`` from the close, or at once when the
+    room sensor cannot show a recovery (``sensor_ok`` False).
+    """
+    if not sensor_ok or waited_s >= max_wait_s:
+        return False
+    if slope_c_per_s is None or not math.isfinite(slope_c_per_s):
+        return True            # not enough fresh readings yet
+    return slope_c_per_s * 3600.0 >= rate_c_per_h
+
+
 class WindowAutomationController:
     """Manages window-sensor automation with configurable open/close delays.
 
@@ -84,15 +117,21 @@ class WindowAutomationController:
                 ▲                                      │
                 │        (close)                       │
                 └───────── close_pending ◄─────────────┘
-                                │ (delay expires)
-                                ▼
+                                │ (delay expires, room no longer
+                                ▼  re-warming on its own)
                               idle
+
+    The close delay is a minimum.  When it expires the entity asks
+    :func:`window_recovery_wait` whether the room is still re-warming on
+    its own and, if so, extends the delay (``extend_close_delay``) until it
+    has slowed down or ``WINDOW_RECOVERY_MAX_S`` has passed since the close.
     """
 
     def __init__(self) -> None:
         self.is_active: bool = False
         self._open_timer: _CancelFn | None = None
         self._close_timer: _CancelFn | None = None
+        self._close_since: float | None = None
         self._saved: SavedState = SavedState()
 
     # ------------------------------------------------------------------
@@ -103,6 +142,12 @@ class WindowAutomationController:
     def close_delay_active(self) -> bool:
         """True while the post-close restoration timer is running."""
         return self._close_timer is not None
+
+    def close_delay_elapsed_s(self, now: float) -> float:
+        """Seconds since the window closed (0 when no close delay runs)."""
+        if self._close_since is None:
+            return 0.0
+        return max(0.0, now - self._close_since)
 
     def get_saved(self) -> SavedState:
         """Return a copy of the currently saved preset/temperature."""
@@ -129,6 +174,7 @@ class WindowAutomationController:
         if self._close_timer is not None:
             self._close_timer()
             self._close_timer = None
+            self._close_since = None
             _LOGGER.debug("Window reopened during close delay – staying in frost protection")
             return
 
@@ -154,12 +200,15 @@ class WindowAutomationController:
         on_timer_expire: Callable,
         *,
         call_later: _CallLaterFn | None = None,
+        now: float | None = None,
     ) -> bool:
         """React to a window-closed event.
 
         Returns ``True`` when the caller should trigger an *immediate* restore
         (``close_delay_s == 0`` and the window-open mode was active).
         Returns ``False`` in all other cases (timer scheduled, nothing to do).
+        ``now`` (``time.time()`` by default) marks when the window closed, for
+        :meth:`close_delay_elapsed_s`.
         """
         if self._open_timer is not None:
             self._open_timer()
@@ -167,6 +216,7 @@ class WindowAutomationController:
         if self._close_timer is not None:
             self._close_timer()
             self._close_timer = None
+        self._close_since = None
 
         if not self.is_active:
             # Window closed before the open-delay fired – nothing to restore.
@@ -175,11 +225,33 @@ class WindowAutomationController:
         if close_delay_s > 0:
             _cl = call_later or _get_call_later()
             self._close_timer = _cl(hass, close_delay_s, on_timer_expire)
+            self._close_since = _time_now() if now is None else now
             _LOGGER.debug("Window closed – restoring previous preset in %ds", close_delay_s)
             return False
 
         # Zero delay: caller should restore immediately (synchronously)
         return True
+
+    def extend_close_delay(
+        self,
+        hass: Any,
+        delay_s: float,
+        on_timer_expire: Callable,
+        *,
+        call_later: _CallLaterFn | None = None,
+    ) -> None:
+        """Re-arm the close timer: the room is still re-warming on its own.
+
+        Called from the close timer's own callback, so the previous timer has
+        already fired; the close delay stays active and ``close_since`` is
+        kept, so the wait is bounded from the close, not from each poll.
+        """
+        if not self.is_active:
+            return
+        if self._close_since is None:
+            self._close_since = _time_now()
+        _cl = call_later or _get_call_later()
+        self._close_timer = _cl(hass, delay_s, on_timer_expire)
 
     # ------------------------------------------------------------------
     # State mutations called by the climate entity
@@ -195,6 +267,7 @@ class WindowAutomationController:
         """Clear active state and return the saved preset/temp for restoration."""
         saved = SavedState(preset=self._saved.preset, temp=self._saved.temp)
         self._close_timer = None
+        self._close_since = None
         self._saved = SavedState()
         self.is_active = False
         return saved
@@ -219,6 +292,7 @@ class WindowAutomationController:
         if self._close_timer:
             self._close_timer()
             self._close_timer = None
+        self._close_since = None
 
     def cancel_all(self) -> None:
         """Cancel all timers and reset to idle state (e.g. user override)."""
