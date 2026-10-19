@@ -59,11 +59,14 @@ def _cycle(ent):
 
 
 def _sent(ent):
-    """(entity, temperature) of every set_temperature call."""
+    """(entity, temperature) of every set_temperature call, and (entity,
+    "off") of every switch-off (the regulation's minimum since 2.8.4)."""
     return [
-        (d["entity_id"], d.get("temperature"))
+        (d["entity_id"], d.get("temperature") if svc == "set_temperature" else "off")
         for dom, svc, d in ent.hass.service_calls
-        if dom == "climate" and svc == "set_temperature"
+        if dom == "climate" and (
+            svc == "set_temperature"
+            or (svc == "set_hvac_mode" and d.get("hvac_mode") == "off"))
     ]
 
 
@@ -247,7 +250,7 @@ def test_summer_lock_enforced_through_the_fallback(monkeypatch):
     ent.hass.set(SUMMER, "on")
     ent._async_summer_changed(_event("on"))
     _cycle(ent)
-    assert _sent(ent) == [(CLOUD, 5.0)]
+    assert _sent(ent) == [(CLOUD, "off")]
 
 
 # ---------------------------------------------------------------------------

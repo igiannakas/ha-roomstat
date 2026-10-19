@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.8.3-blue)
+![Version](https://img.shields.io/badge/version-2.8.4-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -69,6 +69,11 @@ changes.
   again: a Tado asked for just under its own reading trickles heat into a
   room that is already warm enough. Rooms hold within about 0.05 °C.
   Settings under **Configure → Controller**.
+- **Off means off.** When a room needs no heat, Roomstat switches its valve
+  off instead of setting 5 °C, and a valve it finds on its Tado schedule is
+  taken back. A valve is always either heating at Roomstat's setpoint or off.
+  Heating again is one command: setting a temperature turns an off valve back
+  on.
 - **Heat-up braking.** **Heat-up braking time** (10 minutes by default) is
   how far ahead Roomstat predicts where the radiator's leftover heat will
   carry the room, so heating stops before the target rather than after it.
@@ -93,7 +98,7 @@ changes.
 - **Schedule.** The room follows a helper that your scheduler sets. Manual
   changes win for a while, then the schedule takes over again. See
   [Schedule](#schedule).
-- **Summer mode.** One switch locks every room at 5 °C. See
+- **Summer mode.** One switch turns every valve off and keeps it off. See
   [Summer mode](#summer-mode).
 - **Away and Off stay** until you change them, also when the schedule moves on.
 - **Eco is called Night.**
@@ -171,7 +176,7 @@ scheduler sets to `comfort`, `night`, `away` or `frost_protection`.
 **Configure → Summer mode switch:** an `input_boolean`. Use the same one for
 every room.
 
-- **On:** every room is held at 5 °C. Changes from Home Assistant are refused,
+- **On:** every valve is held off. Changes from Home Assistant are refused,
   and a turn of the dial on the radiator is put back.
 - **Off:** every room goes back to its schedule, or to Comfort.
 
@@ -183,24 +188,25 @@ power, the valve stays open. With Tado cloud thermostats, full power can
 expire on its own:
 
 1. In the Tado app, set the schedule of every zone Roomstat controls to
-   **5 °C or Off**, all day. When full power expires, or you end Roomstat's
+   **Off**, all day. When full power expires, or you end Roomstat's
    setting in the app, the zone goes back to this schedule, and Roomstat
-   sends its command again once it notices.
+   takes it back (heat at its setpoint, or off) once it notices.
 2. Then, per room, set **Configure → TRV Communication → Full-power time
    limit** to 3600 s. Full power then goes to Tado as a one-hour timer,
    renewed every half hour while it's still needed (one extra command per
-   half hour of heating). Everything else, 5 °C included, stays until the
+   half hour of heating). Everything else, off included, stays until the
    next command. 0, the default, leaves full power on until the next command.
 
 If no regulation cycle completes for 10 minutes (Home Assistant busy, no
 reading from the valve, an error), Roomstat logs a warning, sets the
-thermostat's `regulation_stalled` attribute, and replaces a full-power
-command with 5 °C.
+thermostat's `regulation_stalled` attribute, and switches a valve left at
+full power off.
 
-"5 °C" isn't 5 °C in the room if you set negative temperature offsets on the
-valves in the Tado app (they read low by that much). The valve then opens
-when the room falls to about 10–15 °C. That applies to the frost preset,
-summer mode, a 5 °C schedule, and possibly Off.
+Roomstat never sends 5 °C to shut a valve, because "5 °C" isn't 5 °C in the
+room if you set negative temperature offsets on the valves in the Tado app
+(they read low by that much): a valve at 5 °C opens when the room falls to
+about 10–15 °C. That still applies to a 5 °C Tado schedule, and possibly to
+a valve's own frost protection while it is off (untested).
 
 **Out of band.** Each room has an **Out of band** sensor (named after the
 room's device: look under **Settings → Devices**). It turns on when the room

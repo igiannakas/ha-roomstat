@@ -250,6 +250,8 @@ class RoomstatClimate(
         self._last_command_sent_ts = 0.0
         self._last_sent_setpoint: float | None = None
         self._last_attempt_c: float | None = None   # last command tried
+        # The TRV took our last off (hvac mode off, the regulation's minimum).
+        self._last_sent_off: bool = False
 
         # Sensor resilience: last-valid values for grace-period bridging
         self._last_valid_room_temp: float | None = None
@@ -890,10 +892,12 @@ class RoomstatClimate(
                         "HVAC OFF→HEAT: window still open, frost action in %ds",
                         delay,
                     )
-            # Reactivate the TRV, then run regulation to send the correct
-            # setpoint.  If the mode change fails, the regulation still runs:
-            # its set_temperature carries hvac_mode heat as well.
-            await self._async_send_hvac_mode_to_tado(HVACMode.HEAT)
+            # The regulation brings the TRV out of off itself: one
+            # set_temperature with hvac_mode heat, or nothing if the room
+            # needs no heat (2.8.4).  No set_hvac_mode heat first: a Tado
+            # zone would heat at the last temperature HA sent (25 °C after a
+            # heat-up) until the right command lands, or for good if it does
+            # not, and it costs an API call.
             await self._async_regulation_cycle(trigger="hvac_mode_change")
         else:
             await self._async_regulation_cycle(trigger="hvac_mode_change")

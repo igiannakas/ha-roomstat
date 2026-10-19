@@ -70,7 +70,7 @@ the HA modules.
   (the window close action polls the recovery, see "Windows" below).
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
-- `climate_summer.py`: summer lock (5 °C, service calls refused, TRV held).
+- `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
 - `number.py`: preset temperatures. `sensor.py`: boost remaining, schedule
   override remaining, auto-tune sensors, and the regulation trace (command to
   the valve, room error as measurement sensors — long-term statistics outlive
@@ -269,7 +269,8 @@ Read this before changing `regulation.py` or `parameters.py`.
   overlay refreshes are not needed with HomeKit (`overlay_refresh_s` 0).
   A valve that is off while the last command asked for heat (switched off in
   the Tado app) counts as drifted too, and so does a valve back on its
-  schedule (see "Failure handling").
+  schedule (see "Failure handling"). An off command is held only while the
+  valve reports `off` (see "Shut is off").
 
 ## Failure handling
 
@@ -277,12 +278,39 @@ Read this before changing the send path or the cycle's early returns. The
 loop must keep running, and the TRV must never be left on a command nobody
 is updating.
 
+- **Shut is off (2.8.4, owner's decision, urgent):** every command at the
+  frost level (`is_off_command`: ≤ `min_target_c` + 0.05 — coast, stop, a
+  hold clamped there, the frost preset, window and away shuts, the
+  room-sensor-lost end of a maximum, the watchdog, the summer lock) goes to
+  the TRV as `climate.set_hvac_mode off` (`_async_send_off_to_tado`; on a
+  Tado cloud zone a never-ending Manual OFF overlay), never as a 5 °C
+  setpoint. It is done only while the TRV reports `off`: a valve in heat at
+  any setpoint (a Manual 5 °C of an older version included) or on its Tado
+  schedule (`auto`; the owner: "auto isn't usable in tado, it has to be
+  either heating or off") is switched off, a new off skips the rate limit
+  when strong or an urgent decrease, and an off that went out gets the drift
+  grace to show before it is sent again. After an off the baseline is the
+  frost level (`_last_sent_setpoint`; the auto-tuner still sees a negative
+  demand). Heat from an off (or scheduled) valve is never "already at
+  target", whatever setpoint it shows (Tado reports 5 °C while off), and is
+  **one** `climate.set_temperature` with `hvac_mode: heat`: HA's Tado
+  integration (2026.10.1, `tado/climate.py` async_set_temperature) and
+  HomeKit's thermostat switch an off valve to heat and set the temperature
+  in the same call — checked live on the second bedroom, 19 Oct 2026 (off,
+  then `set_temperature 6` → heat at 6). Never `set_hvac_mode heat` first:
+  Tado re-uses the last temperature HA sent (25 °C after a heat-up) until
+  the second call lands, or for good if it fails. A timer overlay
+  (`tado.set_climate_timer`) switches to heat by itself. Reasons:
+  finding M6 (a 5 °C setpoint opens the valve once its offset-corrected
+  reading nears 5: a real 11–15 °C here) and the owner's rule that a valve is
+  only ever heating or off. Whether Tado's own frost protection in OFF uses
+  the corrected reading is still untested (plan §5H.1). The debug line shows
+  `cmd off`, and ` off` / ` auto` after the valve's reading; the command
+  trace sensor shows 5.0 for off.
 - **Valve off:** a HomeKit Tado valve that is off has no setpoint, and HA
-  accepts only 7–35 °C for it (5–25 °C in heat); a lower command is refused.
-  A frost-level command (≤ `min_target_c`) to an off valve counts as already
-  at target, and every command is clamped to the TRV's current
-  `min_temp`/`max_temp` (`command_limits`). In summer mode off counts as
-  locked. The coordinator reads min/max/off with `read_trv`.
+  accepts only 7–35 °C for it (5–25 °C in heat); every command is clamped to
+  the TRV's current `min_temp`/`max_temp` (`command_limits`). The
+  coordinator reads min/max/off with `read_trv`.
 - **Commands never raise:** `_async_call_trv` catches everything except
   cancellation. A failure is logged once per distinct error (an unexpected
   exception type keeps its traceback), shown as `last_command_error`, and
@@ -291,8 +319,11 @@ is updating.
   at what the TRV last took, so the next cycle sends again.
 - **Off stays off:** a failed OFF keeps Roomstat off (no revert). While off,
   the cycle sends OFF again if the TRV is not off, at most once per rate-limit
-  interval. OFF → HEAT runs the regulation even if the mode change fails;
-  `set_temperature` carries `hvac_mode: heat` anyway.
+  interval. OFF → HEAT forwards no mode change to the TRV (2.8.4): the
+  regulation cycle that runs at once takes the valve out of off with one
+  `set_temperature` (`hvac_mode: heat`), or leaves it off if the room needs
+  no heat (`set_hvac_mode heat` would heat a Tado zone at the last
+  temperature HA sent, 25 °C after a heat-up).
 - **Room sensor lost:** the room sensor is meant to be reliable (owner's
   decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
@@ -330,9 +361,9 @@ is updating.
 - **Fail cold (timer overlays):** a maximum command left behind by a dead
   HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
   (TRV option, default 0: the safe landing needs the Tado app schedule at
-  5 °C or Off, which Roomstat cannot check), a maximum (≥ the TRV's max −
+  Off, which Roomstat cannot check), a maximum (≥ the TRV's max −
   0.05, any mode) to a cloud TRV is `tado.set_climate_timer` {temperature,
-  time_period}; everything else, 5 °C included, stays Manual. Renewed at
+  time_period}; everything else stays Manual, off included. Renewed at
   half life while the target is still the maximum (strong: skips the rate
   limit once); with the start unknown (reload, TRV switch, clock back) at
   once. At least `HEAT_TIMER_MIN_S` (900 s: shorter only costs renewals).
@@ -344,18 +375,17 @@ is updating.
   `off`) holds no command of ours: a timer ran out or the app ended it. An
   Off block shows `auto` with no setpoint, which the drift check used to
   ignore, stalling a heat-up shut. Now a heat command is re-sent (as a timer
-  when enabled); a frost-level one counts as done while the schedule keeps
-  the valve shut (no setpoint, or a block at the floor) and is re-sent
-  against a block that heats. An unknown setpoint with no reading is still
-  not drift.
+  when enabled), and so is an off, whatever the schedule's block (2.8.4;
+  until then a shut block counted as holding the frost-level command). An
+  unknown setpoint with no reading is still not drift.
 - **Watchdog** (own `async_track_time_interval` callback, never the
   cycle's; `cycle_watchdog_s` 600 s, deliberately not an option): no cycle
   reached its decision (regulated, summer lock, off, or the room-sensor
   pause with the TRV readable) for 10 min → one warning, attribute
   `regulation_stalled`, and if the last command the TRV took was the maximum
-  the minimum is sent (strong; retried per rate-limit interval), only to a
-  valve that gives a reading and still shows the maximum (a 7 °C command
-  would turn an off HomeKit valve on).
+  the valve is switched off (strong; retried per rate-limit interval), only
+  if it gives a reading and still shows the maximum (one that is off, on its
+  schedule or lower is left for the regulation to take back).
 - **Out-of-band sensor** (`binary_sensor.<room>_out_of_band`, reporting
   only): while heating, no summer lock, no window open and a fresh room
   reading. Hot: room ≥ max(setpoint, `min_since`) + 0.5 °C for 30 min,

@@ -21,6 +21,7 @@ from .climate_controllers import (
     heat_timer_refresh_due,
     integration_step,
     is_maximum,
+    is_off_command,
     trv_setpoint_drifted,
 )
 from .const import (
@@ -407,15 +408,18 @@ class RegulationMixin:
             # behaviour can be read back from the log (enable debug logging
             # for custom_components.roomstat; the coordinator's own refresh
             # chatter is on custom_components.roomstat.coordinator).
+            cmd = result.target_for_tado_c
             _LOGGER.debug(
-                "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s | cmd %.1f (%+.1f vs trv)"
+                "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s%s | cmd %s"
                 " P %+.2f I %+.2f | %s",
                 self._config_entry.title, result.mode, setpoint, room_temp,
                 " (fell fast: previous reading used)" if result.room_held else "",
                 "no slope" if slope is None else f"{slope * 3600:+.2f} °C/h",
                 tado_internal,
+                " off" if trv.off else (" auto" if trv.scheduled else ""),
                 "" if trv.heating is None else (" heating" if trv.heating else " idle"),
-                result.target_for_tado_c, result.target_for_tado_c - tado_internal,
+                "off" if is_off_command(cmd, self._config.min_target_c)
+                else f"{cmd:.1f} ({cmd - tado_internal:+.1f} vs trv)",
                 result.p_correction_c, result.i_correction_c, self._last_reason,
             )
 
@@ -455,18 +459,18 @@ class RegulationMixin:
             trv_scheduled=trv.scheduled,
         ):
             _LOGGER.info(
-                "%s: %s holds %s, not the %.1f °C sent; sending again",
+                "%s: %s holds %s, not the %s sent; sending again",
                 self._config_entry.title, trv.entity_id, _held_text(trv),
-                self._last_sent_setpoint,
+                _command_text(self._last_sent_setpoint, self._config.min_target_c),
             )
             self._last_sent_setpoint = None
+            self._last_sent_off = False
 
-        # A valve that is off, or on an Off block of its schedule, already
-        # does what a frost-level command asks (Tado shows its 5 °C setpoint
-        # as off), and Home Assistant refuses a setpoint below 7 °C for a
-        # HomeKit valve that is off.
-        if trv.shut_without_setpoint and target <= self._config.min_target_c + 0.05:
-            self._last_reason = "already_at_target"
+        # Shut: hvac mode off, never a 5 °C setpoint (2.8.4).
+        if is_off_command(target, self._config.min_target_c):
+            await self._async_decide_and_send_off(
+                now, trv, strong=strong, time_since_last=time_since_last
+            )
             return
 
         # Keep the command inside what the TRV accepts right now (anything
@@ -492,8 +496,14 @@ class RegulationMixin:
         current_tado_setpoint = (
             self._last_sent_setpoint
             if self._last_sent_setpoint is not None
-            else trv.setpoint_c  # None if the TRV is off/unavailable
+            else trv.setpoint_c  # None if the TRV is unavailable
         )
+        if trv.off or trv.scheduled:
+            # Off, or back on its Tado schedule: the valve holds no heat
+            # command of ours, whatever setpoint it shows (Tado reports 5 °C
+            # while off, the schedule's block temperature while on it), so
+            # the command must go out.  A valve is only ever heating or off.
+            current_tado_setpoint = self._config.min_target_c
         is_rate_limited = time_since_last < self._config.min_command_interval_s
 
         should_send = False
@@ -573,6 +583,61 @@ class RegulationMixin:
         self._last_attempt_c = target
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
 
+    async def _async_decide_and_send_off(
+        self, now: float, trv: TrvReading, *, strong: bool, time_since_last: float
+    ) -> None:
+        """Shut the valve: hvac mode ``off`` (part of _async_decide_and_send).
+
+        Done only while the TRV reports ``off``.  A valve in heat at any
+        setpoint (5 °C included) or back on its Tado schedule (``auto``) is
+        switched off: the owner's valves are only ever heating or off.  Rate
+        limiting as for any command: a new off (from heat or a hold) skips
+        it when strong (coast, stop) or an urgent decrease; a retry waits
+        for the interval.  An off that went out is given the drift grace to
+        show up before it is sent again.
+        """
+        floor = self._config.min_target_c
+        if trv.off:
+            # The valve is off: the frost level is its baseline.
+            self._last_sent_setpoint = floor
+            self._last_sent_off = True
+            self._last_reason = "already_at_target"
+            return
+        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
+        if self._last_sent_off and time_since_last < grace:
+            # Our off went out; the TRV's state has not shown it yet.
+            self._last_reason = "already_at_target"
+            return
+        is_rate_limited = time_since_last < self._config.min_command_interval_s
+        new_command = self._last_attempt_c is None or not is_off_command(
+            self._last_attempt_c, floor
+        )
+        held = (
+            self._last_sent_setpoint
+            if self._last_sent_setpoint is not None
+            else trv.setpoint_c
+        )
+        urgent = (
+            held is not None
+            and floor < held - self._behaviour.urgent_decrease_threshold_c
+        )
+        if not is_rate_limited or self._last_command_sent_ts <= 0:
+            reason = "normal_update"
+        elif new_command and urgent:
+            reason = "urgent_decrease"
+        elif new_command and strong:
+            reason = "strong"
+        else:
+            remaining = int(self._config.min_command_interval_s - time_since_last)
+            self._last_reason = f"rate_limited({remaining}s)"
+            return
+        # A failed command still counts for the rate limit (one attempt per
+        # interval during an outage).
+        sent = await self._async_send_off_to_tado(trv.entity_id)
+        self._last_command_sent_ts = now
+        self._last_attempt_c = floor
+        self._last_reason = f"{'sent' if sent else 'send_failed'}(off_{reason})"
+
     async def _async_keep_trv_off(self, now: float) -> None:
         """Roomstat is off: keep the TRV off as well.
 
@@ -617,6 +682,7 @@ class RegulationMixin:
             return
         self._trv_fallback_active = trv.is_fallback
         self._last_sent_setpoint = None
+        self._last_sent_off = False
         # Whether the newly used entity holds a timer, and since when, is not
         # known: a maximum it holds is renewed as a timer straight away.
         self._heat_timer_sent_ts = None
@@ -711,6 +777,35 @@ class RegulationMixin:
             self._last_sent_was_max = False
         return sent
 
+    async def _async_send_off_to_tado(self, entity_id: str | None) -> bool:
+        """Shut the valve with hvac mode ``off`` (the regulation's minimum).
+
+        A Manual OFF overlay on a Tado cloud zone (it never ends by itself),
+        HomeKit's inactive state on a HomeKit valve.  Coming back is one
+        ``set_temperature`` with ``hvac_mode: heat``: both integrations
+        switch an off valve to heat and set the temperature in the same
+        call (checked live on the second bedroom, 19 Oct 2026; HA 2026.10.1
+        ``tado/climate.py`` async_set_temperature, ``homekit_controller``
+        thermostat).  ``climate.set_hvac_mode heat`` first would re-use the
+        last temperature Home Assistant sent, 25 °C after a heat-up.
+        Returns whether the TRV took it.
+        """
+        if not entity_id:
+            _LOGGER.warning("No TRV entity – cannot switch it off")
+            return False
+        _LOGGER.debug("Switching %s off", entity_id)
+        sent = await self._async_call_trv(entity_id, "set_hvac_mode", {"hvac_mode": HVACMode.OFF})
+        if sent:
+            # The frost level is the baseline of an off valve (a later heat
+            # command is compared with it; the auto-tuner sees a negative
+            # demand, as with the 5 °C setpoint before).
+            self._last_sent_setpoint = self._config.min_target_c
+            self._last_sent_off = True
+            self._last_sent_was_max = False
+            # An OFF overlay replaces any timer: nothing to renew or shut.
+            self._heat_timer_sent_ts = None
+        return sent
+
     async def _async_send_to_tado(
         self,
         target_c: float,
@@ -756,6 +851,7 @@ class RegulationMixin:
             )
         if sent:
             self._last_sent_setpoint = target_c
+            self._last_sent_off = False
             self._last_sent_was_max = maximum
             if timer_s:
                 # The renewal clock starts when the TRV took the timer.
@@ -806,14 +902,13 @@ class RegulationMixin:
         self._write_state_with_binary_sensor()
 
     async def _async_watchdog_shut(self, now: float) -> None:
-        """Replace a maximum command left in place by the minimum.
+        """Replace a maximum command left in place by the minimum (off).
 
         Only a valve that can be reached (it gives a reading: Home Assistant
         silently skips a service call to an unavailable entity) and that
         still holds the maximum.  One that is off, back on its schedule or at
-        any lower setpoint no longer holds our maximum, and a frost-level
-        command could turn an off valve on (a HomeKit valve that is off
-        accepts only 7-35 °C).
+        any lower setpoint no longer holds our maximum (the regulation, when
+        it runs again, takes it back).
         """
         if (
             self._watchdog_shut_tried
@@ -842,16 +937,25 @@ class RegulationMixin:
                 )
                 return
             self._watchdog_shut_tried = True
-            sent = await self._async_send_to_tado(lo, trv.entity_id)
+            sent = await self._async_send_off_to_tado(trv.entity_id)
             self._last_command_sent_ts = now
-            self._last_attempt_c = lo
+            self._last_attempt_c = self._config.min_target_c
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST
                 _LOGGER.warning(
-                    "%s: watchdog sent %.1f °C to %s", self._config_entry.title,
-                    lo, trv.entity_id,
+                    "%s: watchdog switched %s off", self._config_entry.title,
+                    trv.entity_id,
                 )
+
+
+def _command_text(command_c: float | None, floor_c: float) -> str:
+    """A command for the log: "off" for the frost level, else its setpoint."""
+    if command_c is None:
+        return "command"
+    if is_off_command(command_c, floor_c):
+        return "off"
+    return f"{command_c:.1f} °C"
 
 
 def _held_text(trv: TrvReading) -> str:

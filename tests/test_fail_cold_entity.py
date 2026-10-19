@@ -77,8 +77,13 @@ def _timers(ent):
 
 
 def _temps(ent):
-    return [d["temperature"] for dom, svc, d in ent.hass.service_calls
-            if dom == "climate" and svc == "set_temperature"]
+    """Commands to the TRV in order: each set_temperature's setpoint, and
+    "off" for each switch-off (the regulation's minimum since 2.8.4)."""
+    return [d["temperature"] if svc == "set_temperature" else "off"
+            for dom, svc, d in ent.hass.service_calls
+            if dom == "climate" and (
+                svc == "set_temperature"
+                or (svc == "set_hvac_mode" and d.get("hvac_mode") == "off"))]
 
 
 def _heat_up(ent, clock):
@@ -114,7 +119,9 @@ class TestTimerOverlay:
         assert _temps(ent) == []
         assert ent.extra_state_attributes["heat_timer_s"] == TIMER
 
-    def test_heat_up_end_is_a_manual_5c(self, monkeypatch):
+    def test_heat_up_end_is_off(self, monkeypatch):
+        """The coast is the valve switched off (2.8.4; a Manual 5 °C before),
+        which replaces the timer: nothing to renew."""
         clock = _Clock(monkeypatch)
         ent = _entity()
         _heat_up(ent, clock)
@@ -127,10 +134,9 @@ class TestTimerOverlay:
             if ent._reg_state.mode != "heat":
                 break
         assert ent._reg_state.mode == "coast"
-        assert _temps(ent) == [5.0]
-        set_temperature = [d for dom, svc, d in ent.hass.service_calls
-                           if svc == "set_temperature"][0]
-        assert set_temperature["hvac_mode"] == HVACMode.HEAT
+        assert _temps(ent) == ["off"]
+        off = [d for dom, svc, d in ent.hass.service_calls if svc == "set_hvac_mode"][0]
+        assert off == {"entity_id": TRV, "hvac_mode": HVACMode.OFF}
         assert ent._heat_timer_sent_ts is None
 
     def test_off_by_default(self, monkeypatch):
@@ -272,15 +278,14 @@ class TestTimerOverlay:
 
 class TestBackOnSchedule:
 
-    @pytest.mark.parametrize("schedule, reason", [
-        (5.0, "sent(normal_update)"),      # compared with the 5 °C it holds
-        (None, "sent(no_baseline)"),       # nothing to compare with
-    ], ids=["5C", "Off"])
-    def test_expired_timer_is_sent_again_as_a_timer(self, monkeypatch, schedule, reason):
+    @pytest.mark.parametrize("schedule", [5.0, None], ids=["5C", "Off"])
+    def test_expired_timer_is_sent_again_as_a_timer(self, monkeypatch, schedule):
         """HA was too busy to renew: the timer ran out and the zone went back
         to its schedule (auto at 5 °C, or auto without a setpoint for Off).
         The drift check sends it again (a renewal would say so in the
-        reason)."""
+        reason): a valve on its schedule holds no command of ours, so it is
+        compared with the frost level, whatever its block says."""
+        reason = "sent(normal_update)"
         clock = _Clock(monkeypatch)
         ent = _entity()
         _heat_up(ent, clock)
@@ -313,25 +318,86 @@ class TestBackOnSchedule:
         _cycle(ent)
         assert _temps(ent) == [25.0, 25.0]
 
-    @pytest.mark.parametrize("schedule", [5.0, None], ids=["5C", "Off"])
-    def test_frost_level_command_to_a_shut_schedule_is_not_sent(self, monkeypatch, schedule):
-        """Room above the target: the firm stop asks for 5 °C, which the
-        schedule already does."""
+    @pytest.mark.parametrize("schedule", [5.0, None, 20.0], ids=["5C", "Off", "20C"])
+    def test_a_valve_on_its_schedule_is_switched_off(self, monkeypatch, schedule):
+        """Room above the target: the firm stop is off.  A valve on its Tado
+        schedule ("auto") is not off, whatever its block says: the owner's
+        valves are only ever heating or off (2.8.4; until then a shut
+        schedule block counted as done)."""
         _Clock(monkeypatch)
         ent = _entity()
         _feed(ent, 21.2, 15.0, schedule, scheduled=True)
         _cycle(ent)
         assert ent._reg_state.mode == "stop"
+        assert ent._last_reason.startswith("sent(off_")
+        assert _temps(ent) == ["off"]
+
+    def test_an_off_valve_is_left_off(self, monkeypatch):
+        _Clock(monkeypatch)
+        ent = _entity()
+        _feed(ent, 21.2, 15.0, 5.0, off=True)
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop"
         assert ent._last_reason == "already_at_target"
         assert ent.hass.service_calls == []
 
-    def test_frost_level_command_to_a_heating_schedule_is_sent(self, monkeypatch):
-        """A schedule block at a real temperature heats: shut it."""
+    def test_a_valve_at_5c_is_switched_off(self, monkeypatch):
+        """A Manual 5 °C overlay (what Roomstat sent until 2.8.4) is heat at
+        5 °C, not off: it is switched off."""
         _Clock(monkeypatch)
         ent = _entity()
-        _feed(ent, 21.2, 15.0, 20.0, scheduled=True)
+        _feed(ent, 21.2, 15.0, 5.0)
         _cycle(ent)
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
+
+    def test_an_off_that_does_not_show_is_sent_again_after_the_grace(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        _feed(ent, 21.2, 15.0, 5.0)
+        _cycle(ent)
+        assert _temps(ent) == ["off"]
+        for _ in range(5):                    # the cloud grace is 6 min
+            clock.tick(60)
+            _feed(ent, 21.2, 15.0, 5.0)       # still shows heat at 5
+            _cycle(ent)
+        assert _temps(ent) == ["off"]
+        clock.tick(70)
+        _feed(ent, 21.2, 15.0, 5.0)
+        _cycle(ent)
+        assert _temps(ent) == ["off", "off"]
+
+    def test_heat_from_an_off_valve_is_one_set_temperature(self, monkeypatch):
+        """Off to heat: one set_temperature carrying hvac_mode heat; the
+        Tado and HomeKit integrations switch an off valve to heat and set
+        the temperature in the same call (checked live, 19 Oct 2026).  No
+        set_hvac_mode heat first: it would re-use the last temperature HA
+        sent (25 °C after a heat-up)."""
+        _Clock(monkeypatch)
+        ent = _entity()
+        _feed(ent, 20.3, 15.0, 5.0, off=True)  # comfort 20.5: a hold
+        _cycle(ent)
+        assert ent._reg_state.mode == "hold"
+        calls = [(svc, d) for dom, svc, d in ent.hass.service_calls]
+        assert len(calls) == 1
+        svc, data = calls[0]
+        assert svc == "set_temperature" and data["hvac_mode"] == HVACMode.HEAT
+        assert 5.0 < data["temperature"] < 25.0
+
+    @pytest.mark.parametrize("room, sent", [(18.0, [25.0]), (21.0, [])],
+                             ids=["cold", "warm"])
+    def test_roomstat_off_to_heat_sends_no_mode_change(self, monkeypatch, room, sent):
+        """Roomstat switched back on: the regulation takes the valve out of
+        off itself (heat, or nothing if the room is warm).  No set_hvac_mode
+        heat, which on a Tado zone heats at the last temperature HA sent."""
+        _Clock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))
+        _run(ent.async_set_hvac_mode(HVACMode.OFF))
+        _feed(ent, room, 15.0, 5.0, off=True)
+        ent.hass.service_calls.clear()
+        _run(ent.async_set_hvac_mode(HVACMode.HEAT))
+        assert not [d for dom, svc, d in ent.hass.service_calls if svc == "set_hvac_mode"]
+        assert _temps(ent) == sent
 
 
 # ---------------------------------------------------------------------------
@@ -501,12 +567,12 @@ class TestWatchdog:
         clock.tick(1)
         _watchdog(ent)
         assert ent.extra_state_attributes["regulation_stalled"] is True
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
         assert ent._last_reason == "sent(watchdog)"
         for _ in range(20):
             clock.tick(60)
             _watchdog(ent)
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
         stalls = [r for r in caplog.records if "no regulation cycle" in r.getMessage()]
         assert len(stalls) == 1
 
@@ -534,7 +600,7 @@ class TestWatchdog:
             assert ent._last_reason in ("coordinator_unavailable", "sent(watchdog)")
             _watchdog(ent)
         assert ent._last_reason == "sent(watchdog)"
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
 
     def test_an_unreachable_valve_is_not_reported_as_shut(self, monkeypatch):
         """Home Assistant skips a service call to an unavailable entity
@@ -554,7 +620,7 @@ class TestWatchdog:
         _feed(ent, 18.0, 9.0, 25.0)
         clock.tick(60)
         _watchdog(ent)
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
 
     @pytest.mark.parametrize("held", ["off", "off_schedule", "lower"])
     def test_a_valve_no_longer_at_the_maximum_is_left_alone(self, monkeypatch, held):
@@ -636,10 +702,10 @@ class TestRoomSensorLost:
     sensor-lost warning and the repair report); a maximum is never left in
     place meanwhile, and the watchdog does not report the pause again."""
 
-    def _lose_sensor(self, ent, clock, minutes, *, internal=22.0, setpoint=25.0):
+    def _lose_sensor(self, ent, clock, minutes, *, internal=22.0, setpoint=25.0, off=False):
         for _ in range(minutes):
             clock.tick(60)
-            _feed(ent, None, internal, setpoint)
+            _feed(ent, None, internal, setpoint, off=off)
             _cycle(ent)
             _watchdog(ent)
 
@@ -655,11 +721,11 @@ class TestRoomSensorLost:
         self._lose_sensor(ent, clock, 6)                     # bridged (300 s)
         assert _temps(ent) == []
         self._lose_sensor(ent, clock, 1)                     # past the grace
-        assert _temps(ent) == [5.0]
+        assert _temps(ent) == ["off"]
         assert ent._last_reason.startswith("sent(")
         assert ent._reg_state.mode == "coast"
-        self._lose_sensor(ent, clock, 20, setpoint=5.0)
-        assert _temps(ent) == [5.0]
+        self._lose_sensor(ent, clock, 20, setpoint=5.0, off=True)
+        assert _temps(ent) == ["off"]
         assert ent.extra_state_attributes["regulation_stalled"] is False
 
     def test_an_ordinary_outage_is_not_a_stall(self, monkeypatch, caplog):
@@ -711,11 +777,20 @@ class TestResumeWithALateTrv:
 
     def test_shut_valve_above_target_stays_shut(self, monkeypatch):
         ent = self._late(monkeypatch)
-        _feed(ent, 20.57, 18.6, 5.0)            # comfort 20.5, room 0.07 over
+        _feed(ent, 20.57, 18.6, 5.0, off=True)  # comfort 20.5, room 0.07 over
         _cycle(ent)
         assert ent._reg_state.mode == "stop"
         assert _temps(ent) == []
         assert not ent._resume_pending
+
+    def test_valve_at_5c_above_target_is_switched_off(self, monkeypatch):
+        """A valve still at the Manual 5 °C of an earlier version: stop, and
+        switched off (2.8.4)."""
+        ent = self._late(monkeypatch)
+        _feed(ent, 20.57, 18.6, 5.0)
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop"
+        assert _temps(ent) == ["off"]
 
     def test_shut_valve_below_target_resumes_the_coast(self, monkeypatch):
         ent = self._late(monkeypatch)

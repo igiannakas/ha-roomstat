@@ -68,8 +68,10 @@ class TestOnSchedule:
 
 
 class TestScheduledDrift:
-    """The overlay is gone: a heat command is sent again, a frost-level one
-    is still in effect while the schedule keeps the valve shut."""
+    """The overlay is gone: the valve is back on its schedule ("auto"), which
+    holds no command of ours.  A heat command is sent again, and so is an off
+    (2.8.4: the owner's valves are only ever heating or off; until then a
+    shut schedule block counted as holding the frost-level command)."""
 
     def test_heat_command_lost_to_an_off_schedule(self):
         assert C.trv_setpoint_drifted(25.0, None, 600, 360, 0.3, trv_scheduled=True)
@@ -82,13 +84,29 @@ class TestScheduledDrift:
         moves with the schedule."""
         assert C.trv_setpoint_drifted(18.3, 18.2, 600, 360, 0.3, trv_scheduled=True)
 
-    @pytest.mark.parametrize("schedule", [None, 5.0])
-    def test_frost_command_held_by_a_shut_schedule(self, schedule):
-        assert not C.trv_setpoint_drifted(5.0, schedule, 600, 360, 0.3, trv_scheduled=True)
+    @pytest.mark.parametrize("schedule", [None, 5.0, 20.0])
+    def test_off_command_not_held_by_any_schedule(self, schedule):
+        assert C.trv_setpoint_drifted(5.0, schedule, 600, 360, 0.3, trv_scheduled=True)
 
-    def test_frost_command_not_held_by_a_heating_schedule(self):
-        """A schedule block at a real temperature heats: shut it again."""
-        assert C.trv_setpoint_drifted(5.0, 20.0, 600, 360, 0.3, trv_scheduled=True)
+    def test_off_command_held_only_by_an_off_valve(self):
+        assert not C.trv_setpoint_drifted(5.0, 5.0, 600, 360, 0.3, trv_off=True)
+        assert not C.trv_setpoint_drifted(5.0, None, 600, 360, 0.3, trv_off=True)
+
+    @pytest.mark.parametrize("held", [5.0, 18.0])
+    def test_off_command_not_held_by_a_valve_in_heat(self, held):
+        """A Manual 5 °C is heat at 5, not off; any heat setpoint is drift."""
+        assert C.trv_setpoint_drifted(5.0, held, 600, 360, 0.3)
+
+    def test_off_command_with_nothing_known_is_not_drift(self):
+        assert not C.trv_setpoint_drifted(5.0, None, 600, 360, 0.3)
+
+    def test_heat_command_lost_to_an_off_valve(self):
+        assert C.trv_setpoint_drifted(18.0, 5.0, 600, 360, 0.3, trv_off=True)
+
+    def test_is_off_command(self):
+        assert C.is_off_command(5.0, 5.0) and C.is_off_command(5.05, 5.0)
+        assert C.is_off_command(4.0, 5.0)
+        assert not C.is_off_command(5.1, 5.0)
 
     def test_not_before_the_grace(self):
         assert not C.trv_setpoint_drifted(25.0, None, 300, 360, 0.3, trv_scheduled=True)

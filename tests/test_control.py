@@ -189,17 +189,24 @@ class _Clock:
 
 
 def _feed(ent, room, internal, setpoint=None):
+    """The coordinator's data; ``setpoint="off"``: the valve is off (a Tado
+    cloud zone then reports 5 °C as its target)."""
+    off = setpoint == "off"
     ent.coordinator.data = {
         "room_temp": room, "room_temp_ts": None,
-        "tado_internal_temp": internal, "tado_setpoint": setpoint,
-        "tado_min_temp": 5.0, "tado_max_temp": 25.0, "tado_off": False,
+        "tado_internal_temp": internal, "tado_setpoint": 5.0 if off else setpoint,
+        "tado_min_temp": 5.0, "tado_max_temp": 25.0, "tado_off": off,
         "fallback_internal_temp": None, "fallback_setpoint": None,
     }
 
 
 def _sent(ent):
-    return [d.get("temperature") for _, svc, d in ent.hass.service_calls
-            if svc == "set_temperature"]
+    """Commands to the TRV in order: each set_temperature's setpoint, and
+    "off" for each switch-off (the regulation's minimum since 2.8.4)."""
+    return [d.get("temperature") if svc == "set_temperature" else "off"
+            for _, svc, d in ent.hass.service_calls
+            if svc == "set_temperature"
+            or (svc == "set_hvac_mode" and d.get("hvac_mode") == "off")]
 
 
 def _cycle(ent):
@@ -227,13 +234,14 @@ class TestEntity:
             if ent._reg_state.mode != "heat":
                 break
         assert ent._reg_state.mode == "coast"
-        assert _sent(ent) == [25.0, 5.0]             # stopped straight away
+        assert _sent(ent) == [25.0, "off"]           # stopped straight away
         assert room < 20.5
 
     def test_holding_is_fine_adjustments_cut_by_a_firm_stop(self, monkeypatch):
-        """Near the target the valve gets setpoints in between, not 5 or 25.
-        A room warming towards an overshoot gets one firm stop before it
-        reaches the target; once the rise is over, fine adjustments again."""
+        """Near the target the valve gets setpoints in between, not off or
+        25.  A room warming towards an overshoot gets one firm stop (off)
+        before it reaches the target; once the rise is over, fine
+        adjustments again."""
         clock = _Clock(monkeypatch)
         ent = _make_entity()
         _run(_start(ent))
@@ -252,7 +260,7 @@ class TestEntity:
                 break
         assert ent._reg_state.mode == "stop"
         assert room < 20.5                           # ahead of the target
-        assert _sent(ent)[-1] == 5.0
+        assert _sent(ent)[-1] == "off"
         assert all(5.0 < t < 25.0 for t in _sent(ent)[:-1])
         stopped = len(_sent(ent))
         for i in range(60):                          # levels off, then cools
@@ -272,13 +280,13 @@ class TestEntity:
         _run(_start(ent))
         _feed(ent, 20.7, 19.0)
         _cycle(ent)                                  # over: a firm stop
-        assert ent._reg_state.mode == "stop"
+        assert ent._reg_state.mode == "stop" and _sent(ent) == ["off"]
         clock.tick(60)
-        _feed(ent, 19.2, 12.0, setpoint=5.0)         # a 1.5 °C drop in one cycle:
+        _feed(ent, 19.2, 12.0, setpoint="off")       # a 1.5 °C drop in one cycle:
         _cycle(ent)                                  # a draught or a glitch, held once
-        assert ent._reg_state.mode == "stop" and _sent(ent)[-1] == 5.0
+        assert ent._reg_state.mode == "stop" and _sent(ent) == ["off"]
         clock.tick(60)
-        _feed(ent, 19.2, 12.0, setpoint=5.0)         # still there: a real deficit
+        _feed(ent, 19.2, 12.0, setpoint="off")       # still there: a real deficit
         _cycle(ent)
         assert ent._last_reason == "sent(strong)"
         assert _sent(ent)[-1] == 25.0
@@ -320,4 +328,4 @@ class TestEntity:
             _feed(ent, None, 12.0, setpoint=25.0)
             _cycle(ent)
         assert ent._reg_state.mode == "coast"
-        assert _sent(ent)[-1] == 5.0
+        assert _sent(ent)[-1] == "off"

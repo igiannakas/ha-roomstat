@@ -22,6 +22,7 @@ Architecture
   unavailable, and keep commands inside the range it accepts right now
 - ``trv_on_schedule`` – a TRV back on its own (Tado app) schedule holds no
   command of ours
+- ``is_off_command`` – a shut command goes to the TRV as hvac mode off
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
 - ``heat_timer_duration`` / ``heat_timer_refresh_due`` / ``format_time_period``
@@ -654,29 +655,18 @@ def resolve_summer_state(entity_state: str | None, current: bool) -> bool:
     return current
 
 
-def summer_enforcement_needed(
-    trv_state: str | None,
-    trv_setpoint: float | None,
-    target_c: float,
-    tolerance_c: float = 0.1,
-) -> bool:
-    """Return True when the TRV must be commanded back to the summer target.
+def summer_enforcement_needed(trv_state: str | None) -> bool:
+    """Return True when the TRV must be switched off again for the summer lock.
 
-    The TRV must be in ``heat`` mode at ``target_c``, or ``off``: Tado shows
-    its 5 °C frost setpoint as off, and Home Assistant refuses a setpoint
-    below 7 °C for a valve that is off, so off counts as locked.  Nothing is
-    sent while the TRV is missing or unavailable (the command could not be
-    delivered).
+    The summer lock holds the valve in hvac mode ``off`` (2.8.4; a 5 °C
+    setpoint before).  Anything else (heat at any setpoint, or ``auto``: the
+    valve back on its Tado schedule, which the owner does not use) is sent
+    OFF again.  Nothing is sent while the TRV is missing or unavailable (the
+    command could not be delivered).
     """
     if trv_state is None or trv_state in _UNAVAILABLE_STATES:
         return False
-    if trv_state == "off":
-        return False
-    if trv_state != "heat":
-        return True
-    if trv_setpoint is None:
-        return True
-    return abs(trv_setpoint - target_c) >= tolerance_c
+    return trv_state != "off"
 
 
 # ---------------------------------------------------------------------------
@@ -848,6 +838,20 @@ def change_trv(
     return new_data, new_options
 
 
+# A command this close to the frost level counts as "off".
+OFF_TOLERANCE_C = 0.05
+
+
+def is_off_command(target_c: float, floor_c: float) -> bool:
+    """Whether *target_c* asks for the valve to be shut: the frost level
+    (``floor_c``, ``RegulationConfig.min_target_c``) or below.  Since 2.8.4
+    such a command goes to the TRV as hvac mode ``off``, never as a 5 °C
+    setpoint: a 5 °C setpoint opens the valve once its offset-corrected
+    reading falls towards 5 (finding M6: a real 11-15 °C in the owner's
+    rooms), and the owner wants every valve either heating or off."""
+    return target_c <= floor_c + OFF_TOLERANCE_C
+
+
 def trv_setpoint_drifted(
     last_sent_c: float | None,
     trv_setpoint_c: float | None,
@@ -863,25 +867,25 @@ def trv_setpoint_drifted(
 
     Only checked once ``grace_s`` has passed since the command, so the TRV's
     state has had time to report it.  A difference below ``threshold_c`` is
-    not worth a command.  A TRV that is off while the last command asked for
-    heat (above ``floor_c``, the frost level Tado shows as off) was switched
-    off from outside, e.g. in the Tado app.
+    not worth a command.
 
-    A TRV back on its schedule (``trv_scheduled``, see trv_on_schedule)
-    holds no command of ours: a heat command is lost whatever the schedule
-    says, so it is sent again.  A frost-level command is still in effect
-    while the valve is shut by its schedule (an Off block, no setpoint, or a
-    block at the floor); a schedule block that heats does not hold it.  A
-    setpoint that is simply unknown (no reading either) is not drift.
+    An off command (``last_sent_c`` at the frost level, see is_off_command)
+    is held only while the TRV is ``off``: a valve in heat at any setpoint,
+    or back on its schedule (``trv_scheduled``, see trv_on_schedule: a timer
+    ran out, or the overlay was ended from the Tado app), is switched off
+    again.  A heat command is lost when the TRV is off (switched off from
+    outside, e.g. in the Tado app) or on its schedule, whatever the schedule
+    says.  A setpoint that is simply unknown (no reading either) is not
+    drift.
     """
     if last_sent_c is None or since_sent_s < grace_s:
         return False
-    if trv_off:
-        return last_sent_c > floor_c + 0.05
-    if trv_scheduled:
-        if last_sent_c > floor_c + 0.05:
-            return True
-        return trv_setpoint_c is not None and abs(trv_setpoint_c - last_sent_c) >= threshold_c
+    if is_off_command(last_sent_c, floor_c):
+        if trv_off:
+            return False
+        return trv_scheduled or trv_setpoint_c is not None
+    if trv_off or trv_scheduled:
+        return True
     if trv_setpoint_c is None:
         return False
     return abs(trv_setpoint_c - last_sent_c) >= threshold_c
@@ -927,8 +931,9 @@ def heat_timer_duration(
 
     Only the maximum command to a cloud TRV (``tado.set_climate_timer``
     exists only there) becomes a timer, and only with ``heat_timer_s`` > 0.
-    Everything else, the minimum included, stays Manual: shut is the safe
-    state, so it may last forever.
+    Everything else stays Manual, and the minimum is a Manual OFF overlay
+    (``climate.set_hvac_mode off``): shut is the safe state, so it may last
+    forever.
     """
     if heat_timer_s > 0 and cloud and is_maximum(target_c, max_c):
         return heat_timer_s

@@ -33,7 +33,6 @@ from .const import (
     CONF_WINDOW_SENSOR_ID,
     DOMAIN,
     PRESET_FROST_PROTECTION,
-    safe_float,
 )
 from .parameters import FROST_PROTECT_C
 from .regulation import RegulationState
@@ -178,19 +177,20 @@ class SummerMixin:
     # ------------------------------------------------------------------
 
     async def _async_summer_enforce(self, now: float) -> None:
-        """Hold the TRV at the summer target (called by the regulation cycle)."""
+        """Hold the TRV off (called by the regulation cycle).
+
+        Since 2.8.4 the lock is hvac mode ``off``, not a 5 °C setpoint: a
+        valve in heat at any setpoint, or back on its Tado schedule, is
+        switched off again (at most once per rate-limit interval).
+        """
         # The configured TRV, or its fallback while it is unavailable.
         source = self._active_trv().entity_id
         st = self.hass.states.get(source) if source else None
         trv_state = st.state if st is not None else None
-        trv_setpoint = safe_float(st.attributes.get("temperature")) if st is not None else None
 
-        needed = summer_enforcement_needed(trv_state, trv_setpoint, SUMMER_TARGET_C)
+        needed = summer_enforcement_needed(trv_state)
         time_since_last = now - self._last_command_sent_ts
         rate_limited = time_since_last < self._config.min_command_interval_s
-        overlay_refresh_due = (
-            self._overlay_refresh_s > 0 and time_since_last >= self._overlay_refresh_s
-        )
         trv_available = trv_state is not None and trv_state not in ("unavailable", "unknown")
 
         send = False
@@ -199,17 +199,16 @@ class SummerMixin:
         elif needed:
             remaining = int(self._config.min_command_interval_s - time_since_last)
             reason = f"summer_rate_limited({remaining}s)"
-        elif overlay_refresh_due and trv_available and trv_state != "off":
-            send, reason = True, "summer_overlay_refresh"
         elif not trv_available:
             reason = "summer_trv_unavailable"
         else:
+            # Off.  An OFF overlay never ends by itself: nothing to refresh.
             reason = "summer_locked"
 
         if send:
             # A failed command still counts for the rate limit: the next try
             # comes one interval later, not every cycle.
-            sent = await self._async_send_to_tado(SUMMER_TARGET_C, source)
+            sent = await self._async_send_off_to_tado(source)
             self._last_command_sent_ts = now
             self._summer_bypass_rate_limit = False
             self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"

@@ -78,8 +78,12 @@ def _cycle(ent):
 
 
 def _sent(ent):
-    return [d.get("temperature") for dom, svc, d in ent.hass.service_calls
-            if svc == "set_temperature"]
+    """Commands to the TRV in order: each set_temperature's setpoint, and
+    "off" for each switch-off (the regulation's minimum since 2.8.4)."""
+    return [d.get("temperature") if svc == "set_temperature" else "off"
+            for dom, svc, d in ent.hass.service_calls
+            if svc == "set_temperature"
+            or (svc == "set_hvac_mode" and d.get("hvac_mode") == "off")]
 
 
 def _modes(ent):
@@ -315,11 +319,11 @@ class TestRoomSensorLost:
         _feed(ent, room=20.6, internal=19.0)
         _cycle(ent)
         assert ent._reg_state.mode == "stop"
-        held = ent._last_sent_setpoint
+        assert _sent(ent) == ["off"]                 # the stop is off (2.8.4)
         ent.hass.service_calls.clear()
         for _ in range(30):
             clock.tick(60)
-            _feed(ent, room=None, internal=19.0, setpoint=held)
+            _feed(ent, room=None, internal=19.0, off=True)
             _cycle(ent)
         assert ent.hass.service_calls == []
         assert ent._last_reason == "waiting_for_sensors"
@@ -342,7 +346,7 @@ class TestRoomSensorLost:
             clock.tick(60)
             _feed(ent, room=None, internal=19.0, setpoint=25.0)
             _cycle(ent)
-        assert _sent(ent) == [5.0]
+        assert _sent(ent) == ["off"]
         assert ent._reg_state.mode == "coast"
         assert ent._last_reason == "waiting_for_sensors"
 
@@ -366,7 +370,7 @@ class TestRoomSensorLost:
             _feed(ent, room=None, internal=19.0, setpoint=25.0)
             _cycle(ent)
             clock.tick(60)
-        assert _sent(ent) == [5.0]
+        assert _sent(ent) == ["off"]
         assert ent._reg_state.mode == "coast"
         assert ent._last_reason == "waiting_for_sensors"
 

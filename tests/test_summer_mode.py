@@ -83,24 +83,20 @@ class TestSummerEnforcementNeeded:
     n = staticmethod(_ctrl.summer_enforcement_needed)
 
     @pytest.mark.parametrize(
-        "state,setpoint,expected",
+        "state,expected",
         [
-            ("heat", 5.0, False),
-            ("heat", 5.05, False),
-            ("heat", 20.0, True),
-            ("heat", None, True),
-            # Off counts as locked: Tado shows its 5 °C setpoint as off, and
-            # HA refuses a setpoint below 7 °C for a HomeKit valve that is off.
-            ("off", None, False),
-            ("off", 5.0, False),
-            ("auto", 5.0, True),
-            ("unavailable", 20.0, False),
-            ("unknown", 20.0, False),
-            (None, None, False),
+            # The lock is hvac mode off (2.8.4): heat at any setpoint, 5 °C
+            # included, and the Tado schedule ("auto") are switched off.
+            ("heat", True),
+            ("auto", True),
+            ("off", False),
+            ("unavailable", False),
+            ("unknown", False),
+            (None, False),
         ],
     )
-    def test_matrix(self, state, setpoint, expected):
-        assert self.n(state, setpoint, 5.0) is expected
+    def test_matrix(self, state, expected):
+        assert self.n(state) is expected
 
 
 class TestPersistedSummerFlag:
@@ -140,11 +136,16 @@ def _cycle(ent):
 
 
 def _sent_temps(ent):
+    """(temperature, hvac_mode) of each command to the TRV; a switch-off is
+    OFF, (None, off)."""
     return [
         (d.get("temperature"), d.get("hvac_mode"))
         for dom, svc, d in ent.hass.service_calls
-        if dom == "climate" and svc == "set_temperature"
+        if dom == "climate" and svc in ("set_temperature", "set_hvac_mode")
     ]
+
+
+OFF = (None, "off")
 
 
 @e2e
@@ -165,12 +166,11 @@ class TestSummerOn:
         ent._last_command_sent_ts = time.time()  # would normally be rate limited
         _turn_summer(ent, "on")
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == [OFF]
         assert ent._last_reason == "sent(summer_enforce)"
 
     def test_leaves_a_trv_that_is_off_alone(self):
-        """An off valve is already at the summer level; a 5 °C command to it
-        would only be refused (HomeKit valves accept 7-35 °C while off)."""
+        """An off valve is already locked."""
         ent = _summer_entity()
         _run(ent.async_set_hvac_mode(_climate.HVACMode.OFF))
         ent.hass.service_calls.clear()
@@ -294,20 +294,35 @@ class TestSummerEnforcement:
         ent.hass.service_calls.clear()
         return ent
 
-    def test_trv_at_target_sends_nothing(self):
+    def test_trv_off_sends_nothing(self):
         ent = self._locked()
-        ent.hass.set(TRV, "heat", {"temperature": 5.0})
+        ent.hass.set(TRV, "off", {"temperature": 5.0})
         ent._last_command_sent_ts = 0.0
         _cycle(ent)
         assert ent.hass.service_calls == []
         assert ent._last_reason == "summer_locked"
+
+    def test_trv_at_5c_is_switched_off(self):
+        """A Manual 5 °C (the lock until 2.8.4) is heat, not off."""
+        ent = self._locked()
+        ent.hass.set(TRV, "heat", {"temperature": 5.0})
+        ent._last_command_sent_ts = 0.0
+        _cycle(ent)
+        assert _sent_temps(ent) == [OFF]
+
+    def test_trv_on_its_schedule_is_switched_off(self):
+        ent = self._locked()
+        ent.hass.set(TRV, "auto", {"temperature": None})
+        ent._last_command_sent_ts = 0.0
+        _cycle(ent)
+        assert _sent_temps(ent) == [OFF]
 
     def test_trv_dial_change_pushed_back(self):
         ent = self._locked()
         ent.hass.set(TRV, "heat", {"temperature": 22.0})
         ent._last_command_sent_ts = 0.0
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == [OFF]
 
     def test_trv_turned_off_counts_as_locked(self):
         ent = self._locked()
@@ -358,15 +373,18 @@ class TestSummerEnforcement:
         assert ent.hass.service_calls == []
         assert ent._last_reason == "summer_trv_unavailable"
 
-    def test_overlay_refresh_still_resends(self):
+    def test_an_off_lock_needs_no_overlay_refresh(self):
+        """An OFF overlay never ends by itself (overlay refresh is for timer
+        overlays at a setpoint)."""
         ent = _summer_entity(options={"overlay_refresh_s": 600})
         _turn_summer(ent, "on")
         _cycle(ent)
-        ent.hass.set(TRV, "heat", {"temperature": 5.0})
+        ent.hass.set(TRV, "off", {"temperature": 5.0})
         ent.hass.service_calls.clear()
         ent._last_command_sent_ts = time.time() - 700
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == []
+        assert ent._last_reason == "summer_locked"
 
     def test_trv_state_change_triggers_a_cycle(self):
         ent = self._locked()
@@ -385,7 +403,7 @@ class TestSummerEnforcement:
         ent.hass.set(TRV, "heat", {"temperature": 22.0})
         ent._last_command_sent_ts = 0.0
         _cycle(ent)
-        assert _sent_temps(ent) == [(5.0, _climate.HVACMode.HEAT)]
+        assert _sent_temps(ent) == [OFF]
 
 
 @e2e
