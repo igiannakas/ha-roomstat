@@ -198,6 +198,17 @@ class TestModes:
         assert res.mode == "heat" and res.target_for_tado_c == 25.0
         assert st.mode == "heat"
 
+    def test_heat_up_threshold_is_0_8(self):
+        """A 0.8 °C deficit is a heat-up (2.8.2): a hold at +4 above the
+        valve's reading is full power anyway, but a mid-range command is no
+        strong signal for a Tado (19 Oct 2026: 21 min idle) and it would end
+        on the stop rule instead of the Td exit and coast."""
+        assert RegulationConfig().heatup_enter_c == 0.8
+        res, _ = step(make_regulator(), RegulationState(), 19.2)
+        assert res.mode == "heat" and res.target_for_tado_c == 25.0
+        res, _ = step(make_regulator(), RegulationState(), 19.3)
+        assert res.mode == "hold"
+
     def test_boost_heats_with_the_maximum(self):
         res, _ = step(make_regulator(), RegulationState(), 18.0, sp=25.0, trv=20.0)
         assert res.target_for_tado_c == 25.0 and res.is_saturated

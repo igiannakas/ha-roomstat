@@ -107,7 +107,14 @@ Read this before changing `regulation.py` or `parameters.py`.
   the Tado controller acts on `(1 + Kp)·error + I`. Kp = 0 does not mean "no
   proportional action".
 - **Modes** (one controller since 2.2; config names in `RegulationConfig`):
-  - `heat` (maximum): a deficit ≥ `heatup_enter_c` (1 °C). Ends when the
+  - `heat` (maximum): a deficit ≥ `heatup_enter_c` (0.8 °C since 2.8.2,
+    owner's choice on trial; 1.0 before: a 0.8–0.9 deficit then ran as a
+    hold at +4 above the valve's reading — full power, but ended by the
+    stop rule instead of the Td exit and coast, and a mid-range command is
+    no strong signal: the second bedroom's valve stayed idle 21 min on it,
+    19 Oct 2026, while 25 °C commands are answered in 1–3 min; simulated
+    0.7 vs 1.0 at 0.6–0.9 deficits: peaks lower everywhere, commands
+    −5…−12 %, 14–26 min slower in the slow rooms). Ends when the
     coast is predicted to land within `heatup_exit_c` (0.1 °C): error −
     Td × rise ≤ 0.1, Td = the braking time (default 10 min, 0 = no lead).
   - `coast` (minimum): after a heat-up, while the room is below the target

@@ -327,7 +327,19 @@ class RegulationConfig:
     # rate.  Then the minimum while the room still rises (coast).  0.1 stops
     # a little short: the slope estimate lags while the room is still
     # accelerating, and the hold picks up any shortfall.
-    heatup_enter_c: float = 1.0
+    # 0.8 since 2.8.2 (1.0 before; owner's choice, on trial): a morning
+    # deficit of 0.8-0.9 °C ran as a hold whose command sat +4 above the
+    # valve's reading, which is full power anyway, but (a) it ended on the
+    # stop rule, not the heat-up's Td exit and coast, and (b) a mid-range
+    # command is not the strong signal a Tado answers at once: the second
+    # bedroom's valve stayed idle for 21 min on a +4.3 hold (19 Oct 2026)
+    # and 9 min the day before, while every 25 °C command was answered in
+    # 1-3 min.  Simulated (four rooms, deficits 0.6-0.9, 8 and 12 °C
+    # outside, 0.7 vs 1.0): morning peak +0.24 -> +0.14 in the generic
+    # living room, +0.08 -> +0.06 fitted second bedroom, commands -5..-12 %,
+    # hold RMS unchanged, 14-26 min slower to the target in the two slow
+    # rooms (Td exit, then coast).
+    heatup_enter_c: float = 0.8
     heatup_exit_c: float = 0.1
     # Near the target, a firm stop (the minimum) once the room is predicted
     # to be stop_over_c over the target within the braking time Td, but at
