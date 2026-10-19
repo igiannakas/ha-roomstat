@@ -374,6 +374,63 @@ class TestModes:
         assert res.mode == "heat"
 
 
+class TestFastFall:
+    """A reading that fell fast_fall_c since the previous cycle is a draught
+    or a glitch: that cycle keeps the previous reading (19 Oct 2026: 25 °C
+    went out on a window's first minute, 16 s before the window action)."""
+
+    def test_window_fall_from_stop_does_not_heat(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(mode="stop"), 19.94, trv=15.9)
+        res, st = step(reg, st, 18.92, trv=15.9)               # -1.02 in one cycle
+        assert res.room_held and res.mode == "stop"
+        assert res.error_c == pytest.approx(0.06, abs=0.01)   # the previous reading
+        assert res.target_for_tado_c == 5.0
+
+    def test_window_fall_from_hold_does_not_push(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(mode="hold"), 19.95, trv=16.0)
+        before = step(reg, st, 19.95, trv=16.0)[0].target_for_tado_c
+        res, _ = step(reg, st, 18.9, trv=16.0)
+        assert res.room_held and res.mode == "hold"
+        assert res.target_for_tado_c == pytest.approx(before, abs=0.05)
+
+    def test_a_fall_that_goes_on_is_accepted_one_cycle_later(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(mode="stop"), 19.9, trv=15.9)
+        res, st = step(reg, st, 18.9, trv=15.9)
+        assert res.room_held
+        res, st = step(reg, st, 18.3, trv=15.9)               # another -0.6: held at 18.9
+        assert res.room_held and res.mode == "heat"           # 18.9 is 1.1 short already
+        res, st = step(reg, st, 18.1, trv=15.9)               # -0.2: accepted
+        assert not res.room_held and res.error_c == pytest.approx(1.9, abs=0.01)
+
+    def test_a_glitch_is_never_used(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(mode="stop"), 20.05, trv=15.9)
+        res, st = step(reg, st, 19.2, trv=15.9)
+        assert res.room_held and res.mode == "stop"
+        res, st = step(reg, st, 20.05, trv=15.9)
+        assert not res.room_held and res.error_c == pytest.approx(-0.05, abs=0.01)
+
+    def test_small_or_slow_falls_are_accepted(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(mode="stop"), 20.0, trv=15.9)
+        res, st = step(reg, st, 19.6, trv=15.9)               # -0.4
+        assert not res.room_held and res.error_c == pytest.approx(0.4, abs=0.01)
+
+    def test_first_cycle_is_never_held(self):
+        res, _ = step(make_regulator(), RegulationState(), 18.0, trv=15.0)
+        assert not res.room_held and res.mode == "heat"
+
+    def test_state_keeps_the_raw_reading(self):
+        reg = make_regulator()
+        _, st = step(reg, RegulationState(), 20.0)
+        assert st.last_room_c == 20.0
+        _, st = step(reg, st, 19.0)
+        assert st.last_room_c == 19.0
+
+
 class TestResumeMode:
     @pytest.mark.parametrize("held, mode", [
         (25.0, "heat"), (24.96, "heat"), (5.0, "coast"), (18.5, "hold"),

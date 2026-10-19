@@ -184,7 +184,14 @@ Read this before changing `regulation.py` or `parameters.py`.
   rate only while the room rises (slope deadband 0.1 °C/h); only the
   release looks at a fall, and it only hands back to hold. A falling reading
   (window, glitch) must never add heat. No slope (sensor degraded): no
-  prediction. **Never make them two-sided.**
+  prediction. **Never make them two-sided.** A reading that fell
+  `fast_fall_c` (0.5 °C) since the previous cycle is a draught or a glitch:
+  that cycle keeps the previous reading (`RegulationState.last_room_c`,
+  `RegulationResult.room_held`, marked in the debug line), so neither a
+  heat-up nor a hold push starts on it; a fall that goes on is accepted one
+  cycle later, a one-sample glitch never (2.8.3; 19 Oct 2026: 19.94 → 18.92
+  in one minute as a window opened, 25 °C sent 16 s before the window
+  action's 5 °C).
 - **Stock values come from real rooms.** `tests/plant_sim.py`
   `LIVING_ROOM_FIT` / `SECOND_BEDROOM_FIT` were fitted to the morning of
   11 Oct 2026 by replaying the real valve setpoints and fitting room,

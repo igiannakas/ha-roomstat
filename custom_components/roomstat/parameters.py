@@ -305,6 +305,15 @@ class RegulationConfig:
     # does not count as rising or falling.
     slope_deadband_c_per_h: float = 0.1
 
+    # A room reading that fell this much since the previous cycle is a
+    # draught or a glitch, never a heating need: that cycle keeps the
+    # previous reading, so neither a heat-up nor a hold push starts on it.
+    # A fall that goes on is accepted one cycle later (the window action,
+    # when there is a sensor, has usually taken over by then).  19 Oct 2026,
+    # living room: the sensor fell 19.94 -> 18.92 in one minute as a window
+    # opened and 25 °C went out 16 s before the window action's 5 °C.
+    fast_fall_c: float = 0.5
+
     # The controller (regulation.py).  The Tado's own controller opens the
     # valve fully only when its setpoint is well above its own reading
     # (about +5 °C) and stays shut only well below it (about -2 °C); in

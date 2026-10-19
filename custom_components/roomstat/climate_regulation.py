@@ -408,9 +408,10 @@ class RegulationMixin:
             # for custom_components.roomstat; the coordinator's own refresh
             # chatter is on custom_components.roomstat.coordinator).
             _LOGGER.debug(
-                "%s: %s | sp %.1f room %.2f %s | trv %.1f%s | cmd %.1f (%+.1f vs trv)"
+                "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s | cmd %.1f (%+.1f vs trv)"
                 " P %+.2f I %+.2f | %s",
                 self._config_entry.title, result.mode, setpoint, room_temp,
+                " (fell fast: previous reading used)" if result.room_held else "",
                 "no slope" if slope is None else f"{slope * 3600:+.2f} °C/h",
                 tado_internal,
                 "" if trv.heating is None else (" heating" if trv.heating else " idle"),

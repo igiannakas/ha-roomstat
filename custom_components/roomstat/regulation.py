@@ -55,9 +55,11 @@ Strong commands where they matter, fine ones near the target:
 
 The heat-up's end and the stop use the room's rise rate only while it
 rises (one-sided); only the release looks at a fall, and it only hands back
-to the hold.  In two rooms fitted to real data this holds within
-0.03-0.05 °C RMS on average (only full/shut commands: 0.06-0.12;
-parameters.py).
+to the hold.  A reading that fell ``fast_fall_c`` since the previous cycle
+is a draught or a glitch, not a heating need: that cycle keeps the previous
+reading (``RegulationResult.room_held``).  In two rooms fitted to real data
+this holds within 0.03-0.05 °C RMS on average (only full/shut commands:
+0.06-0.12; parameters.py).
 
 Integral
 --------
@@ -100,6 +102,7 @@ class RegulationState:
 
     integral_c: float = 0.0
     mode: str = MODE_HOLD
+    last_room_c: float | None = None   # the previous cycle's raw reading
 
 
 @dataclass
@@ -114,6 +117,7 @@ class RegulationResult:
     is_saturated: bool             # True when output was clamped
     new_state: RegulationState
     mode: str = MODE_HOLD          # heat / coast / hold (PI) / stop
+    room_held: bool = False        # the reading fell fast: the previous one was used
 
 
 def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
@@ -247,11 +251,23 @@ class FeedforwardPiRegulator:
                     mode=MODE_HOLD,
                 )
 
+        # 0b. A reading that fell fast_fall_c or more since the previous
+        # cycle is a draught (a window opening) or a glitch, never a heating
+        # need: this cycle keeps the previous reading, so neither a heat-up
+        # nor a hold push starts on it.  A fall that goes on is accepted one
+        # cycle later; a one-sample glitch never is.
+        last_room = state.last_room_c
+        room_held = (
+            last_room is not None and math.isfinite(last_room)
+            and room_temp_c <= last_room - self.cfg.fast_fall_c
+        )
+        room_used = last_room if room_held else room_temp_c
+
         # 1. Feedforward – compensate for sensor-placement offset
-        feedforward_offset = tado_internal_c - room_temp_c
+        feedforward_offset = tado_internal_c - room_used
 
         # 2. Room error
-        error = setpoint_c - room_temp_c
+        error = setpoint_c - room_used
 
         # 3. The hold command: feedforward + P + I
         p_correction = self.cfg.tuning.kp * error
@@ -298,7 +314,9 @@ class FeedforwardPiRegulator:
             elif not near_target:
                 new_integral *= self.cfg.integral_decay
 
-        new_state = RegulationState(integral_c=new_integral, mode=mode)
+        new_state = RegulationState(
+            integral_c=new_integral, mode=mode, last_room_c=room_temp_c
+        )
 
         return RegulationResult(
             target_for_tado_c=round(final_command, 1),
@@ -309,4 +327,5 @@ class FeedforwardPiRegulator:
             is_saturated=is_saturated,
             new_state=new_state,
             mode=mode,
+            room_held=room_held,
         )

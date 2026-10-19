@@ -274,7 +274,11 @@ class TestEntity:
         _cycle(ent)                                  # over: a firm stop
         assert ent._reg_state.mode == "stop"
         clock.tick(60)
-        _feed(ent, 19.2, 12.0, setpoint=5.0)         # e.g. a window shut
+        _feed(ent, 19.2, 12.0, setpoint=5.0)         # a 1.5 °C drop in one cycle:
+        _cycle(ent)                                  # a draught or a glitch, held once
+        assert ent._reg_state.mode == "stop" and _sent(ent)[-1] == 5.0
+        clock.tick(60)
+        _feed(ent, 19.2, 12.0, setpoint=5.0)         # still there: a real deficit
         _cycle(ent)
         assert ent._last_reason == "sent(strong)"
         assert _sent(ent)[-1] == 25.0
