@@ -55,6 +55,8 @@ the HA modules.
   machines (`window_recovery_wait`: the close delay runs on until the room
   has stopped re-warming by itself), restart persistence helpers,
   `choose_trv` (configured TRV or its fallback), `trv_on_schedule`, the
+  last command's bookkeeping (`pending_command`, `resend_grace_s`,
+  `trv_holds_command`, `CommandRecord`), the
   fail-cold helpers (timer overlays, watchdog test, `OutOfBandMonitor`),
   and the config entry option migration.
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
@@ -270,7 +272,16 @@ Read this before changing `regulation.py` or `parameters.py`.
   A valve that is off while the last command asked for heat (switched off in
   the Tado app) counts as drifted too, and so does a valve back on its
   schedule (see "Failure handling"). An off command is held only while the
-  valve reports `off` (see "Shut is off").
+  valve reports `off` (see "Shut is off"). A valve that keeps not showing a
+  command it took (a state that stopped updating, a zone that overrides it)
+  is asked again less and less often (2.8.6, `resend_grace_s`): the grace
+  doubles per resend in a row, up to `RESEND_BACKOFF_MAX_S` (30 min: at 0,
+  6, 18, 42 min, then every 30 on a cloud TRV; 2.8.5 sent 60 offs in 6 h to
+  a zone stuck on `auto`). The back-off ends only when the valve is seen
+  holding our command (`trv_holds_command`), or on an entity switch; a hold
+  command creeping by 0.1 °C does not end it, and a resend of a command the
+  valve had shown and then left does not add to it. The same pacing holds
+  for the summer lock and Roomstat's own off.
 
 ## Failure handling
 
@@ -291,14 +302,34 @@ is updating.
   when strong or an urgent decrease, and an off that went out gets the drift
   grace to show before it is sent again. After an off the baseline is the
   frost level (`_last_sent_setpoint`; the auto-tuner still sees a negative
-  demand). **A state right after a heat command is not believed**
-  (`heat_in_flight`: the last command asked for heat less than the drift
-  grace ago, 2.8.5): an "off" or "auto" then may be the state from before
-  it, so an off is sent at once rather than taken as done, and the heat
-  command is not re-sent until the grace has passed. 19 Oct 2026, second
-  bedroom: the target went 20 → 22 → 20 within 10 s, 25 °C went out, the
-  cloud state still showed off, 2.8.4 took the off as done and the valve
-  ran at 100 % until switched off by hand. Heat from an off (or scheduled)
+  demand). **A state right after a command is not believed**
+  (`pending_command`, 2.8.5, judged on the last command *tried* since
+  2.8.6): for the drift grace after a heat command an "off" or "auto" may
+  be the state from before it, so an off is sent at once rather than taken
+  as done, and the heat command is not re-sent until the grace has passed;
+  an off the TRV took is likewise given the grace before it is sent again.
+  19 Oct 2026, second bedroom: the target went 20 → 22 → 20 within 10 s,
+  25 °C went out, the cloud state still showed off, 2.8.4 took the off as
+  done and the valve ran at 100 % until switched off by hand. 2.8.5 judged
+  on the last command the TRV *took*, which left the same 25 °C for 5–6 min
+  after a heat call that timed out but landed, after a fallback switch
+  (which forgets the last sent setpoint), and after an entry reload (2.8.6
+  review, all reproduced). So every send path (regulation, keep-off,
+  summer, watchdog) books its attempt with `_note_attempt`: the command,
+  whether its call succeeded, its entity, and what the sending cycle saw.
+  The last heat command is kept apart (`_last_heat_attempt_*`) until the
+  state shows it or an off is *taken*: a failed off does not end it (a
+  second review found the stale "off" then taken as done after all,
+  clearing the maximum so a coordinator outage left the 25 °C on with the
+  watchdog disarmed). A failed heat call counts as pending for the plain
+  grace only (it may have landed), a failed off not at all (retried at the
+  rate limit). A command has been *shown* (`_note_trv_shows`) only when the
+  state reads like it after having read otherwise since it was tried: a
+  state that looked like it all along may be a stale one from before (an
+  "off" from before the heat, a 25 °C from before the off), so it proves
+  nothing; once shown, the state is current, and a later change (app, dial,
+  schedule) is a new event — taken back at the rate limit, not after the
+  grace, and no reason to back off. Heat from an off (or scheduled)
   valve is never "already at target", whatever setpoint it shows (Tado
   reports 5 °C while off), and is
   **one** `climate.set_temperature` with `hvac_mode: heat`: HA's Tado
@@ -325,9 +356,16 @@ is updating.
   the reason becomes `send_failed(…)`. A failed command still counts for the
   rate limit, so an outage costs one attempt per interval. The baseline stays
   at what the TRV last took, so the next cycle sends again.
-- **Off stays off:** a failed OFF keeps Roomstat off (no revert). While off,
-  the cycle sends OFF again if the TRV is not off, at most once per rate-limit
-  interval. OFF → HEAT forwards no mode change to the TRV (2.8.4): the
+- **Off stays off:** a failed OFF keeps Roomstat off (no revert). Switching
+  Roomstat off runs a regulation cycle (2.8.6, `_async_keep_trv_off(user=True)`,
+  under the regulation lock, so a cycle in progress can't overtake the off
+  with a heat command), which switches the TRV off at once unless it is off
+  (and no heat command of ours may be landing): one API call fewer. While
+  off, a failed OFF, or one the valve showed and then left (app, dial), is
+  sent again once per rate-limit interval; one the TRV took but never showed
+  after the drift grace, with the back-off (see "Lost commands"). Summer
+  mode starting sends its off at once the same way. OFF → HEAT forwards no
+  mode change to the TRV (2.8.4): the
   regulation cycle that runs at once takes the valve out of off with one
   `set_temperature` (`hvac_mode: heat`), or leaves it off if the room needs
   no heat (`set_hvac_mode heat` would heat a Tado zone at the last
@@ -344,7 +382,19 @@ is updating.
 - **Pauses and the clock:** the integral covers at most
   `MAX_INTEGRATION_STEP_S` (2 cycles) per cycle (`integration_step`). A last
   command time in the future (clock went back) is reset, so commands are not
-  blocked until the clock catches up.
+  blocked until the clock catches up; its age is unknown, so it no longer
+  counts as on its way either (reset to before the longest back-off).
+- **The last command across a reload (2.8.6):** every preset temperature
+  change reloads the room, so the last command is kept in the restore-state
+  extra data (`command`, `CommandRecord`: attempt, its time, success,
+  entity and whether it was shown, the heat command on its way, the last
+  setpoint the TRV took, the timer's start). It is taken
+  back only when younger than the longest drift grace (360 s) and sent to
+  the configured TRV or the fallback; then the rate limit carries on, the
+  resume mode is decided from a command still on its way (`_held_command`:
+  a 25 °C in flight resumes as heat, an off as coast), and the timer is not
+  renewed needlessly. 2.8.5 forgot it: a reload 10 s after a 25 °C command
+  took the stale "off" as done (2.8.6 review).
 - **Faulty readings:** room and TRV readings outside −30…60 °C are treated as
   missing (`plausible_c`).
 - **Windows (2.8.0):** while the window sensor is on, or the window

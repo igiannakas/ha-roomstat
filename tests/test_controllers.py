@@ -877,6 +877,135 @@ class TestTrvDrift:
         assert not trv_setpoint_drifted(20.0, None, 60, 120, 0.3, trv_off=True)
 
 
+trv_holds_command = _ctrl_mod.trv_holds_command
+resend_grace_s = _ctrl_mod.resend_grace_s
+pending_command = _ctrl_mod.pending_command
+CommandRecord = _ctrl_mod.CommandRecord
+PENDING_HEAT = _ctrl_mod.PENDING_HEAT
+PENDING_OFF = _ctrl_mod.PENDING_OFF
+
+
+class TestTrvHoldsCommand:
+
+    def test_heat_command_held_within_the_threshold(self):
+        assert trv_holds_command(20.0, 20.1, 0.3)
+        assert not trv_holds_command(20.0, 20.5, 0.3)
+
+    def test_heat_command_not_held_off_or_on_schedule(self):
+        assert not trv_holds_command(20.0, 20.0, 0.3, trv_off=True)
+        assert not trv_holds_command(20.0, 20.0, 0.3, trv_scheduled=True)
+
+    def test_off_command_held_only_while_off(self):
+        assert trv_holds_command(5.0, None, 0.3, trv_off=True)
+        assert not trv_holds_command(5.0, 5.0, 0.3)            # heat at 5 °C
+        assert not trv_holds_command(5.0, None, 0.3, trv_scheduled=True)
+
+    def test_nothing_known_is_not_holding(self):
+        assert not trv_holds_command(None, 20.0, 0.3)
+        assert not trv_holds_command(20.0, None, 0.3)
+
+
+class TestResendGrace:
+
+    def test_doubles_up_to_the_cap(self):
+        assert [resend_grace_s(360, n, 1800) for n in range(5)] == [
+            360, 720, 1440, 1800, 1800]
+
+    def test_never_below_the_base(self):
+        assert resend_grace_s(360, 3, 100) == 360
+        assert resend_grace_s(120, -1, 1800) == 120
+
+    def test_a_huge_count_does_not_overflow(self):
+        assert resend_grace_s(120, 10_000, 1800) == 1800
+
+
+class TestPendingCommand:
+
+    def _p(self, attempt, ok, since, *, shown=False, heat_since="same",
+           heat_ok=None, grace=360.0, base=360.0):
+        """The last attempt; for a heat attempt the heat record is the same
+        attempt unless given."""
+        heat = attempt is not None and attempt > 5.05
+        if heat_since == "same":
+            heat_since = since if heat else None
+        return pending_command(
+            attempt_c=attempt, attempt_ok=ok, attempt_shown=shown, since_s=since,
+            heat_since_s=heat_since,
+            heat_ok=ok if heat_ok is None else heat_ok,
+            base_grace_s=base, grace_s=grace, floor_c=5.0,
+        )
+
+    def test_heat_pending_until_the_grace(self):
+        assert self._p(25.0, True, 10) == PENDING_HEAT
+        assert self._p(25.0, True, 359) == PENDING_HEAT
+        assert self._p(25.0, True, 360) is None
+
+    def test_a_failed_heat_command_is_pending_for_the_base_grace_only(self):
+        """It may have landed (a timeout), but it is no reason to back off."""
+        assert self._p(25.0, False, 300, grace=1440) == PENDING_HEAT
+        assert self._p(25.0, False, 400, grace=1440) is None
+        assert self._p(25.0, True, 400, grace=1440) == PENDING_HEAT
+
+    def test_an_off_is_pending_only_when_the_trv_took_it(self):
+        assert self._p(5.0, True, 10) == PENDING_OFF
+        assert self._p(5.0, False, 10) is None     # retried at the rate limit
+        assert self._p(5.0, True, 400) is None
+
+    def test_an_off_the_state_has_shown_is_no_longer_pending(self):
+        """2.8.6 review: the valve showed off, then the app turned it on; an
+        explicit OFF must not wait for the rest of the grace."""
+        assert self._p(5.0, True, 60, shown=True) is None
+
+    def test_a_failed_off_does_not_end_the_heat_before_it(self):
+        """2.8.6 review: 25 °C sent, the off 10 s later failed; the stale
+        "off" state must still not be believed (the watchdog was disarmed)."""
+        assert self._p(5.0, False, 50, heat_since=60.0, heat_ok=True) == PENDING_HEAT
+        # A successful off does end it (the heat record is cleared then, and
+        # the off's own window decides).
+        assert self._p(5.0, True, 400, heat_since=410.0, heat_ok=True) is None
+
+    def test_nothing_tried_or_the_clock_went_back(self):
+        assert self._p(None, True, 10) is None
+        assert self._p(25.0, True, -5) is None
+
+
+class TestCommandRecord:
+
+    def _record(self, **kw):
+        base = dict(entity_id="climate.trv", attempt_c=25.0, attempt_ts=1000.0,
+                    attempt_ok=True, sent_c=25.0, heat_timer_ts=1000.0,
+                    attempt_shown=False, heat_c=25.0, heat_ts=1000.0, heat_ok=True)
+        base.update(kw)
+        return CommandRecord(**base)
+
+    def test_round_trip(self):
+        rec = self._record()
+        assert CommandRecord.from_dict(rec.as_dict()) == rec
+
+    def test_a_half_heat_record_is_dropped(self):
+        data = self._record().as_dict()
+        data["heat_ts"] = None
+        rec = CommandRecord.from_dict(data)
+        assert rec.heat_c is None and rec.heat_ts is None
+
+    @pytest.mark.parametrize("data", [
+        None, {}, {"version": 99, "attempt_ts": 1.0}, {"version": 1},
+        {"version": 1, "attempt_ts": "soon"},
+    ])
+    def test_unusable_data(self, data):
+        assert CommandRecord.from_dict(data) is None
+
+    def test_usable_only_when_recent_and_for_this_room(self):
+        rec = self._record()
+        trvs = ("climate.trv", None)
+        assert rec.usable(1010.0, 360.0, trvs)
+        assert not rec.usable(1360.0, 360.0, trvs)          # too old
+        assert not rec.usable(990.0, 360.0, trvs)           # in the future
+        assert not rec.usable(1010.0, 360.0, ("climate.other",))
+        assert not self._record(attempt_c=None).usable(1010.0, 360.0, trvs)
+        assert not self._record(entity_id=None).usable(1010.0, 360.0, (None,))
+
+
 class TestCommandPacer:
 
     def test_first_command_goes_at_once(self):

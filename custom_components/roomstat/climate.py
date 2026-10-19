@@ -122,7 +122,8 @@ class _AutomationExtraData(ExtraStoredData):
     so learned values survive restarts and config-entry reloads without
     ever being written to the config entry (which would trigger a reload).
     The out-of-band monitor's low since the last setback rides along under
-    ``out_of_band``.
+    ``out_of_band``, and the last TRV command under ``command``
+    (CommandRecord: a reload seconds after a command must not forget it).
     """
 
     def __init__(
@@ -130,10 +131,12 @@ class _AutomationExtraData(ExtraStoredData):
         state: PersistedAutomationState,
         autotune: dict[str, Any] | None = None,
         out_of_band: dict[str, Any] | None = None,
+        command: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
         self._out_of_band = out_of_band
+        self._command = command
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -142,6 +145,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["autotune"] = self._autotune
         if self._out_of_band is not None:
             data["out_of_band"] = self._out_of_band
+        if self._command is not None:
+            data["command"] = self._command
         return data
 
 
@@ -249,9 +254,27 @@ class RoomstatClimate(
         self._last_regulation_ts = 0.0
         self._last_command_sent_ts = 0.0
         self._last_sent_setpoint: float | None = None
-        self._last_attempt_c: float | None = None   # last command tried
-        # The TRV took our last off (hvac mode off, the regulation's minimum).
-        self._last_sent_off: bool = False
+        # The last command tried (the frost level for an off), whether the
+        # TRV took it and which entity it went to: what pending_command judges
+        # (a call that timed out may still land), kept across an entry reload
+        # (CommandRecord).  _last_command_sent_ts is when it was tried.
+        self._last_attempt_c: float | None = None
+        self._last_attempt_ok: bool = False
+        self._last_attempt_entity: str | None = None
+        # The TRV's state has shown the last command (it read otherwise after
+        # the command, then like it): its state is current (_note_trv_shows).
+        self._last_attempt_shown: bool = False
+        self._last_attempt_seen_other: bool = False
+        # The last heat command while it may still be on its way: until the
+        # state shows it or an off is taken (a failed off does not end it).
+        self._last_heat_attempt_c: float | None = None
+        self._last_heat_attempt_ts: float | None = None
+        self._last_heat_attempt_ok: bool = False
+        # Back-off for a TRV that keeps not showing a command it took: how
+        # many times in a row it was sent again (resend_grace_s), and whether
+        # the next attempt is such a resend.
+        self._resend_count: int = 0
+        self._resend_due: bool = False
 
         # Sensor resilience: last-valid values for grace-period bridging
         self._last_valid_room_temp: float | None = None
@@ -290,7 +313,7 @@ class RoomstatClimate(
         # Schedule following (see climate_schedule.py)
         self._schedule_ctrl = ScheduleController()
 
-        # Summer mode: thermostat locked at 5 °C (see climate_summer.py)
+        # Summer mode: thermostat locked, the TRV held off (see climate_summer.py)
         self._summer_active: bool = False
         self._summer_bypass_rate_limit: bool = False
 
@@ -468,20 +491,8 @@ class RoomstatClimate(
         """Run when entity about to be added to HA."""
         await super().async_added_to_hass()
 
-        # Carry on a heat burst (or stop) the TRV is still holding.  What
-        # the TRV holds is the last command it took: a maximum is one the
-        # watchdog shuts if the cycle stops.  After a restart the TRV entity
-        # may not have loaded yet: then this is decided again on the first
-        # regulation cycle that sees it (_resume_pending).
-        held = self._active_trv().setpoint_c
-        self._reg_state.mode = resume_mode(held, self._config)
-        self._resume_pending = held is None
-        self._last_sent_was_max = held is not None and is_maximum(
-            held, self._config.max_target_c
-        )
-        self._last_cycle_completed_ts = time.time()
-
         # Restore previous state
+        now = time.time()
         last_state = await self.async_get_last_state()
         # Automation snapshot (window / presence / boost).  None on the first
         # start after upgrading from a version that did not persist it.
@@ -494,6 +505,24 @@ class RoomstatClimate(
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
                 self._band_monitor.restore(extra_dict.get("out_of_band"))
+                # The last command, if it was only seconds ago (an entry
+                # reload): its rate limit, and that it may not show in the
+                # TRV's state yet.
+                self._restore_command(extra_dict.get("command"), now)
+
+        # Carry on a heat burst (or stop) the TRV is still holding.  What
+        # the TRV holds is the last command it took (or one still on its
+        # way into its state): a maximum is one the watchdog shuts if the
+        # cycle stops.  After a restart the TRV entity may not have loaded
+        # yet: then this is decided again on the first regulation cycle that
+        # sees it (_resume_pending).
+        held = self._held_command(now, self._active_trv())
+        self._reg_state.mode = resume_mode(held, self._config)
+        self._resume_pending = held is None
+        self._last_sent_was_max = held is not None and is_maximum(
+            held, self._config.max_target_c
+        )
+        self._last_cycle_completed_ts = now
 
         if last_state:
             if last_state.state in (HVACMode.HEAT, HVACMode.OFF):
@@ -566,7 +595,7 @@ class RoomstatClimate(
         )
 
         # State change listener on the source TRV and its fallback (summer
-        # mode pushes a dial change back to 5 °C straight away)
+        # mode switches a valve turned on from the dial or app off again)
         trv_entities = [
             eid
             for eid in (
@@ -740,6 +769,7 @@ class RoomstatClimate(
             self._automation_snapshot(),
             self._autotuner.as_dict(),
             self._band_monitor.as_dict(),
+            self._command_record().as_dict(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -810,8 +840,9 @@ class RoomstatClimate(
     def _async_tado_state_changed(self, event) -> None:
         """React to a change on the source TRV.
 
-        Only summer mode cares: a dial change is pushed back to 5 °C straight
-        away (the regulation cycle honours the command rate limit).  Outside
+        Only summer mode cares: a valve turned on from the dial or the Tado
+        app is switched off again (the regulation cycle paces it like any
+        off, see _async_summer_enforce).  Outside
         summer mode a dial change is never adopted as a new target; the
         proxy's next command overwrites it.
         """
@@ -863,12 +894,11 @@ class RoomstatClimate(
 
         # Forward HVAC mode to the source TRV entity
         if hvac_mode == HVACMode.OFF:
-            # Off stays off even when the TRV can't be reached right now: the
-            # regulation cycle sends it again until the TRV is off.
-            sent = await self._async_send_hvac_mode_to_tado(HVACMode.OFF)
-            self._last_command_sent_ts = time.time()
-            self._last_reason = "sent(hvac_off)" if sent else "send_failed(hvac_off)"
-            self.async_write_ha_state()
+            # The regulation cycle switches the TRV off (at once, under the
+            # regulation lock, so a cycle in progress can't overtake it with
+            # a heat command), and keeps it off: off stays off even when the
+            # TRV can't be reached right now.
+            await self._async_regulation_cycle(trigger="hvac_mode_change")
         elif hvac_mode == HVACMode.HEAT and previous_mode == HVACMode.OFF:
             # Returning from OFF → reset timestamp so the first HEAT cycle uses
             # dt=0 and avoids an integral spike from the long OFF period.

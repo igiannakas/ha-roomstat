@@ -3,13 +3,13 @@
 Summer mode is driven by an optional on/off helper (usually an
 ``input_boolean`` shared by every thermostat).  While it is on:
 
-- the TRV is held at a fixed 5 °C in heat mode, or off (no regulation),
+- the TRV is held off (hvac mode off since 2.8.4; no regulation),
 - window and presence automations are ignored,
 - boost is cancelled,
 - every change through Home Assistant (preset, temperature, HVAC mode) is
   refused with an error and the card is snapped back to the locked state,
-- a change on the TRV itself (dial / Tado app) is pushed back to 5 °C on the
-  next regulation cycle, honouring the command rate limit.
+- a valve turned on from its dial or the Tado app is switched off again on
+  the next regulation cycle, paced like any off (_async_summer_enforce).
 
 When the helper turns off, the thermostat returns to the schedule preset (or
 COMFORT without a schedule) and the window /
@@ -24,7 +24,13 @@ from homeassistant.components.climate import HVACMode
 from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 
-from .climate_controllers import resolve_summer_state, summer_enforcement_needed
+from .climate_controllers import (
+    PENDING_HEAT,
+    PENDING_OFF,
+    is_off_command,
+    resolve_summer_state,
+    summer_enforcement_needed,
+)
 from .const import (
     CONF_PRESENCE_AWAY_DELAY_S,
     CONF_PRESENCE_SENSOR_ID,
@@ -163,7 +169,7 @@ class SummerMixin:
             )
         if active:
             # No rate-limit bypass: after a restart/reload the TRV is usually
-            # already at 5 °C; the regular enforcement sends only if needed.
+            # already off; the regular enforcement sends only if needed.
             self._enter_summer_mode(bypass_rate_limit=False)
         elif persisted_summer:
             # Switched off while HA was down (or the helper was removed from
@@ -181,35 +187,64 @@ class SummerMixin:
 
         Since 2.8.4 the lock is hvac mode ``off``, not a 5 °C setpoint: a
         valve in heat at any setpoint, or back on its Tado schedule, is
-        switched off again (at most once per rate-limit interval).
+        switched off again.  The same pacing as Roomstat's own off
+        (_async_keep_trv_off): at once when summer mode starts or a heat
+        command of ours may still be landing; an off that failed, or one the
+        valve showed and then left (dial, Tado app), once per rate-limit
+        interval; one the TRV took but never showed after the drift grace,
+        less and less often while it keeps not showing (2.8.6 review: 20
+        offs an hour to a zone that never showed off).
         """
         # The configured TRV, or its fallback while it is unavailable.
-        source = self._active_trv().entity_id
+        trv = self._active_trv()
+        source = trv.entity_id
         st = self.hass.states.get(source) if source else None
         trv_state = st.state if st is not None else None
-
-        needed = summer_enforcement_needed(trv_state)
-        time_since_last = now - self._last_command_sent_ts
-        rate_limited = time_since_last < self._config.min_command_interval_s
         trv_available = trv_state is not None and trv_state not in ("unavailable", "unknown")
 
+        floor = self._config.min_target_c
+        time_since_last = now - self._last_command_sent_ts
+        self._note_trv_shows(trv)
+        pending = self._pending(now, trv)
+        # An "off" shown right after a heat command of ours may predate it.
+        needed = summer_enforcement_needed(trv_state) or (
+            trv_available and pending == PENDING_HEAT
+        )
+
         send = False
-        if needed and (self._summer_bypass_rate_limit or not rate_limited):
+        if not trv_available:
+            reason = "summer_trv_unavailable"
+        elif not needed:
+            # Off.  An OFF overlay never ends by itself: nothing to refresh.
+            self._note_trv_holds_off()
+            reason = "summer_locked"
+        elif self._summer_bypass_rate_limit:
+            # Summer mode just started: at once, whatever is on its way.
             send, reason = True, "summer_enforce"
-        elif needed:
+        elif pending == PENDING_OFF:
+            # Our off went out; the TRV's state has not shown it yet.
+            remaining = int(self._resend_grace_s(trv) - time_since_last)
+            reason = f"summer_rate_limited({remaining}s)"
+        elif (
+            pending == PENDING_HEAT
+            or self._last_attempt_c is None
+            or not is_off_command(self._last_attempt_c, floor)
+        ):
+            send, reason = True, "summer_enforce"
+        elif time_since_last >= self._config.min_command_interval_s:
+            send, reason = True, "summer_enforce"
+            # The TRV took the last off but never showed it: back off (one
+            # shown and then left, a dial turned, is a new event).
+            self._resend_due = self._last_attempt_ok and not self._last_attempt_shown
+        else:
             remaining = int(self._config.min_command_interval_s - time_since_last)
             reason = f"summer_rate_limited({remaining}s)"
-        elif not trv_available:
-            reason = "summer_trv_unavailable"
-        else:
-            # Off.  An OFF overlay never ends by itself: nothing to refresh.
-            reason = "summer_locked"
 
         if send:
             # A failed command still counts for the rate limit: the next try
             # comes one interval later, not every cycle.
             sent = await self._async_send_off_to_tado(source)
-            self._last_command_sent_ts = now
+            self._note_attempt(now, floor, trv, sent)
             self._summer_bypass_rate_limit = False
             self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
         else:

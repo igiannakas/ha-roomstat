@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.8.5-blue)
+![Version](https://img.shields.io/badge/version-2.8.6-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -40,7 +40,8 @@ changes.
 - **Gentle on the bridge.** Commands from different rooms go out at least
   5 seconds apart. Roomstat checks every minute that each valve still holds
   its last command, and sends it again only if it doesn't, so you can set
-  **Overlay refresh interval** to 0.
+  **Overlay refresh interval** to 0. A valve that keeps not showing a command
+  is asked less and less often, down to once every 30 minutes.
 - **Handles failures.** A valve that is off isn't sent temperatures it would
   refuse. A failed command is tried again a few minutes later and logged
   once, not every time; the thermostat's `last_command_error` attribute shows

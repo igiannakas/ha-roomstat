@@ -25,6 +25,10 @@ Architecture
 - ``is_off_command`` – a shut command goes to the TRV as hvac mode off
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
+- ``pending_command`` / ``resend_grace_s`` / ``trv_holds_command`` /
+  ``CommandRecord`` – a command still on its way into the TRV's state (judged
+  on the last one tried), a back-off for a TRV that keeps not showing one,
+  and the last command kept across an entry reload
 - ``heat_timer_duration`` / ``heat_timer_refresh_due`` / ``format_time_period``
   – maximum commands to a cloud TRV as Tado timer overlays (fail cold)
 - ``cycle_stalled`` – the regulation watchdog's test
@@ -45,7 +49,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -889,6 +893,170 @@ def trv_setpoint_drifted(
     if trv_setpoint_c is None:
         return False
     return abs(trv_setpoint_c - last_sent_c) >= threshold_c
+
+
+def trv_holds_command(
+    last_sent_c: float | None,
+    trv_setpoint_c: float | None,
+    threshold_c: float,
+    *,
+    trv_off: bool = False,
+    floor_c: float = 5.0,
+    trv_scheduled: bool = False,
+) -> bool:
+    """True when the TRV's state shows the last command it took: off for an
+    off, that setpoint (within ``threshold_c``) in heat for a heat command.
+    Nothing known (no command, no setpoint) is not holding."""
+    if last_sent_c is None:
+        return False
+    if is_off_command(last_sent_c, floor_c):
+        return trv_off
+    if trv_off or trv_scheduled or trv_setpoint_c is None:
+        return False
+    return abs(trv_setpoint_c - last_sent_c) < threshold_c
+
+
+def resend_grace_s(base_s: float, resends: int, cap_s: float) -> float:
+    """How long a command the TRV took is given to show in its state before
+    it is sent again: ``base_s`` (the drift grace), doubled for each time in
+    a row it has already been sent again without showing, up to ``cap_s``
+    (parameters.RESEND_BACKOFF_MAX_S).  Never less than ``base_s``."""
+    if resends <= 0:
+        return base_s
+    return max(base_s, min(cap_s, base_s * 2.0 ** min(resends, 16)))
+
+
+# What pending_command returns: a heat command of ours, or an off of ours,
+# that the TRV's state may not show yet.
+PENDING_HEAT = "heat"
+PENDING_OFF = "off"
+
+
+def pending_command(
+    *,
+    attempt_c: float | None,
+    attempt_ok: bool,
+    attempt_shown: bool,
+    since_s: float,
+    heat_since_s: float | None,
+    heat_ok: bool,
+    base_grace_s: float,
+    grace_s: float,
+    floor_c: float,
+) -> str | None:
+    """Whether a command of ours may still be on its way into the TRV's state.
+
+    A cloud zone's state follows a command by up to a minute or more, so an
+    ``off`` (or ``auto``) shown right after a heat command may be the state
+    from before it, and a heat setpoint shown right after an off likewise.
+    Judged on the commands *tried*, not the last one confirmed: a call that
+    timed out may still have landed (2.8.6 review: a heat command that timed
+    out, then an off taken as done while the zone ran at 25 °C).
+
+    * ``PENDING_OFF``: the last command was an off the TRV took, less than
+      ``grace_s`` ago (``since_s``), and its state has not shown it yet
+      (``attempt_shown``): it is given that long before it is sent again.
+      A successful off ends any heat command before it.
+    * ``PENDING_HEAT``: the last heat command (``heat_since_s`` ago; None
+      when there is none on its way: none sent, the state showed it, or a
+      successful off followed) is less than ``grace_s`` old, or
+      ``base_grace_s`` if its call failed (it may have landed, but it is
+      retried once the rate limit allows).  A failed off after it does not
+      end it: the 25 °C may be running.  An "off" state is not believed.
+    * None: the TRV's state is what it holds.
+
+    ``grace_s`` is the drift grace after any back-off (resend_grace_s).
+    """
+    if attempt_c is not None and attempt_ok and is_off_command(attempt_c, floor_c):
+        if not attempt_shown and 0.0 <= since_s < grace_s:
+            return PENDING_OFF
+        return None
+    if heat_since_s is not None and heat_since_s >= 0.0:
+        window = grace_s if heat_ok else base_grace_s
+        if heat_since_s < window:
+            return PENDING_HEAT
+    return None
+
+
+@dataclass(frozen=True)
+class CommandRecord:
+    """The last TRV commands, kept across an entry reload or a quick restart.
+
+    Every preset temperature change reloads the entry: without this a
+    reload seconds after a heat command forgot it, took the valve's stale
+    "off" as the state, and a 25 °C command that landed after the reload ran
+    until the drift grace was over (2.8.6 review).  Only a record younger
+    than the longest drift grace is used: an older one says nothing the
+    TRV's state does not.  See pending_command for the fields' meaning.
+    """
+
+    entity_id: str | None
+    attempt_c: float | None          # last command tried (frost level = off)
+    attempt_ts: float                # when (wall clock; 0 = never)
+    attempt_ok: bool                 # the TRV took it
+    sent_c: float | None             # last command the TRV took
+    heat_timer_ts: float | None = None   # when it took our timer overlay
+    attempt_shown: bool = False      # its state has shown the last command
+    attempt_seen_other: bool = False  # it read otherwise since it was tried
+    heat_c: float | None = None      # a heat command still on its way
+    heat_ts: float | None = None
+    heat_ok: bool = False
+
+    VERSION = 1
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-safe dict."""
+        return {
+            "version": self.VERSION,
+            "entity_id": self.entity_id,
+            "attempt_c": self.attempt_c,
+            "attempt_ts": self.attempt_ts,
+            "attempt_ok": self.attempt_ok,
+            "attempt_shown": self.attempt_shown,
+            "attempt_seen_other": self.attempt_seen_other,
+            "sent_c": self.sent_c,
+            "heat_timer_ts": self.heat_timer_ts,
+            "heat_c": self.heat_c,
+            "heat_ts": self.heat_ts,
+            "heat_ok": self.heat_ok,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> CommandRecord | None:
+        """Parse a stored dict; None when it is missing or unusable."""
+        if not isinstance(data, Mapping) or data.get("version") != cls.VERSION:
+            return None
+        attempt_ts = _as_opt_float(data.get("attempt_ts"))
+        if attempt_ts is None:
+            return None
+        heat_c = _as_opt_float(data.get("heat_c"))
+        heat_ts = _as_opt_float(data.get("heat_ts"))
+        if heat_c is None or heat_ts is None:
+            heat_c = heat_ts = None
+        return cls(
+            entity_id=_as_opt_str(data.get("entity_id")),
+            attempt_c=_as_opt_float(data.get("attempt_c")),
+            attempt_ts=attempt_ts,
+            attempt_ok=data.get("attempt_ok") is True,
+            sent_c=_as_opt_float(data.get("sent_c")),
+            heat_timer_ts=_as_opt_float(data.get("heat_timer_ts")),
+            attempt_shown=data.get("attempt_shown") is True,
+            attempt_seen_other=data.get("attempt_seen_other") is True,
+            heat_c=heat_c,
+            heat_ts=heat_ts,
+            heat_ok=data.get("heat_ok") is True,
+        )
+
+    def usable(self, now: float, max_age_s: float, entity_ids: Iterable[str | None]) -> bool:
+        """Recent enough to matter (sent less than ``max_age_s`` ago, not in
+        the future), and to one of the entities the room uses now (a TRV
+        changed in the options gets no command of the old one)."""
+        return (
+            self.attempt_c is not None
+            and self.entity_id is not None
+            and self.entity_id in set(entity_ids)
+            and 0.0 <= now - self.attempt_ts < max_age_s
+        )
 
 
 class CommandPacer:

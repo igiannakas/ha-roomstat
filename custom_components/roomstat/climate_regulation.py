@@ -12,7 +12,10 @@ from homeassistant.exceptions import HomeAssistantError
 from .autotune import AutotuneSample
 from .climate_controllers import (
     BAND_WARM,
+    PENDING_HEAT,
+    PENDING_OFF,
     CommandPacer,
+    CommandRecord,
     TrvReading,
     command_limits,
     cycle_stalled,
@@ -22,6 +25,9 @@ from .climate_controllers import (
     integration_step,
     is_maximum,
     is_off_command,
+    pending_command,
+    resend_grace_s,
+    trv_holds_command,
     trv_setpoint_drifted,
 )
 from .const import (
@@ -33,6 +39,7 @@ from .const import (
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
     MAX_INTEGRATION_STEP_S,
+    RESEND_BACKOFF_MAX_S,
     TRV_COMMAND_SPACING_S,
     TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
@@ -224,25 +231,31 @@ class RegulationMixin:
         now = time.time()
         # The wall clock went back (NTP correction, restored VM snapshot): a
         # command "sent in the future" would block every command until the
-        # clock caught up again.
+        # clock caught up again.  Its age is unknown: it no longer counts for
+        # the rate limit, nor as on its way into the TRV's state.
         if self._last_command_sent_ts > now:
-            self._last_command_sent_ts = now - self._config.min_command_interval_s
+            self._last_command_sent_ts = now - max(
+                self._config.min_command_interval_s, RESEND_BACKOFF_MAX_S
+            )
+        if self._last_heat_attempt_ts is not None and self._last_heat_attempt_ts > now:
+            self._clear_heat_attempt()
         # Likewise a timer "sent in the future" would not be renewed before it
         # runs out: its start counts as unknown, so it is renewed now.
         if self._heat_timer_sent_ts is not None and self._heat_timer_sent_ts > now:
             self._heat_timer_sent_ts = None
 
-        # Summer mode: no regulation, hold the TRV at a fixed 5 °C.  The lock
+        # Summer mode: no regulation, hold the TRV off.  The lock
         # is this cycle's decision (the watchdog counts it as completed).
         if self._summer_active:
             self._note_cycle_completed(now)
             await self._async_summer_enforce(now)
             return
 
-        # Off: no regulation, but make sure the TRV is off too.
+        # Off: no regulation, but make sure the TRV is off too.  The cycle
+        # run by switching Roomstat off sends the off at once.
         if self._hvac_mode == HVACMode.OFF:
             self._note_cycle_completed(now)
-            await self._async_keep_trv_off(now)
+            await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
             return
 
         # Guard: skip when coordinator data is stale (update method raised an exception).
@@ -264,13 +277,16 @@ class RegulationMixin:
         # what the valve holds, before anything is sent (18 Oct 2026: the
         # study resumed in hold 0.07 above the target and pushed its valve
         # into the grey zone; a shut valve must resume as coast → stop).
-        if self._resume_pending and trv.setpoint_c is not None:
+        # (A command of ours still on its way into the TRV's state counts as
+        # what it holds: see _held_command.)
+        held = self._held_command(now, trv) if self._resume_pending else None
+        if held is not None:
             self._resume_pending = False
-            self._reg_state.mode = resume_mode(trv.setpoint_c, self._config)
-            self._last_sent_was_max = is_maximum(trv.setpoint_c, self._config.max_target_c)
+            self._reg_state.mode = resume_mode(held, self._config)
+            self._last_sent_was_max = is_maximum(held, self._config.max_target_c)
             _LOGGER.debug(
-                "%s: resuming as %s from the valve's setpoint %.1f",
-                self._config_entry.title, self._reg_state.mode, trv.setpoint_c,
+                "%s: resuming as %s from %.1f held by the valve",
+                self._config_entry.title, self._reg_state.mode, held,
             )
 
         # Sensor resilience: bridge short gaps with last-valid value
@@ -426,6 +442,180 @@ class RegulationMixin:
         self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()
 
+    # ------------------------------------------------------------------
+    # Command bookkeeping
+    # ------------------------------------------------------------------
+
+    def _drift_grace_s(self, trv: TrvReading) -> float:
+        """How long the TRV's state is given to show a command (longer for a
+        cloud or fallback entity, read by polling)."""
+        return FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
+
+    def _resend_grace_s(self, trv: TrvReading) -> float:
+        """The drift grace after the back-off for a TRV that keeps not showing
+        a command it took (resend_grace_s)."""
+        return resend_grace_s(
+            self._drift_grace_s(trv), self._resend_count, RESEND_BACKOFF_MAX_S
+        )
+
+    def _pending(self, now: float, trv: TrvReading) -> str | None:
+        """A command of ours may not show in the TRV's state yet:
+        PENDING_HEAT, PENDING_OFF or None (see pending_command)."""
+        heat_ts = self._last_heat_attempt_ts
+        return pending_command(
+            attempt_c=self._last_attempt_c,
+            attempt_ok=self._last_attempt_ok,
+            attempt_shown=self._last_attempt_shown,
+            since_s=now - self._last_command_sent_ts,
+            heat_since_s=None if heat_ts is None else now - heat_ts,
+            heat_ok=self._last_heat_attempt_ok,
+            base_grace_s=self._drift_grace_s(trv),
+            grace_s=self._resend_grace_s(trv),
+            floor_c=self._config.min_target_c,
+        )
+
+    def _held_command(self, now: float, trv: TrvReading) -> float | None:
+        """What the TRV holds as far as we know: a command of ours still on
+        its way into its state, else the setpoint it shows (None: unknown)."""
+        pending = self._pending(now, trv)
+        if pending == PENDING_HEAT:
+            return self._last_heat_attempt_c
+        if pending == PENDING_OFF:
+            return self._config.min_target_c
+        return trv.setpoint_c
+
+    def _note_attempt(
+        self, now: float, command_c: float, trv: TrvReading, ok: bool
+    ) -> None:
+        """Book a command just tried, sent or not.
+
+        It counts for the rate limit (a failed command too: an outage costs
+        one attempt per interval), and it is what pending_command judges: a
+        heat command is kept as on its way until the state shows it or an
+        off is taken (a failed off does not end it: the heat may be running).
+        A resend because the TRV did not show a command it took
+        (``_resend_due``, set by the drift checks) backs the next check off.
+        The back-off ends only when the TRV is seen holding our command
+        (trv_holds_command, or off for an off), or on a switch of entity: a
+        hold command that creeps by 0.1 °C is no reason to think a state that
+        stopped showing commands works again.
+        """
+        if self._resend_due:
+            self._resend_count += 1
+        self._resend_due = False
+        self._last_command_sent_ts = now
+        self._last_attempt_c = command_c
+        self._last_attempt_ok = ok
+        self._last_attempt_shown = False
+        self._last_attempt_entity = trv.entity_id
+        # What the sending cycle saw: a state that already looked like the
+        # command can't tell whether it arrived (it may be a stale one).
+        self._last_attempt_seen_other = not self._trv_holds(command_c, trv)
+        if not is_off_command(command_c, self._config.min_target_c):
+            self._last_heat_attempt_c = command_c
+            self._last_heat_attempt_ts = now
+            self._last_heat_attempt_ok = ok
+        elif ok:
+            self._clear_heat_attempt()
+
+    def _clear_heat_attempt(self) -> None:
+        """No heat command of ours is on its way any more."""
+        self._last_heat_attempt_c = None
+        self._last_heat_attempt_ts = None
+        self._last_heat_attempt_ok = False
+
+    def _trv_holds(self, command_c: float, trv: TrvReading) -> bool:
+        """The TRV's state looks like *command_c* (see trv_holds_command)."""
+        return trv_holds_command(
+            command_c,
+            trv.setpoint_c,
+            self._config.min_change_threshold_c,
+            trv_off=trv.off,
+            floor_c=self._config.min_target_c,
+            trv_scheduled=trv.scheduled,
+        )
+
+    def _note_trv_shows(self, trv: TrvReading) -> None:
+        """Watch the TRV's state come round to our last command.
+
+        It has *shown* the command once it reads like it after having read
+        otherwise since the command was tried: a state that looked like it
+        all along may be a stale one from before (a cloud zone's state lags
+        by a minute or more: an "off" from before a heat command, or a 25 °C
+        from before an off), so it proves nothing.  Once shown, the state is
+        current: nothing of ours is on its way any more (pending_command).
+        Unknown readings are skipped.
+        """
+        if self._last_attempt_c is None or self._last_attempt_shown or not trv.usable:
+            return
+        if not self._trv_holds(self._last_attempt_c, trv):
+            self._last_attempt_seen_other = True
+            return
+        if self._last_attempt_seen_other:
+            self._last_attempt_shown = True
+            if not is_off_command(self._last_attempt_c, self._config.min_target_c):
+                self._clear_heat_attempt()
+
+    def _note_trv_holds_off(self) -> None:
+        """The TRV is off, as an off command wants: the frost level is its
+        baseline, and it holds no maximum and no timer of ours.  (Never
+        while a heat command of ours may be landing: see pending_command.)"""
+        self._last_sent_setpoint = self._config.min_target_c
+        self._last_sent_was_max = False
+        self._heat_timer_sent_ts = None
+        self._resend_count = 0
+        self._resend_due = False
+
+    def _command_record(self) -> CommandRecord:
+        """The last commands, for the restore-state store (CommandRecord)."""
+        return CommandRecord(
+            entity_id=self._last_attempt_entity,
+            attempt_c=self._last_attempt_c,
+            attempt_ts=self._last_command_sent_ts,
+            attempt_ok=self._last_attempt_ok,
+            attempt_shown=self._last_attempt_shown,
+            attempt_seen_other=self._last_attempt_seen_other,
+            sent_c=self._last_sent_setpoint,
+            heat_timer_ts=self._heat_timer_sent_ts,
+            heat_c=self._last_heat_attempt_c,
+            heat_ts=self._last_heat_attempt_ts,
+            heat_ok=self._last_heat_attempt_ok,
+        )
+
+    def _restore_command(self, data, now: float) -> bool:
+        """Take back the last commands after an entry reload or a quick
+        restart, when recent and sent to an entity this room still uses.
+        Returns whether they were taken."""
+        record = CommandRecord.from_dict(data)
+        entities = (
+            self._config_entry.data.get("source_entity_id"),
+            self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID),
+        )
+        if record is None or not record.usable(now, FALLBACK_DRIFT_GRACE_S, entities):
+            return False
+        self._last_attempt_entity = record.entity_id
+        self._last_attempt_c = record.attempt_c
+        self._last_command_sent_ts = record.attempt_ts
+        self._last_attempt_ok = record.attempt_ok
+        self._last_attempt_shown = record.attempt_shown
+        self._last_attempt_seen_other = record.attempt_seen_other
+        self._last_sent_setpoint = record.sent_c
+        if record.heat_timer_ts is not None and record.heat_timer_ts <= now:
+            self._heat_timer_sent_ts = record.heat_timer_ts
+        if (
+            record.heat_c is not None
+            and record.heat_ts is not None
+            and 0.0 <= now - record.heat_ts < FALLBACK_DRIFT_GRACE_S
+        ):
+            self._last_heat_attempt_c = record.heat_c
+            self._last_heat_attempt_ts = record.heat_ts
+            self._last_heat_attempt_ok = record.heat_ok
+        return True
+
+    # ------------------------------------------------------------------
+    # Send decision
+    # ------------------------------------------------------------------
+
     async def _async_decide_and_send(
         self, now: float, trv: TrvReading, target: float, *, strong: bool = False
     ) -> None:
@@ -443,53 +633,66 @@ class RegulationMixin:
         # for realistic temperatures, so a needed fast cooldown would be
         # suppressed.  Instead, skip rate limiting entirely when no baseline
         # is known (e.g. after a quick HVAC OFF → HEAT cycle).
+        floor = self._config.min_target_c
         time_since_last = now - self._last_command_sent_ts
         # A TRV that no longer holds our last command (lost on the way, a
         # Tado schedule block or an expired timer overlay ended the override,
         # or it was switched off in the Tado app) is compared with what it
-        # actually holds, so the command goes out again.
+        # actually holds, so the command goes out again.  One that keeps not
+        # showing it is asked less and less often (resend_grace_s).
         if trv_setpoint_drifted(
             self._last_sent_setpoint,
             trv.setpoint_c,
             time_since_last,
-            FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S,
+            self._resend_grace_s(trv),
             self._config.min_change_threshold_c,
             trv_off=trv.off,
-            floor_c=self._config.min_target_c,
+            floor_c=floor,
             trv_scheduled=trv.scheduled,
         ):
+            again = ""
+            if self._resend_count:
+                next_s = resend_grace_s(
+                    self._drift_grace_s(trv), self._resend_count + 1, RESEND_BACKOFF_MAX_S
+                )
+                again = f" (again; next check in {next_s / 60:.0f} min)"
             _LOGGER.info(
-                "%s: %s holds %s, not the %s sent; sending again",
+                "%s: %s holds %s, not the %s sent; sending again%s",
                 self._config_entry.title, trv.entity_id, _held_text(trv),
-                _command_text(self._last_sent_setpoint, self._config.min_target_c),
+                _command_text(self._last_sent_setpoint, floor), again,
             )
             self._last_sent_setpoint = None
-            self._last_sent_off = False
+            # A valve that showed the command and then left it (Tado app, a
+            # schedule block, an expired timer) is no reason to back off.
+            self._resend_due = not self._last_attempt_shown
+        elif trv.usable and trv_holds_command(
+            self._last_sent_setpoint,
+            trv.setpoint_c,
+            self._config.min_change_threshold_c,
+            trv_off=trv.off,
+            floor_c=floor,
+            trv_scheduled=trv.scheduled,
+        ):
+            self._resend_count = 0
+            self._resend_due = False
+        self._note_trv_shows(trv)
 
-        # Our last command asked for heat and the TRV's state may not show it
-        # yet (a cloud zone's state follows a command by up to a minute or
-        # more): until the drift grace has passed, "off" or "on its
-        # schedule" may be the state from before that command.
-        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
-        heat_in_flight = (
-            self._last_sent_setpoint is not None
-            and not is_off_command(self._last_sent_setpoint, self._config.min_target_c)
-            and time_since_last < grace
-        )
+        # Our last command may not show in the TRV's state yet (a cloud
+        # zone's state follows a command by up to a minute or more).  Judged
+        # on the last command tried: one that timed out may have landed.
+        pending = self._pending(now, trv)
 
         # Shut: hvac mode off, never a 5 °C setpoint (2.8.4).
-        if is_off_command(target, self._config.min_target_c):
+        if is_off_command(target, floor):
             await self._async_decide_and_send_off(
                 now, trv, strong=strong, time_since_last=time_since_last,
-                heat_in_flight=heat_in_flight,
+                pending=pending,
             )
             return
 
         # Keep the command inside what the TRV accepts right now (anything
         # else is refused before it is sent).
-        lo, hi = command_limits(
-            self._config.min_target_c, self._config.max_target_c, trv.min_c, trv.max_c
-        )
+        lo, hi = command_limits(floor, self._config.max_target_c, trv.min_c, trv.max_c)
         target = max(lo, min(hi, target))
 
         # Fail cold: the maximum to a cloud TRV is a timer overlay, renewed
@@ -510,14 +713,14 @@ class RegulationMixin:
             if self._last_sent_setpoint is not None
             else trv.setpoint_c  # None if the TRV is unavailable
         )
-        if (trv.off or trv.scheduled) and not heat_in_flight:
+        if (trv.off or trv.scheduled) and pending != PENDING_HEAT:
             # Off, or back on its Tado schedule: the valve holds no heat
             # command of ours, whatever setpoint it shows (Tado reports 5 °C
             # while off, the schedule's block temperature while on it), so
             # the command must go out.  A valve is only ever heating or off.
             # (Not while our heat command may simply not show yet: the drift
             # check sends it again if it still does not after the grace.)
-            current_tado_setpoint = self._config.min_target_c
+            current_tado_setpoint = floor
         is_rate_limited = time_since_last < self._config.min_command_interval_s
 
         should_send = False
@@ -588,18 +791,15 @@ class RegulationMixin:
         if not should_send:
             self._last_reason = reason
             return
-        # A failed command still counts for the rate limit, so an outage
-        # costs one attempt per interval, not one per cycle.
         sent = await self._async_send_to_tado(
             target, trv.entity_id, timer_s=timer_s, maximum=maximum
         )
-        self._last_command_sent_ts = now
-        self._last_attempt_c = target
+        self._note_attempt(now, target, trv, sent)
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
 
     async def _async_decide_and_send_off(
         self, now: float, trv: TrvReading, *, strong: bool, time_since_last: float,
-        heat_in_flight: bool = False,
+        pending: str | None,
     ) -> None:
         """Shut the valve: hvac mode ``off`` (part of _async_decide_and_send).
 
@@ -608,25 +808,25 @@ class RegulationMixin:
         switched off: the owner's valves are only ever heating or off.  Rate
         limiting as for any command: a new off (from heat or a hold) skips
         it when strong (coast, stop) or an urgent decrease; a retry waits
-        for the interval.  An off that went out is given the drift grace to
+        for the interval.  An off the TRV took is given the drift grace to
         show up before it is sent again.
 
-        ``heat_in_flight``: our last command asked for heat less than the
-        drift grace ago, so an "off" state may be the one from before it.
-        It is not believed: the off is sent.  19 Oct 2026, second bedroom:
-        the target went 20 → 22 → 20 within 10 s; 25 °C went out, the cloud
-        state still showed off, the off was taken as done, and the valve ran
-        at 100 % until switched off by hand.
+        ``pending`` (pending_command): while a heat command of ours may not
+        show yet, an "off" state may be the one from before it, and is not
+        believed: the off is sent.  19 Oct 2026, second bedroom: the target
+        went 20 → 22 → 20 within 10 s; 25 °C went out, the cloud state still
+        showed off, the off was taken as done, and the valve ran at 100 %
+        until switched off by hand (2.8.5; since 2.8.6 also when the heat
+        command timed out but landed, or went to the other entity before a
+        fallback switch, or before an entry reload).
         """
         floor = self._config.min_target_c
-        if trv.off and not heat_in_flight:
+        if trv.off and pending != PENDING_HEAT:
             # The valve is off: the frost level is its baseline.
-            self._last_sent_setpoint = floor
-            self._last_sent_off = True
+            self._note_trv_holds_off()
             self._last_reason = "already_at_target"
             return
-        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
-        if self._last_sent_off and time_since_last < grace:
+        if pending == PENDING_OFF:
             # Our off went out; the TRV's state has not shown it yet.
             self._last_reason = "already_at_target"
             return
@@ -634,11 +834,12 @@ class RegulationMixin:
         new_command = self._last_attempt_c is None or not is_off_command(
             self._last_attempt_c, floor
         )
-        held = (
-            self._last_sent_setpoint
-            if self._last_sent_setpoint is not None
-            else trv.setpoint_c
-        )
+        if pending == PENDING_HEAT:
+            held = self._last_heat_attempt_c
+        elif self._last_sent_setpoint is not None:
+            held = self._last_sent_setpoint
+        else:
+            held = trv.setpoint_c
         urgent = (
             held is not None
             and floor < held - self._behaviour.urgent_decrease_threshold_c
@@ -653,37 +854,64 @@ class RegulationMixin:
             remaining = int(self._config.min_command_interval_s - time_since_last)
             self._last_reason = f"rate_limited({remaining}s)"
             return
-        # A failed command still counts for the rate limit (one attempt per
-        # interval during an outage).
         sent = await self._async_send_off_to_tado(trv.entity_id)
-        self._last_command_sent_ts = now
-        self._last_attempt_c = floor
+        self._note_attempt(now, floor, trv, sent)
         self._last_reason = f"{'sent' if sent else 'send_failed'}(off_{reason})"
 
-    async def _async_keep_trv_off(self, now: float) -> None:
+    async def _async_keep_trv_off(self, now: float, *, user: bool = False) -> None:
         """Roomstat is off: keep the TRV off as well.
 
-        An OFF command that failed (valve unreachable) or did not stick
-        (turned back on from the Tado app or by a Tado schedule block) is sent
-        again, at most once per rate-limit interval.
+        ``user``: Roomstat was just switched off.  The TRV is switched off at
+        once, unless it is off already (one command fewer to a cloud zone).
+        It runs under the regulation lock, so an off can never be overtaken
+        by a heat command of a cycle in progress.
+
+        Afterwards an off that failed (valve unreachable) is sent again once
+        per rate-limit interval, and so is one the valve showed and then left
+        (turned back on from the Tado app, a Tado schedule block).  One the
+        TRV took but never showed (a state that no longer updates) waits for
+        the drift grace, less and less often while it keeps not showing
+        (resend_grace_s).  A heat command of ours that may still be landing
+        is followed by an off at once.
         """
         trv = self._active_trv()
         self._note_trv_source(trv)
-        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
+        floor = self._config.min_target_c
         since = now - self._last_command_sent_ts
-        reason = "hvac_off"
-        if (
-            self.coordinator.last_update_success
-            and trv.usable
-            and not trv.off
-            and since >= max(grace, self._config.min_command_interval_s)
+        self._note_trv_shows(trv)
+        pending = self._pending(now, trv)
+        send = False
+        if trv.off and pending != PENDING_HEAT:
+            self._note_trv_holds_off()
+        elif not trv.entity_id:
+            pass
+        elif user:
+            # An explicit OFF: sent whatever is on its way (one command more
+            # at worst), unless the valve is off already.
+            send = True
+        elif pending == PENDING_OFF or not (
+            self.coordinator.last_update_success and trv.usable
         ):
+            pass
+        elif (
+            pending == PENDING_HEAT
+            or self._last_attempt_c is None
+            or not is_off_command(self._last_attempt_c, floor)
+        ):
+            send = True
+        elif since >= self._config.min_command_interval_s:
             _LOGGER.info(
-                "%s: %s is not off; sending off again",
-                self._config_entry.title, trv.entity_id,
+                "%s: %s holds %s, not off; sending off again",
+                self._config_entry.title, trv.entity_id, _held_text(trv),
             )
-            sent = await self._async_send_hvac_mode_to_tado(HVACMode.OFF)
-            self._last_command_sent_ts = now
+            send = True
+            # Taken but never shown: back off (one shown and then left is a
+            # new event: the app, a schedule block).
+            self._resend_due = self._last_attempt_ok and not self._last_attempt_shown
+        reason = "hvac_off"
+        if send:
+            sent = await self._async_send_off_to_tado(trv.entity_id)
+            self._note_attempt(now, floor, trv, sent)
             reason = "sent(hvac_off)" if sent else "send_failed(hvac_off)"
         self._last_reason = reason
         self._write_state_with_binary_sensor()
@@ -704,7 +932,11 @@ class RegulationMixin:
             return
         self._trv_fallback_active = trv.is_fallback
         self._last_sent_setpoint = None
-        self._last_sent_off = False
+        # The back-off was for the other entity.  The last command tried is
+        # kept: it went to the same valve, and may still be on its way into
+        # the newly used entity's state (pending_command).
+        self._resend_count = 0
+        self._resend_due = False
         # Whether the newly used entity holds a timer, and since when, is not
         # known: a maximum it holds is renewed as a timer straight away.
         self._heat_timer_sent_ts = None
@@ -775,30 +1007,6 @@ class RegulationMixin:
         self._note_command_result(entity_id, what, None)
         return True
 
-    async def _async_send_hvac_mode_to_tado(self, mode: HVACMode) -> bool:
-        """Forward an HVAC mode change to the TRV (or its active fallback).
-
-        Returns whether the TRV took it.  An OFF that fails is sent again by
-        the regulation cycle (see _async_keep_trv_off).
-        """
-        source_entity = self._active_trv().entity_id
-        if not source_entity:
-            _LOGGER.warning("No source_entity_id configured – cannot send HVAC mode to Tado")
-            return False
-
-        _LOGGER.debug("Sending HVAC mode %s to %s", mode, source_entity)
-        if mode == HVACMode.OFF:
-            # Whatever happens, the TRV no longer holds a known setpoint.
-            self._last_sent_setpoint = None
-        sent = await self._async_call_trv(
-            source_entity, "set_hvac_mode", {"hvac_mode": mode}
-        )
-        if sent and mode == HVACMode.OFF:
-            # An OFF overlay replaces any timer: nothing to renew or shut.
-            self._heat_timer_sent_ts = None
-            self._last_sent_was_max = False
-        return sent
-
     async def _async_send_off_to_tado(self, entity_id: str | None) -> bool:
         """Shut the valve with hvac mode ``off`` (the regulation's minimum).
 
@@ -822,7 +1030,6 @@ class RegulationMixin:
             # command is compared with it; the auto-tuner sees a negative
             # demand, as with the 5 °C setpoint before).
             self._last_sent_setpoint = self._config.min_target_c
-            self._last_sent_off = True
             self._last_sent_was_max = False
             # An OFF overlay replaces any timer: nothing to renew or shut.
             self._heat_timer_sent_ts = None
@@ -873,7 +1080,6 @@ class RegulationMixin:
             )
         if sent:
             self._last_sent_setpoint = target_c
-            self._last_sent_off = False
             self._last_sent_was_max = maximum
             if timer_s:
                 # The renewal clock starts when the TRV took the timer.
@@ -960,8 +1166,7 @@ class RegulationMixin:
                 return
             self._watchdog_shut_tried = True
             sent = await self._async_send_off_to_tado(trv.entity_id)
-            self._last_command_sent_ts = now
-            self._last_attempt_c = self._config.min_target_c
+            self._note_attempt(now, self._config.min_target_c, trv, sent)
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST

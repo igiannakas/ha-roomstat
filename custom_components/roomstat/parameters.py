@@ -50,6 +50,14 @@ TRV_COMMAND_SPACING_S: float = 5.0
 TRV_DRIFT_GRACE_S: float = 120.0
 FALLBACK_DRIFT_GRACE_S: float = 360.0
 
+# A TRV that keeps not showing a command it took (a state that no longer
+# updates, a zone that overrides it) is asked again after the grace above,
+# then after twice that, four times that, … but never less often than this.
+# Each command to a cloud zone costs API calls, and each to a HomeKit valve
+# battery: without a limit such a valve got one every 6 min for as long as
+# it lasted (2.8.5 review: 60 in 6 h).
+RESEND_BACKOFF_MAX_S: float = 1800.0
+
 # A TRV command that takes longer than this has failed (it may still arrive;
 # the drift check above then sees it).
 TRV_COMMAND_TIMEOUT_S: float = 10.0
