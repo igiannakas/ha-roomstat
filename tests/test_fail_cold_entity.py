@@ -383,6 +383,55 @@ class TestBackOnSchedule:
         assert svc == "set_temperature" and data["hvac_mode"] == HVACMode.HEAT
         assert 5.0 < data["temperature"] < 25.0
 
+    def test_off_right_after_a_heat_command_is_not_taken_as_done(self, monkeypatch):
+        """19 Oct 2026, second bedroom: the target went 20 → 22 → 20 within
+        10 s.  25 °C went out, the cloud state still showed the valve off,
+        and the off was taken as done: 100 % at 25 °C until switched off by
+        hand.  A stale "off" right after a heat command is not believed."""
+        clock = _Clock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))
+        _feed(ent, 20.6, 14.7, 5.0, off=True)        # comfort 20.5: off, done
+        _cycle(ent)
+        assert ent._reg_state.mode == "stop" and _temps(ent) == []
+        clock.tick(60)
+        ent._target_temp = 22.5                       # a 1.9 °C deficit: heat
+        _cycle(ent)
+        assert _temps(ent) == [25.0]
+        clock.tick(10)
+        ent._target_temp = 20.5                       # back down 10 s later
+        _feed(ent, 20.6, 14.7, 5.0, off=True)        # the state still shows off
+        _cycle(ent)
+        assert _temps(ent) == [25.0, "off"]
+        assert ent._last_reason == "sent(off_urgent_decrease)"
+        clock.tick(60)
+        _feed(ent, 20.6, 14.7, 25.0)                 # the 25 °C now shows...
+        _cycle(ent)
+        assert _temps(ent) == [25.0, "off"]           # ...the off is in flight
+        clock.tick(400)
+        _feed(ent, 20.6, 14.7, 25.0)                 # still heat after the grace
+        _cycle(ent)
+        assert _temps(ent) == [25.0, "off", "off"]
+
+    def test_heat_right_after_a_heat_command_waits_for_the_state(self, monkeypatch):
+        """The other side: a heat command just sent, the state still off —
+        not sent again every cycle."""
+        clock = _Clock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))
+        _feed(ent, 18.0, 14.7, 5.0, off=True)
+        _cycle(ent)
+        assert _temps(ent) == [25.0]
+        for _ in range(4):
+            clock.tick(60)
+            _feed(ent, 18.0, 14.7, 5.0, off=True)
+            _cycle(ent)
+        assert _temps(ent) == [25.0]
+        clock.tick(240)                               # past the 6-min cloud grace
+        _feed(ent, 18.0, 14.7, 5.0, off=True)
+        _cycle(ent)
+        assert _temps(ent) == [25.0, 25.0]
+
     @pytest.mark.parametrize("room, sent", [(18.0, [25.0]), (21.0, [])],
                              ids=["cold", "warm"])
     def test_roomstat_off_to_heat_sends_no_mode_change(self, monkeypatch, room, sent):

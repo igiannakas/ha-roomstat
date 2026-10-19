@@ -291,8 +291,16 @@ is updating.
   when strong or an urgent decrease, and an off that went out gets the drift
   grace to show before it is sent again. After an off the baseline is the
   frost level (`_last_sent_setpoint`; the auto-tuner still sees a negative
-  demand). Heat from an off (or scheduled) valve is never "already at
-  target", whatever setpoint it shows (Tado reports 5 °C while off), and is
+  demand). **A state right after a heat command is not believed**
+  (`heat_in_flight`: the last command asked for heat less than the drift
+  grace ago, 2.8.5): an "off" or "auto" then may be the state from before
+  it, so an off is sent at once rather than taken as done, and the heat
+  command is not re-sent until the grace has passed. 19 Oct 2026, second
+  bedroom: the target went 20 → 22 → 20 within 10 s, 25 °C went out, the
+  cloud state still showed off, 2.8.4 took the off as done and the valve
+  ran at 100 % until switched off by hand. Heat from an off (or scheduled)
+  valve is never "already at target", whatever setpoint it shows (Tado
+  reports 5 °C while off), and is
   **one** `climate.set_temperature` with `hvac_mode: heat`: HA's Tado
   integration (2026.10.1, `tado/climate.py` async_set_temperature) and
   HomeKit's thermostat switch an off valve to heat and set the temperature

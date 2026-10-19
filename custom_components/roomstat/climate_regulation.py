@@ -466,10 +466,22 @@ class RegulationMixin:
             self._last_sent_setpoint = None
             self._last_sent_off = False
 
+        # Our last command asked for heat and the TRV's state may not show it
+        # yet (a cloud zone's state follows a command by up to a minute or
+        # more): until the drift grace has passed, "off" or "on its
+        # schedule" may be the state from before that command.
+        grace = FALLBACK_DRIFT_GRACE_S if trv.slow else TRV_DRIFT_GRACE_S
+        heat_in_flight = (
+            self._last_sent_setpoint is not None
+            and not is_off_command(self._last_sent_setpoint, self._config.min_target_c)
+            and time_since_last < grace
+        )
+
         # Shut: hvac mode off, never a 5 °C setpoint (2.8.4).
         if is_off_command(target, self._config.min_target_c):
             await self._async_decide_and_send_off(
-                now, trv, strong=strong, time_since_last=time_since_last
+                now, trv, strong=strong, time_since_last=time_since_last,
+                heat_in_flight=heat_in_flight,
             )
             return
 
@@ -498,11 +510,13 @@ class RegulationMixin:
             if self._last_sent_setpoint is not None
             else trv.setpoint_c  # None if the TRV is unavailable
         )
-        if trv.off or trv.scheduled:
+        if (trv.off or trv.scheduled) and not heat_in_flight:
             # Off, or back on its Tado schedule: the valve holds no heat
             # command of ours, whatever setpoint it shows (Tado reports 5 °C
             # while off, the schedule's block temperature while on it), so
             # the command must go out.  A valve is only ever heating or off.
+            # (Not while our heat command may simply not show yet: the drift
+            # check sends it again if it still does not after the grace.)
             current_tado_setpoint = self._config.min_target_c
         is_rate_limited = time_since_last < self._config.min_command_interval_s
 
@@ -584,7 +598,8 @@ class RegulationMixin:
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
 
     async def _async_decide_and_send_off(
-        self, now: float, trv: TrvReading, *, strong: bool, time_since_last: float
+        self, now: float, trv: TrvReading, *, strong: bool, time_since_last: float,
+        heat_in_flight: bool = False,
     ) -> None:
         """Shut the valve: hvac mode ``off`` (part of _async_decide_and_send).
 
@@ -595,9 +610,16 @@ class RegulationMixin:
         it when strong (coast, stop) or an urgent decrease; a retry waits
         for the interval.  An off that went out is given the drift grace to
         show up before it is sent again.
+
+        ``heat_in_flight``: our last command asked for heat less than the
+        drift grace ago, so an "off" state may be the one from before it.
+        It is not believed: the off is sent.  19 Oct 2026, second bedroom:
+        the target went 20 → 22 → 20 within 10 s; 25 °C went out, the cloud
+        state still showed off, the off was taken as done, and the valve ran
+        at 100 % until switched off by hand.
         """
         floor = self._config.min_target_c
-        if trv.off:
+        if trv.off and not heat_in_flight:
             # The valve is off: the frost level is its baseline.
             self._last_sent_setpoint = floor
             self._last_sent_off = True
