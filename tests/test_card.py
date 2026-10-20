@@ -107,6 +107,20 @@ def test_card_file_ships_with_the_integration():
     assert "getConfigForm" in js
 
 
+def test_confirm_dialog_cancel_is_the_darker_dismiss_grey():
+    """Cancel only dismisses the dialog, so it is a darker grey than a row (.07):
+    it must not read as one more row under the coloured confirm button."""
+    js = (_ROOT / "www" / "roomstat-card.js").read_text(encoding="utf-8")
+    css = re.search(r"const DIALOG_CSS = `(.*?)`;", js, re.S).group(1)
+    rgb = r"rgba\(var\(--rgb-primary-text-color, 33, 33, 33\), "
+    assert re.search(r"button\.dismiss \{ background: " + rgb + r"0\.28\);", css)
+    assert re.search(r"button\.dismiss \.glyph \{ background: " + rgb + r"0\.14\); \}", css)
+    assert "button.dismiss .glyph ha-icon { color: var(--primary-text-color); }" in css
+    dialog = re.search(r"function confirmDialog\(.*?\n}\n", js, re.S).group(0)
+    buttons = re.findall(r'<button class="([^"]*)"', dialog)
+    assert buttons == ["confirm", "cancel dismiss"], buttons
+
+
 def test_card_is_served_once_with_a_cache_busting_hash():
     card, calls = _load_card_module()
     hass = _Hass()

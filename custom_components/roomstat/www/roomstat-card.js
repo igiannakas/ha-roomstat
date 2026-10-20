@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.4.3";
+const CARD_VERSION = "1.4.4";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -196,6 +196,11 @@ const DIALOG_CSS = `
   button.confirm { color: #fff; }
   button.confirm .glyph { background: rgba(255, 255, 255, 0.2); }
   button.confirm .glyph ha-icon { color: #fff; }
+  /* Close / Cancel – the button that only dismisses the pop-up – is a darker grey than the rows
+     above it, so it reads as the way out rather than one more row (house style, as the custom cards). */
+  button.dismiss { background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.28); color: var(--primary-text-color); }
+  button.dismiss .glyph { background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.14); }
+  button.dismiss .glyph ha-icon { color: var(--primary-text-color); }
   button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
   button:active { filter: brightness(0.92); }
   @keyframes fade { from { opacity: 0; } }
@@ -220,7 +225,7 @@ function confirmDialog({ title, icon, color, bodyIcon, primary, secondary, confi
         </div>
         <div class="buttons">
           <button class="confirm" style="background:${color}"><span class="glyph"><ha-icon icon="${esc(icon)}"></ha-icon></span>${esc(confirmLabel)}</button>
-          <button class="cancel"><span class="glyph"><ha-icon icon="mdi:close"></ha-icon></span>Cancel</button>
+          <button class="cancel dismiss"><span class="glyph"><ha-icon icon="mdi:close"></ha-icon></span>Cancel</button>
         </div>
       </div>`;
     const done = (ok) => {
