@@ -107,18 +107,18 @@ def test_card_file_ships_with_the_integration():
     assert "getConfigForm" in js
 
 
-def test_confirm_dialog_cancel_is_the_dark_dismiss_grey():
-    """Cancel only dismisses the dialog, so it is filled in the theme's dark grey
-    with white text: it must not read as one more row under the coloured confirm
-    button, nor as black text on a mid grey."""
+def test_confirm_dialog_cancel_is_full_size_light_grey():
+    """Cancel only dismisses the dialog: full size like the confirm button, in a
+    plain light grey with text-coloured text - never black text on a mid grey,
+    never a dark slab."""
     js = (_ROOT / "www" / "roomstat-card.js").read_text(encoding="utf-8")
     css = re.search(r"const DIALOG_CSS = `(.*?)`;", js, re.S).group(1)
+    rgb = "rgba(var(--rgb-primary-text-color, 33, 33, 33), "
     assert (
-        "button.dismiss { background: var(--dark-grey-color, #606060);"
-        " color: var(--text-primary-color, #fff); }"
+        "button.dismiss { background: " + rgb + "0.1); color: var(--primary-text-color); }"
     ) in css
-    assert "button.dismiss .glyph { background: rgba(255, 255, 255, 0.2); }" in css
-    assert "button.dismiss .glyph ha-icon { color: var(--text-primary-color, #fff); }" in css
+    assert "button.dismiss .glyph { background: " + rgb + "0.08); }" in css
+    assert "button.dismiss .glyph ha-icon { color: var(--primary-text-color); }" in css
     dialog = re.search(r"function confirmDialog\(.*?\n}\n", js, re.S).group(0)
     buttons = re.findall(r'<button class="([^"]*)"', dialog)
     assert buttons == ["confirm", "cancel dismiss"], buttons

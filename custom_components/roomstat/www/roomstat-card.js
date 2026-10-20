@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.4.5";
+const CARD_VERSION = "1.4.6";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -196,11 +196,11 @@ const DIALOG_CSS = `
   button.confirm { color: #fff; }
   button.confirm .glyph { background: rgba(255, 255, 255, 0.2); }
   button.confirm .glyph ha-icon { color: #fff; }
-  /* Close / Cancel – the button that only dismisses the pop-up – is filled in the theme's dark grey
-     with white text, so it reads as the way out rather than one more row (house style, as the custom cards). */
-  button.dismiss { background: var(--dark-grey-color, #606060); color: var(--text-primary-color, #fff); }
-  button.dismiss .glyph { background: rgba(255, 255, 255, 0.2); }
-  button.dismiss .glyph ha-icon { color: var(--text-primary-color, #fff); }
+  /* Cancel – it only dismisses the confirmation – is full size like the confirm button, in a plain
+     light grey: quiet beside the coloured choice, never black text on a mid grey (design tokens → Dialogs). */
+  button.dismiss { background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.1); color: var(--primary-text-color); }
+  button.dismiss .glyph { background: rgba(var(--rgb-primary-text-color, 33, 33, 33), 0.08); }
+  button.dismiss .glyph ha-icon { color: var(--primary-text-color); }
   button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
   button:active { filter: brightness(0.92); }
   @keyframes fade { from { opacity: 0; } }
