@@ -397,6 +397,16 @@ is updating.
   a 25 °C in flight resumes as heat, an off as coast), and the timer is not
   renewed needlessly. 2.8.5 forgot it: a reload 10 s after a 25 °C command
   took the stale "off" as done (2.8.6 review).
+- **The room slope across a restart (2.9.1):** the heat-up end and the stop
+  predict from the 15-min slope, which needs 7.5 min of readings. The
+  samples ride along in the restore-state extra data (`slope`,
+  `SlopeEstimator.to_dict` / `restore`) and are taken back only when they
+  still join up with now (last sample within the estimator's own 300-s gap
+  rule, none in the future, in order); the spike filter is primed with the
+  last one. 23 Oct 2026: a restart at 20:18 left the slope unknown for 8 min
+  in the middle of four heat-ups; the study and the second bedroom, due to
+  stop at 20:19 (replayed), ran at full power until 20:28 (study +0.35 °C).
+  A window open at startup still drops the history on the first cycle.
 - **Faulty readings:** room and TRV readings outside −30…60 °C are treated as
   missing (`plausible_c`).
 - **Windows (2.8.0):** while the window sensor is on, or the window

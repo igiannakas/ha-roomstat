@@ -115,6 +115,13 @@ class SpikeFilter:
     def reset(self) -> None:
         self._accepted = self._pending = self._last_key = None
 
+    def prime(self, value: float) -> None:
+        """Start from *value* as the last accepted report (a restored
+        history), so a wild first report after a restart is still held back."""
+        self.reset()
+        if _finite(value):
+            self._accepted = value
+
     def update(self, ts: float, value: float | None, report_ts: float | None = None) -> float | None:
         if value is None or not _finite(value, ts):
             return self._accepted
@@ -184,6 +191,51 @@ class SlopeEstimator:
         if len(buf) < self.min_samples or buf[-1][0] - buf[0][0] < self.window_s / 2:
             return None
         return theil_sen(list(buf))
+
+    # -- persistence (the slope survives a restart or reload) ---------------
+    # 23 Oct 2026: HA restarted at 20:18 in the middle of four heat-ups.
+    # With an empty history the slope was unknown for 8 min, so the heat-up
+    # end could not be predicted: the study and the second bedroom, due to
+    # stop at 20:19, stopped at 20:28 instead (study +0.35 °C).
+
+    def to_dict(self) -> dict[str, Any]:
+        """The samples in the window, JSON-safe ([[ts, °C], ...])."""
+        return {"samples": [[round(t, 1), round(v, 3)] for t, v in self._buf]}
+
+    def restore(self, data: Any, now: float) -> bool:
+        """Take back samples saved by :meth:`to_dict`.
+
+        Only a history that still joins up: its last sample no more than
+        ``max_gap_s`` before *now* (the same rule :meth:`add` applies to a
+        pause), none in the future (a clock that went back), times in
+        order.  Anything else leaves the estimator empty.  Returns True when
+        samples were taken back.
+        """
+        self.reset()
+        if not isinstance(data, dict) or not _finite(now):
+            return False
+        raw = data.get("samples")
+        if not isinstance(raw, list) or not raw:
+            return False
+        samples: list[tuple[float, float]] = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                return False
+            t, v = item
+            if isinstance(t, bool) or isinstance(v, bool) or not _finite(t, v):
+                return False
+            t, v = float(t), float(v)
+            if samples and t < samples[-1][0]:
+                return False
+            samples.append((t, v))
+        last_ts = samples[-1][0]
+        if last_ts > now + 1.0 or now - last_ts > self.max_gap_s:
+            return False
+        self._buf.extend((t, v) for t, v in samples if now - t <= self.window_s)
+        if not self._buf:
+            return False
+        self._spikes.prime(self._buf[-1][1])
+        return True
 
 
 # ---------------------------------------------------------------------------

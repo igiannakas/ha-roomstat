@@ -122,8 +122,10 @@ class _AutomationExtraData(ExtraStoredData):
     so learned values survive restarts and config-entry reloads without
     ever being written to the config entry (which would trigger a reload).
     The out-of-band monitor's low since the last setback rides along under
-    ``out_of_band``, and the last TRV command under ``command``
-    (CommandRecord: a reload seconds after a command must not forget it).
+    ``out_of_band``, the last TRV command under ``command``
+    (CommandRecord: a reload seconds after a command must not forget it),
+    and the room slope's recent samples under ``slope`` (a restart in the
+    middle of a heat-up must not blind its predicted stop).
     """
 
     def __init__(
@@ -132,11 +134,13 @@ class _AutomationExtraData(ExtraStoredData):
         autotune: dict[str, Any] | None = None,
         out_of_band: dict[str, Any] | None = None,
         command: dict[str, Any] | None = None,
+        slope: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
         self._out_of_band = out_of_band
         self._command = command
+        self._slope = slope
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -147,6 +151,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["out_of_band"] = self._out_of_band
         if self._command is not None:
             data["command"] = self._command
+        if self._slope is not None:
+            data["slope"] = self._slope
         return data
 
 
@@ -509,6 +515,14 @@ class RoomstatClimate(
                 # reload): its rate limit, and that it may not show in the
                 # TRV's state yet.
                 self._restore_command(extra_dict.get("command"), now)
+                # The room slope's recent samples, if they still join up
+                # with now: a heat-up keeps its predicted stop.
+                if self._slope.restore(extra_dict.get("slope"), now):
+                    _LOGGER.debug(
+                        "%s: room slope history taken back (%s)",
+                        self._config_entry.title,
+                        "known" if self._slope.slope_c_per_s() is not None else "too short yet",
+                    )
 
         # Carry on a heat burst (or stop) the TRV is still holding.  What
         # the TRV holds is the last command it took (or one still on its
@@ -800,6 +814,7 @@ class RoomstatClimate(
             self._autotuner.as_dict(),
             self._band_monitor.as_dict(),
             self._command_record().as_dict(),
+            self._slope.to_dict(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
