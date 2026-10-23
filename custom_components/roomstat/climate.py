@@ -556,6 +556,12 @@ class RoomstatClimate(
                     persisted.presence_saved.preset or PRESET_COMFORT,
                     persisted.presence_saved.temp,
                 )
+            elif persisted.presence_override_active:
+                # A change by hand while nobody was home; its timer is
+                # re-armed (or found run out) in _startup_reconcile_presence.
+                self._presence_ctrl.load_override(
+                    persisted.presence_override_until, persisted.presence_override_before
+                )
 
         # Resume a running boost, or fall back if it ended while HA was down.
         if self._preset_mode == PRESET_BOOST:
@@ -689,6 +695,30 @@ class RoomstatClimate(
         )
         state = presence_state.state if presence_state else None
 
+        if self._presence_ctrl.override_active:
+            # A change by hand while nobody was home.  Someone home now (or
+            # no sensor any more): it simply stays.  Still nobody (or not
+            # reported yet): re-arm the rest of its limit; one that ran out
+            # while HA was down is handled at once, as at any other time.
+            action = presence_startup_action(True, bool(presence_sensor), state)
+            if action == STARTUP_RESTORE:
+                _LOGGER.info(
+                    "%s: startup, presence sensor is %s, the change made while "
+                    "nobody was home stays",
+                    self._config_entry.title,
+                    state if presence_sensor else "not configured",
+                )
+                self._presence_ctrl.end_override()
+            elif self._presence_ctrl.rearm_override(
+                self.hass, time.time(), self._async_presence_override_expired
+            ):
+                _LOGGER.info(
+                    "%s: startup, the limit of the change made while nobody was "
+                    "home ran out while Home Assistant was down",
+                    self._config_entry.title,
+                )
+            return
+
         if self._presence_ctrl.is_active:
             # Re-armed from the persisted snapshot.
             action = presence_startup_action(True, bool(presence_sensor), state)
@@ -780,6 +810,9 @@ class RoomstatClimate(
             window_saved=self._window_ctrl.get_saved(),
             presence_active=self._presence_ctrl.is_active,
             presence_saved=self._presence_ctrl.get_saved(),
+            presence_override_active=self._presence_ctrl.override_active,
+            presence_override_until=self._presence_ctrl.override_until,
+            presence_override_before=self._presence_ctrl.get_before_override(),
             boost_end_ts=self._boost_end_ts if boost_running else 0.0,
             boost_saved=SavedState(
                 preset=self._boost_saved_preset, temp=self._boost_saved_temp
@@ -956,28 +989,24 @@ class RoomstatClimate(
         # A manual temperature overrides the schedule (see climate_schedule.py)
         self._schedule_note_manual_temperature()
 
-        # If window or presence automation is active, save the temperature
-        # for later restoration instead of overriding the active automation.
+        # During the window's close delay it ends the wait.
+        self._end_window_close_delay(f"temperature set to {temp_f:.1f} °C")
+
+        # Set by hand while nobody is home: it takes effect, away steps
+        # aside (until someone is home, or the configured limit).
+        self._presence_takeover()
+
+        # An open window still wins: save the temperature for its close.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(PRESET_NONE, temp_f)
             _LOGGER.info(
-                "Window open: temperature %.1f°C saved for restore", temp_f
-            )
-            self.async_write_ha_state()
-            return
-        if self._presence_ctrl.is_active:
-            self._presence_ctrl.update_saved(PRESET_NONE, temp_f)
-            _LOGGER.info(
-                "Presence away: temperature %.1f°C saved for restore", temp_f
+                "%s: window open, %.1f °C saved for the close",
+                self._config_entry.title, temp_f,
             )
             self.async_write_ha_state()
             return
 
         self._target_temp = temp_f
-
-        # Cancel window close delay if user manually changes temperature
-        if self._window_ctrl.close_delay_active:
-            self._window_ctrl.cancel_all()
 
         # Any direct temperature change activates manual mode and cancels
         # any running boost timer.
@@ -1093,6 +1122,16 @@ class RoomstatClimate(
             "window_open_active": self._window_ctrl.is_active,
             "window_close_delay_active": self._window_ctrl.close_delay_active,
             "presence_away_active": self._presence_ctrl.is_active,
+            # Nobody home, but a change by hand holds away off (the card
+            # shows it), until someone is home or the "until" time.
+            "presence_override_active": self._presence_ctrl.override_active,
+            "presence_override_until": (
+                datetime.datetime.fromtimestamp(
+                    self._presence_ctrl.override_until, tz=datetime.UTC
+                ).isoformat()
+                if self._presence_ctrl.override_until is not None
+                else None
+            ),
             "sensor_degraded": self._sensor_degraded,
             "summer_mode_active": self._summer_active,
             "overlay_refresh_s": self._overlay_refresh_s,

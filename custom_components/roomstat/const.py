@@ -35,6 +35,10 @@ CONF_WINDOW_CLOSE_DELAY_S = "window_close_delay_s"
 CONF_PRESENCE_SENSOR_ID = "presence_sensor_id"
 CONF_PRESENCE_AWAY_DELAY_S = "presence_away_delay_s"
 CONF_PRESENCE_HOME_DELAY_S = "presence_home_delay_s"
+# How long a change made by hand while nobody is home lasts if nobody comes
+# home (minutes; 0 = until someone is home).  See climate_presets.py.
+CONF_PRESENCE_OVERRIDE_MAX_MIN = "presence_override_max_min"
+DEFAULT_PRESENCE_OVERRIDE_MAX_MIN = 240
 
 # Summer mode (input_boolean / binary_sensor) – optional global lock
 CONF_SUMMER_MODE_ENTITY_ID = "summer_mode_entity_id"

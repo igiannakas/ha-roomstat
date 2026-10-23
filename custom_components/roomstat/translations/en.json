@@ -61,12 +61,14 @@
             "data": {
               "presence_sensor_id": "Presence sensor",
               "presence_away_delay_s": "Away delay",
-              "presence_home_delay_s": "Home delay"
+              "presence_home_delay_s": "Home delay",
+              "presence_override_max_min": "Change while away lasts"
             },
             "data_description": {
               "presence_sensor_id": "Binary sensor or input boolean for presence detection (on = home, off = away). Switches to away mode when it turns off.",
               "presence_away_delay_s": "Delay before switching to away mode after presence is lost.",
-              "presence_home_delay_s": "Delay before switching back to comfort mode after presence is detected."
+              "presence_home_delay_s": "Delay before the previous mode comes back after presence is detected.",
+              "presence_override_max_min": "A temperature or mode you set by hand while nobody is home takes effect at once and lasts until someone is home, or this long at most; then the room goes back to away. Picking Away or Resume schedule ends it sooner. 0 = until someone is home."
             }
           },
           "schedule": {

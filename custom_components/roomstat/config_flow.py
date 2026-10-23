@@ -29,6 +29,7 @@ from .const import (
     CONF_PREFER_FALLBACK,
     CONF_PRESENCE_AWAY_DELAY_S,
     CONF_PRESENCE_HOME_DELAY_S,
+    CONF_PRESENCE_OVERRIDE_MAX_MIN,
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SCHEDULE_OVERRIDE_MIN,
@@ -39,6 +40,7 @@ from .const import (
     CONF_WINDOW_CLOSE_DELAY_S,
     CONF_WINDOW_DELAY_S,
     CONF_WINDOW_SENSOR_ID,
+    DEFAULT_PRESENCE_OVERRIDE_MAX_MIN,
     DOMAIN,
 )
 from .parameters import (
@@ -227,6 +229,20 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                     min=0, max=600, step=1,
                     mode=selector.NumberSelectorMode.BOX,
                     unit_of_measurement="s",
+                )
+            ),
+            # A change by hand while nobody is home lasts until someone is
+            # home, or this long at most (0 = no limit).
+            vol.Required(
+                CONF_PRESENCE_OVERRIDE_MAX_MIN,
+                default=opts.get(
+                    CONF_PRESENCE_OVERRIDE_MAX_MIN, DEFAULT_PRESENCE_OVERRIDE_MAX_MIN
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=1440, step=5,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="min",
                 )
             ),
         }

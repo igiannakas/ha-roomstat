@@ -549,18 +549,25 @@ class TestRestartEndToEnd:
         ent._async_presence_changed(_event("on"))
         _fire_last_timer()  # home delay
 
-    def test_boost_selected_while_away_returns_as_comfort(self):
+    def test_boost_selected_while_away_runs_and_ends_on_the_pre_away_preset(self):
+        """A Boost picked by hand while nobody is home runs (2.9.0), and ends
+        on the preset the room had before away mode, never on Away."""
         ent = _make_entity(window=False, presence=True)
         _run(_start(ent))
         _run(_select_preset(ent, "frost_protection"))
         self._go_away(ent)
         _run(_select_preset(ent, "boost"))
-        assert ent.preset_mode == "away"
+        assert ent.preset_mode == "boost"
+        assert ent._presence_ctrl.override_active
+        assert ent.boost_remaining_minutes > 0
+        boost = [c for c in _active_timers()
+                 if getattr(c["callback"], "__name__", "") == "_async_boost_expired"]
+        boost[0]["cancelled"] = True
+        _run(boost[0]["callback"](None))
+        assert ent.preset_mode == "frost_protection"
         self._come_home(ent)
-        assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
-        assert ent._boost_cancel is None
-        assert ent.boost_remaining_minutes == 0
+        assert ent.preset_mode == "frost_protection"
+        assert not ent._presence_ctrl.nobody_home
 
     def test_boost_running_when_leaving_returns_to_pre_boost_preset(self):
         ent = _make_entity(window=False, presence=True)

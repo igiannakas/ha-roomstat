@@ -61,12 +61,14 @@
             "data": {
               "presence_sensor_id": "Präsenzsensor",
               "presence_away_delay_s": "Verzögerung Abwesenheit",
-              "presence_home_delay_s": "Verzögerung Heimkehr"
+              "presence_home_delay_s": "Verzögerung Heimkehr",
+              "presence_override_max_min": "Änderung bei Abwesenheit gilt"
             },
             "data_description": {
               "presence_sensor_id": "Binärsensor oder Input-Boolean zur Präsenzerkennung (an = zu Hause, aus = abwesend). Wechselt beim Ausschalten in den Abwesend-Modus.",
               "presence_away_delay_s": "Verzögerung bevor in den Abwesend-Modus gewechselt wird.",
-              "presence_home_delay_s": "Verzögerung bevor nach erkannter Präsenz zum Komfort-Modus zurückgekehrt wird."
+              "presence_home_delay_s": "Verzögerung bevor nach erkannter Präsenz der vorherige Modus zurückkehrt.",
+              "presence_override_max_min": "Eine Temperatur oder ein Modus, die du bei Abwesenheit von Hand einstellst, gilt sofort und bleibt, bis jemand zu Hause ist, höchstens aber so lange; danach kehrt der Raum in den Abwesend-Modus zurück. Abwesend oder Zeitplan fortsetzen beendet sie früher. 0 = bis jemand zu Hause ist."
             }
           },
           "schedule": {

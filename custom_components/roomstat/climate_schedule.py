@@ -27,7 +27,7 @@ from homeassistant.components.climate import PRESET_AWAY, PRESET_COMFORT
 from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 
-from .climate_controllers import parse_schedule_preset
+from .climate_controllers import SavedState, parse_schedule_preset
 from .const import (
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SCHEDULE_OVERRIDE_MIN,
@@ -94,10 +94,32 @@ class ScheduleMixin:
             self._schedule_start_override(sticky=True)
         elif preset_mode == ctrl.schedule_preset:
             if ctrl.override_active:
-                _LOGGER.info("Schedule preset selected by hand – override ended")
+                _LOGGER.info(
+                    "%s: the schedule's preset picked by hand, override ended",
+                    self._config_entry.title,
+                )
             ctrl.clear_override()
         else:
             self._schedule_start_override()
+
+    def _drop_stale_sticky_override(self) -> None:
+        """A sticky override belongs to an Away or Off picked by hand.
+
+        Once the room is in another preset (an automation restored one, e.g.
+        coming home after an Away picked before leaving), a sticky override
+        left behind would hide the schedule until the next change by hand.
+        """
+        ctrl = self._schedule_ctrl
+        if (
+            ctrl.override_active
+            and ctrl.override_sticky
+            and self._preset_mode not in (PRESET_AWAY, PRESET_FROST_PROTECTION)
+        ):
+            ctrl.clear_override()
+            _LOGGER.info(
+                "%s: the Away or Off picked by hand is over, the schedule applies",
+                self._config_entry.title,
+            )
 
     def _schedule_note_manual_temperature(self) -> None:
         """A manual temperature (slider / physical dial) overrides the schedule."""
@@ -114,18 +136,23 @@ class ScheduleMixin:
             sticky=sticky,
         )
         _LOGGER.info(
-            "Schedule override started (%s)",
+            "%s: schedule override started (%s)",
+            self._config_entry.title,
             "sticky" if sticky else (f"{duration} min" if duration else "until next change"),
         )
 
     async def _async_schedule_override_expired(self, _now) -> None:
         """Override timer ran out: return to the schedule."""
         self._schedule_ctrl.timer_fired()
-        _LOGGER.info("Schedule override expired")
+        _LOGGER.info("%s: schedule override expired", self._config_entry.title)
         await self._async_follow_schedule(trigger="override_expired")
 
     async def async_resume_schedule(self) -> None:
-        """End any override and return to the schedule's current preset."""
+        """End any override and return to the schedule's current preset.
+
+        While nobody is home it also ends a change by hand made meanwhile:
+        back to the automatic state, which is away mode.
+        """
         self._summer_guard("resume schedule")
         if not self.schedule_configured:
             raise ServiceValidationError(
@@ -134,7 +161,17 @@ class ScheduleMixin:
                 translation_key="no_schedule",
             )
         self._schedule_ctrl.clear_override()
-        _LOGGER.info("Schedule resumed")
+        _LOGGER.info("%s: schedule resumed", self._config_entry.title)
+        if self._presence_ctrl.end_override():
+            # The room takes the schedule's preset quietly, then away mode
+            # saves it for the return (one regulation cycle, no heat call
+            # sent and taken back).
+            preset = self._schedule_ctrl.schedule_preset
+            if preset is not None:
+                self._apply_quietly(SavedState(preset, self._get_preset_target(preset)))
+            _LOGGER.info("%s: nobody is home, back to away", self._config_entry.title)
+            await self._async_reenter_away(trigger="resume_schedule")
+            return
         await self._async_follow_schedule(trigger="resume_schedule")
 
     async def _async_follow_schedule(self, trigger: str) -> None:
@@ -165,7 +202,7 @@ class ScheduleMixin:
             return
         apply_now = self._schedule_ctrl.schedule_changed(preset)
         if apply_now and not self._summer_active:
-            _LOGGER.info("Schedule: switching to %s", preset)
+            _LOGGER.info("%s: schedule switching to %s", self._config_entry.title, preset)
             self.hass.async_create_task(
                 self._async_apply_preset(preset, trigger="schedule")
             )
@@ -193,6 +230,9 @@ class ScheduleMixin:
             ctrl.schedule_preset = current
             if ctrl.override_active and not ctrl.override_sticky:
                 ctrl.clear_override()
+        # The presence / window restore above ran before the override was
+        # loaded, so it could not drop a sticky one it made stale.
+        self._drop_stale_sticky_override()
 
         if summer_on:
             ctrl.clear_override()

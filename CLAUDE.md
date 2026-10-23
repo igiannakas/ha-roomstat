@@ -69,7 +69,9 @@ the HA modules.
   that logger to info (the owner does it with a `logger.set_level`
   automation on HA start).
 - `climate_presets.py`: presets, boost timer, window and presence actions
-  (the window close action polls the recovery, see "Windows" below).
+  (the window close action polls the recovery, see "Windows" below; a
+  change by hand while nobody is home, see "Presence" below). Its log lines,
+  and the schedule's, name the room.
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
 - `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
@@ -476,6 +478,81 @@ is updating.
   not persistent, clear themselves when the entity is back, and are removed
   with the room. A room sensor that exists but has no usable value for 15
   min is reported too (`entity_unavailable`, no fix flow).
+
+## Presence
+
+Read this before changing the presence logic (`PresenceAutomationController`,
+`climate_presets.py`).
+
+- Priority, highest first: summer → open window → presence away → manual
+  override → schedule. While away, the schedule and a boost ending only
+  update what coming home restores.
+- **A change by hand while nobody is home takes effect (2.9.0).** A
+  temperature, a preset or a Boost picked by the user (`manual=True` through
+  `_route_preset`, or `async_set_temperature`) calls `_presence_takeover`:
+  the controller leaves `active` for `override` (`nobody_home` covers both)
+  and the room is regulated as if someone were home. It lasts until someone
+  is home (after the home delay, so a flicker back keeps it; nothing is
+  restored, the change stays) or `presence_override_max_min` after the last
+  change (option, 240 min by default, 0 = until home; each change restarts
+  it). Then the away action runs again and saves the current preset, so
+  coming home carries on with the change. Evidence: 23 Oct 2026, the owner
+  left at 13:18 and from 18:16 to 18:19 pressed Comfort / Night / Boost ~30
+  times on the way home (the heating scripts and single rooms); each press
+  was only saved for the return, and the rooms got heat when he walked in at
+  19:32 (17.4–19.0 °C against 20). A 60-min limit (the schedule override's)
+  would have dropped back to Away 15 min before he arrived, and a Comfort
+  that matches the schedule starts no schedule override at all, hence the
+  separate limit.
+- Leaving away mode for an override, the room first takes back the preset
+  away mode had saved (as coming home would), so a Boost started then ends on
+  it, never on Away. That pre-away state is kept (`_before_override`,
+  persisted) for a cancel.
+- **Away picked while nobody is home** is away mode itself, never a manual
+  (sticky) Away: it cancels an override, the schedule override the change
+  started too, and coming home restores the schedule's preset (else the
+  pre-away state). **Resume schedule** while nobody is home does the same.
+  Both apply the base quietly (`_apply_quietly`) before the away action, so
+  no heat call is sent and taken back. Once the sensor reads home again (home
+  delay running), Away is an ordinary Away picked by someone at home. Not
+  changes by hand: the schedule, Off → Heat (it resumes the schedule), Heat
+  when already heating (the heating scripts send it before the preset).
+  Every other service call counts, an automation's or a voice assistant's
+  too: a pre-heat from an automation should work the same (deliberate; the
+  owner has no automation setting presets, schedules go through the helper).
+- **The limit only guards against heating an empty house.** When it fires
+  and the change heats no more than away would (Off, the room switched off,
+  a temperature at or below the away target; with a window open, what the
+  window will restore), the change stays and is looked at again after
+  another limit. When it fires with the presence sensor reporting nothing
+  (unavailable, unknown), the room goes back to away anyway
+  (`unknown_is_away`): skipping, as a stale away timer does, left the change
+  heating with no limit until the sensor next read off.
+- An open window still wins: the change is saved for its close. An override
+  whose limit runs out with the window open goes back to away through the
+  window branch (Away saved for the close). A change by hand during the
+  close delay ends the wait (`_end_window_close_delay`): the room first takes
+  back what the window had saved, timer cancelled, then the change applies.
+  Before, the close delay was simply cancelled, so a Boost picked then
+  ended on the window's frost protection and stayed Off (also when home),
+  and a temperature set then waited for the end of the re-warm wait.
+- A sticky schedule override belongs to an Away or Off picked by hand. Away
+  mode turns a manual Away into away mode (it never saves AWAY), so the away
+  action clears the sticky override then; one still left behind (older
+  versions) is cleared whenever an automation restores another preset
+  (`_drop_stale_sticky_override`: presence and window restores, and at
+  startup after the schedule state is loaded). It hid the schedule until the
+  next change by hand, or kept a room Off for good when the schedule's own
+  preset was Off when leaving.
+- The override survives a restart or reload (`presence_override_*` in the
+  restore data). At startup: someone home, or no sensor → it ends, the change
+  stays; still nobody, or not reported yet → its limit is re-armed for the
+  rest; one that ran out while HA was down fires at once and is handled like
+  any expiry.
+- The card shows `Nobody home · <mode> · <time left | until home>`
+  (`presence_override_active`, `presence_override_until`); while nobody is
+  home the Schedule button is not shown as active (pressing it goes back to
+  Away). `tests/test_card_status.py` runs the card's `roomState` in Node.
 
 ## Auto-tune
 

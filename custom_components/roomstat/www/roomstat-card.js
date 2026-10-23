@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.4.6";
+const CARD_VERSION = "1.4.7";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -47,6 +47,15 @@ const HOLD_MS = 500;
 const num = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
 const fmt1 = (v) => (v === null ? "–" : v.toFixed(1));
 const fmtG = (v) => (v === null ? "–" : String(Math.round(v * 10) / 10));
+const fmtMins = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
+// What a preset or a manual temperature is called in the status line.
+const modeLabel = (preset, target) => (preset === "none" ? `${fmt1(target)}°` : MODE_NAMES[preset] || preset);
+// Whole minutes until an ISO time (null when none, or already past).
+const minsUntil = (iso) => {
+  if (!iso) return null;
+  const mins = Math.ceil((Date.parse(iso) - Date.now()) / 60000);
+  return mins > 0 ? mins : null;
+};
 const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -72,29 +81,40 @@ function roomState(hass, config, ids) {
   const off = st.state === "off";
   const summer = Boolean(a.summer_mode_active);
   const windowOpen = Boolean(a.window_open_active);
+  const awayHeld = Boolean(a.presence_override_active);
+  // Following the schedule: not overridden, and someone is home (while
+  // nobody is, Schedule takes the room back to Away).
+  const followsSchedule = Boolean(schedPreset) && !override && !awayHeld && !a.presence_away_active;
 
   let status;
   if (summer) status = "Summer lock";
   else if (off) status = "Off";
   else if (windowOpen) status = "Window open";
   else if (a.presence_away_active) status = "Away · nobody home";
-  else if (override) {
-    status = `Override · ${preset === "none" ? `${fmt1(target)}°` : MODE_NAMES[preset] || preset}`;
-    if (a.schedule_override_until) {
-      const mins = Math.ceil((Date.parse(a.schedule_override_until) - Date.now()) / 60000);
-      if (mins > 0) status += ` · ${mins} min`;
-    }
+  else if (awayHeld) {
+    // Set by hand while nobody is home: it holds until someone is home,
+    // or until the limit (then back to Away).
+    // No end time: it lasts until someone is home.  One just passed: the
+    // integration is about to take it back, so no time is shown.
+    const mins = minsUntil(a.presence_override_until);
+    status = `Nobody home · ${modeLabel(preset, target)}`;
+    if (!a.presence_override_until) status += " · until home";
+    else if (mins !== null) status += ` · ${fmtMins(mins)}`;
+  } else if (override) {
+    status = `Override · ${modeLabel(preset, target)}`;
+    const mins = minsUntil(a.schedule_override_until);
+    if (mins !== null) status += ` · ${mins} min`;
   } else if (schedPreset) status = `Schedule · ${MODE_NAMES[schedPreset] || schedPreset}`;
   else status = MODE_NAMES[preset] || preset || "–";
 
   let color = COLORS.grey;
   if (off || summer || preset === "frost_protection") color = COLORS.grey;
   else if (heating) color = COLORS.red;
-  else if (schedPreset && !override) color = COLORS.teal;
+  else if (followsSchedule) color = COLORS.teal;
 
   let badge = null;
   if (windowOpen) badge = "mdi:window-open-variant";
-  else if (override) badge = "mdi:hand-back-right";
+  else if (override || awayHeld) badge = "mdi:hand-back-right";
 
   return {
     stateObj: st,
@@ -108,7 +128,7 @@ function roomState(hass, config, ids) {
     status,
     color,
     badge,
-    scheduleActive: Boolean(schedPreset) && !override,
+    scheduleActive: followsSchedule,
     boostTarget: ids.boost ? num(hass.states[ids.boost]?.state) : null,
     boostMinutes: num(a.boost_duration_min),
   };

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.8.9-blue)
+![Version](https://img.shields.io/badge/version-2.9.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -104,6 +104,15 @@ changes.
 - **Away and Off stay** until you change them, also when the schedule moves on.
 - **Eco is called Night.**
 - **Presence** can be an `input_boolean` as well as a binary sensor.
+- **A change by hand while nobody is home takes effect.** Pick a mode or a
+  temperature on your way home and the room heats straight away. The change
+  lasts until someone is home, or at most **Configure → Presence sensor →
+  Change while away lasts** (240 minutes by default, 0 = until someone is
+  home); then the room goes back to Away. A change that heats less than Away
+  (Off, a low temperature) stays. Picking Away or Resume schedule cancels it.
+  Anything that sets a mode or temperature counts, an automation too, so
+  keep schedules in the schedule helper. The original only saved the change
+  for when you got back.
 - **Fixes:**
   - the chosen mode survives restarts, reloads and window open/close;
   - a running Boost carries on after a restart;
