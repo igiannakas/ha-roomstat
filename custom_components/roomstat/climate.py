@@ -191,6 +191,9 @@ class RoomstatClimate(
     """Proxy climate entity that controls a Tado TRV via feedforward + PI."""
 
     _attr_has_entity_name = True
+    # The live activity line changes every cycle; the activity sensor's
+    # history already keeps the lines.
+    _unrecorded_attributes = frozenset({"activity"})
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_TENTHS
     _attr_supported_features = (
@@ -1144,6 +1147,8 @@ class RoomstatClimate(
         """Return diagnostic attributes visible in HA Developer Tools."""
         trv = self._active_trv()
         attrs: dict[str, Any] = {
+            # What the room is doing now (the activity log's live line).
+            "activity": self._activity.doing,
             "regulation_reason": self._last_reason,
             "tado_internal_temp_c": trv.internal_c,
             "trv_fallback_active": trv.is_fallback,

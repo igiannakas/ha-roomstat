@@ -359,15 +359,16 @@ class RoomstatActivitySensor(CoordinatorEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_translation_key = "activity"
-    _unrecorded_attributes = frozenset(
-        {"doing", "mode", "room_c", "target_c", "trv_c", "tado", "log"}
-    )
+    # The lines are already in the state history.
+    _unrecorded_attributes = frozenset({"log"})
 
     def __init__(self, coordinator, entry: ConfigEntry) -> None:
         """Initialize the activity sensor."""
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_activity"
+        # Set while the climate entity writes a burst of lines one by one.
+        self.pending_line: str | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -385,12 +386,23 @@ class RoomstatActivitySensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """The latest line."""
+        """The latest line (or the line being written)."""
+        if self.pending_line is not None:
+            return self.pending_line
         climate = self._climate
-        return None if climate is None else climate.activity_state
+        try:
+            return None if climate is None else climate.activity_state
+        except Exception:  # noqa: BLE001 - a state write must never fail on the log
+            return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """The current decision, the numbers behind it and the recent lines."""
+        """The recent lines, newest first.  Only a new line changes them, so
+        a coordinator refresh writes no new state."""
         climate = self._climate
-        return None if climate is None else climate.activity_attributes()
+        if climate is None:
+            return None
+        try:
+            return {"log": climate.activity_log_lines()}
+        except Exception:  # noqa: BLE001 - a state write must never fail on the log
+            return {"log": []}

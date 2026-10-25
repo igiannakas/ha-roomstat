@@ -259,7 +259,6 @@ class RegulationMixin:
             self._note_cycle_completed(now)
             await self._async_summer_enforce(now)
             self._activity_cycle(now, PATH_SUMMER)
-            self._activity_schedule_write()
             return
 
         # Off: no regulation, but make sure the TRV is off too.  The cycle
@@ -268,7 +267,6 @@ class RegulationMixin:
             self._note_cycle_completed(now)
             await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
             self._activity_cycle(now, PATH_OFF)
-            self._activity_schedule_write()
             return
 
         # Guard: skip when coordinator data is stale (update method raised an exception).
@@ -420,6 +418,9 @@ class RegulationMixin:
             now, trv, result.target_for_tado_c, strong=result.mode != MODE_HOLD
         )
 
+        # The braking time this cycle decided with (the tuner may change it).
+        td_used_s = self._config.tuning.td_s
+
         # 7. Background auto-tune (no-op when disabled).  Runs after the
         # send so it sees the command the TRV now holds; any new values take
         # effect from the next cycle.  The TRV's own reading comes from the
@@ -459,7 +460,7 @@ class RegulationMixin:
 
         self._activity_cycle(
             now, PATH_REGULATED, room_c=room_temp, setpoint_c=setpoint,
-            prev_mode=prev_mode, slope_c_per_s=slope,
+            prev_mode=prev_mode, slope_c_per_s=slope, td_s=td_used_s,
         )
         self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()

@@ -857,9 +857,42 @@ class Autotuner:
         # When a window was last open (or in its close delay): the room then
         # re-warms on its own, which no heat-up episode may learn from.
         self._last_window_ts = -math.inf
+        # What the tuner did, in order, for the activity log: each tuner
+        # event, and each verdict (what a judged episode changed, or why it
+        # changed nothing) merged with the episode it judges.  Numbered, so
+        # a reader can take what is new since it last looked, however many
+        # came in one cycle (a heat-up judged and the next one started).
+        self._journal: deque[tuple[int, str, float | None]] = deque(maxlen=10)
+        self._journal_seq = 0
+        self._last_event = ""
+        self.last_verdict = ""
+        self.last_verdict_until: float | None = None
+        self.verdicts = 0
+        self._update_note = ""
+        self._update_until: float | None = None
         self._reset_learning()
         if stored is not None:
             self._load(stored)
+
+    # -- journal ------------------------------------------------------------
+    @property
+    def last_event(self) -> str:
+        """The tuner's latest event (also in the journal)."""
+        return self._last_event
+
+    @last_event.setter
+    def last_event(self, text: str) -> None:
+        self._last_event = text
+        self._journal_seq += 1
+        self._journal.append((self._journal_seq, text, None))
+
+    @property
+    def journal_seq(self) -> int:
+        return self._journal_seq
+
+    def journal_since(self, seq: int) -> list[tuple[int, str, float | None]]:
+        """Journal entries after *seq*: (number, text, change possible from)."""
+        return [entry for entry in self._journal if entry[0] > seq]
 
     # -- state -------------------------------------------------------------
     def _reset_learning(self) -> None:
@@ -874,16 +907,8 @@ class Autotuner:
         self._pending: dict[str, Any] | None = None
         self._counters = {"heatups": 0, "holds": 0, "updates": 0, "rollbacks": 0}
         self.last_update_reason = ""
-        self.last_event = "waiting for a heat-up"
-        # What the last judged episode did to the values, or why it changed
-        # nothing (the activity log), and when a change it wants may be made
-        # (a rate limit), as a timestamp.  ``verdicts`` counts them, so a
-        # caller can tell a new verdict from the same text again.
-        self.last_verdict = ""
-        self.last_verdict_until: float | None = None
-        self.verdicts = 0
-        self._update_note = ""
-        self._update_until: float | None = None
+        # Not journaled: a reset says so itself, and a new tuner is no event.
+        self._last_event = "waiting for a heat-up"
 
     def reset(self) -> None:
         """Forget everything learned and return to the configured values."""
@@ -1129,7 +1154,9 @@ class Autotuner:
         self._trim[name] = _clamp(self._trim[name] * factor, lo, hi)
 
     def _set_verdict(self, notes: list[str]) -> None:
-        """Record what the episode just judged did, or why it changed nothing."""
+        """Record what the episode just judged did, or why it changed nothing
+        (``last_verdict``; ``last_verdict_until``: when a change it wants
+        becomes possible), and journal it with the episode it judges."""
         parts = [n for n in notes if n]
         if self._update_note:
             parts.append(self._update_note)
@@ -1138,6 +1165,13 @@ class Autotuner:
         self.verdicts += 1
         self._update_note = ""
         self._update_until = None
+        text = f"{self._last_event} → {self.last_verdict}"
+        if self._journal and self._journal[-1][1] == self._last_event:
+            seq = self._journal.pop()[0]          # the episode, now with its verdict
+        else:
+            self._journal_seq += 1
+            seq = self._journal_seq
+        self._journal.append((seq, text, self.last_verdict_until))
 
     def _on_heatup(self, m: HeatupMetrics | None, now: float) -> str | None:
         if m is None:
@@ -1180,8 +1214,10 @@ class Autotuner:
             elif learns_td:
                 notes.append(f"overshoot {os:+.2f} °C, but it braked well under the "
                              "learned braking time: no vote")
+            elif braking:
+                notes.append(f"overshoot {os:+.2f} °C: the braking time is set by hand")
             else:
-                notes.append(f"overshoot {os:+.2f} °C: the braking time is not learned here")
+                notes.append(f"overshoot {os:+.2f} °C with no braking time set")
             self._votes["td_down"] = 0
             self._votes["kp_up"] = 0
         elif os < -c.undershoot_sag_c:
@@ -1257,7 +1293,8 @@ class Autotuner:
         if m.heating_fraction < c.hold_min_heating_fraction:
             self.last_event = "hold window ignored (no heating – passive cool-down)"
             self._set_verdict([
-                f"the valve heated {m.heating_fraction:.0%} of the 3 h (needs "
+                f"the valve heated {m.heating_fraction:.0%} of the "
+                f"{c.hold_window_s / 3600:.0f} h (needs "
                 f"{c.hold_min_heating_fraction:.0%}): Kp and Ki are judged only while it heats"
             ])
             return None
@@ -1430,7 +1467,10 @@ class Autotuner:
             ki_why = f"Ki from the {m['theta_s'] / 60:.0f}-min dead time"
         else:
             have = sum(1 for h in self._heatups if h.theta_s)
-            ki_why = (f"Ki as configured until {c.simc_min_episodes} heat-ups give a "
+            trim = self._trim["ki"]
+            base = "Ki as configured" if abs(trim - 1.0) < 0.005 else (
+                f"Ki = configured × {trim:.2f}")
+            ki_why = (f"{base} until {c.simc_min_episodes} heat-ups give a "
                       f"dead time (has {have})")
         if self.derivative_allowed and m["coast_s"] is not None:
             td_why = (f"braking = coast {m['coast_s'] / 60:.1f} min × "

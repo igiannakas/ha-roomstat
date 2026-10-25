@@ -99,14 +99,14 @@ class TestDecisionLines:
                      p_c=1.44, i_c=0.0)
         assert line.startswith(
             "Holding (the coast stalled 0.5 short): 0.5 below, valve pushed 1.9 over its "
-            "reading (P +1.4, I +0.00; I rests outside ±0.3; full heat only from 0.8 below)"
+            "reading (P +1.4, I +0.00; I decays outside ±0.3; full heat only from 0.8 below)"
         )
         assert "| room 19.5 → 20.0 Comfort | TRV 19.2 heating | Tado 21.1" in line
 
     def test_hold_near_the_target_has_no_excuses(self):
         line = _line(error_c=0.1, command_c=19.9, trv_c=19.5, p_c=0.4, i_c=-0.0001)
         assert "(P +0.4, I +0.00)" in line            # no '-0.00'
-        assert "rests" not in line and "full heat only" not in line
+        assert "decays" not in line and "full heat only" not in line
 
     def test_hold_released_from_a_stop_says_so(self):
         line = _line(prev_mode="stop", error_c=0.05, slope_c_per_h=-0.3)
@@ -126,13 +126,49 @@ class TestDecisionLines:
                      command_c=5.0, command_off=True, tado="off", tado_c=None)
         assert line.startswith(
             "Valve off: 0.4 above, rising 0.8 °C/h; heats again once heading 0.1 below "
-            "within 20 min (now 0.36 above)"
+            "within 20 min (predicted: 0.36 above)"
         )
         falling = _line(mode="stop", prev_mode="stop", error_c=0.02, slope_c_per_h=-0.2,
                         command_c=5.0, command_off=True, tado="off", tado_c=None)
         # 0.02 + 20 min x (0.2 - 0.1) °C/h = 0.05: not yet the 0.1 that releases.
         assert "falling 0.2 °C/h; heats again once heading 0.1 below within 20 min " \
-            "(now 0.05 below)" in falling
+            "(predicted: 0.05 below)" in falling
+
+    def test_a_stop_entered_above_the_target_is_no_overshoot_warning(self):
+        line = _line(mode="stop", prev_mode="hold", error_c=-0.3, slope_c_per_h=0.0,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None)
+        assert line.startswith("Valve off: 0.3 above, flat; heats again once")
+
+    def test_the_first_decision_after_a_start_is_no_transition(self):
+        """A shut valve resumes as coast and becomes a stop: no coast happened."""
+        line = _line(mode="stop", prev_mode="coast", resumed=True, error_c=-0.2,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None)
+        assert line.startswith("Valve off: 0.2 above")
+        assert _line(prev_mode="stop", resumed=True).startswith("Holding (resumed)")
+
+    def test_the_valves_own_state_is_shown(self):
+        assert "| TRV 19.2 off | Tado 21.1" in _line(trv_off=True)
+        assert "| TRV 19.2 on its Tado schedule |" in _line(trv_scheduled=True)
+        key = act.decision_key(_facts(), CFG)
+        assert act.decision_key(_facts(trv_off=True), CFG) != key
+
+    def test_the_braking_time_the_cycle_used(self):
+        """The tuner may change Td after the decision: the line uses the old."""
+        line = _line(mode="coast", prev_mode="heat", error_c=0.5, slope_c_per_h=3.1,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None, td_s=780.0)
+        assert "(3.0 °C/h × 13 min)" in line
+
+    def test_a_long_line_keeps_its_numbers(self):
+        line = _line(target_label="Comfort, nobody home (change by hand kept)" + "x" * 120,
+                     prev_mode="stop")
+        assert len(line) <= act.STATE_MAX_LEN
+        assert line.endswith("| TRV 19.2 heating | Tado 21.1")
+
+    def test_sensor_lost_shows_the_last_reading(self):
+        line = _line(path=act.PATH_SENSOR_LOST, mode=None, room_c=None, room_last_c=19.4,
+                     sensor_lost_min=16)
+        assert line.startswith("Room sensor unavailable for 16 min: not regulating")
+        assert "| room unavailable (last 19.4) → 20.0 Comfort |" in line
 
     def test_window_lines(self):
         assert _line(window=act.WINDOW_OPEN).startswith("Window open: valve off until it closes")
@@ -143,8 +179,7 @@ class TestDecisionLines:
 
     @pytest.mark.parametrize(("send", "kw", "note"), [
         ("rate_limited(120s)", dict(command_c=21.4), " (21.4 waits: rate limit)"),
-        ("send_failed(normal_update)", dict(command_c=21.4, send_error="timed out"),
-         " (21.4 failed)"),
+        ("send_failed(normal_update)", dict(command_c=21.4), " (21.4 failed)"),
         ("already_at_target", dict(command_c=21.2), " (21.2 wanted: under the 0.3 step)"),
         ("already_at_target", dict(command_c=21.1), ""),
         ("sent(normal_update)", dict(command_c=21.1), ""),
@@ -196,8 +231,8 @@ class TestActivityLog:
 
     def test_round_trip_and_malformed_data(self):
         log = act.ActivityLog()
-        log.add_decision(1.0, "Holding", "k")
-        log.add_event(2.0, "Window open")
+        log.add_decision(1_800_000_001.0, "Holding", "k")
+        log.add_event(1_800_000_002.0, "Window open")
         new = act.ActivityLog()
         assert new.restore(log.as_dict())
         assert [(e.text, e.decision) for e in new.entries()] == [
@@ -210,6 +245,23 @@ class TestActivityLog:
         long = "auto-tune: " + "x" * 600
         assert len(act.clip(long)) == act.STATE_MAX_LEN
         assert act.clip(long).endswith("…")
+
+    def test_a_long_event_becomes_several_whole_lines(self):
+        words = " ".join(f"word{k}" for k in range(120))         # ~830 characters
+        log = act.ActivityLog()
+        assert log.add_event(1.0, words) == 4
+        lines = [e.text for e in reversed(log.entries())]
+        assert all(len(x) <= act.STATE_MAX_LEN for x in lines)
+        assert lines[0].endswith(" …") and lines[1].startswith("… ")
+        joined = " ".join(x.removeprefix("… ").removesuffix(" …") for x in lines)
+        assert joined == words
+
+    def test_restore_keeps_the_stored_order_and_skips_corrupt_times(self):
+        data = {"lines": [[1_800_000_100.0, "a", False], [1_800_000_000.0, "b", False],
+                          [1e18, "corrupt", False], [5.0, "too old", True]]}
+        log = act.ActivityLog()
+        assert log.restore(data)
+        assert [e.text for e in reversed(log.entries())] == ["a", "b"]
 
 
 class TestRoomLogAdapter:
@@ -226,6 +278,8 @@ class TestRoomLogAdapter:
         assert got == [(logging.INFO, "window open, switching to frost protection"),
                        (logging.WARNING, "room sensor unavailable for 16 min")]
         assert "Study: room sensor unavailable for 16 min" in caplog.text
+        # The record names the caller, not the adapter.
+        assert caplog.records[-1].funcName == "test_info_reaches_the_log_whatever_the_level"
         assert act.event_text(logging.WARNING, got[1][1]).startswith("Warning: room sensor")
         assert act.event_text(logging.INFO, got[0][1]).startswith("Window open")
 
@@ -314,6 +368,31 @@ class TestTunerVerdicts:
             "no swing: Kp stays (it moves only on a swing); no lasting offset (-0.05 °C, "
             "needs 0.15 under): no Ki vote; no change:")
 
+    def test_the_journal_keeps_every_step_in_order(self):
+        """A cut-short heat-up judged and the next started in one sample:
+        both are logged, each with its own label."""
+        t = self._tuner()
+        seq = t.journal_seq
+        t.last_event = "heat-up (cut short): overshoot unknown"
+        t._set_verdict(["no overshoot vote (cut short below the target)"])
+        t.last_event = "heat-up started"
+        texts = [text for _n, text, _u in t.journal_since(seq)]
+        assert texts == ["heat-up (cut short): overshoot unknown → no overshoot vote "
+                         "(cut short below the target); no change:"[:0] + texts[0],
+                         "heat-up started"]
+        assert texts[0].startswith("heat-up (cut short): overshoot unknown → no overshoot vote")
+
+    def test_a_reset_is_journaled_and_verdicts_carry_on(self):
+        t = self._tuner()
+        t._on_heatup(_heatup(DAY, 0.15, td=660.0, coast=660.0), DAY)
+        seq = t.journal_seq
+        t.reset()
+        t._on_heatup(_heatup(2 * DAY, 0.15, td=660.0, coast=660.0), 2 * DAY)
+        texts = [text for _n, text, _u in t.journal_since(seq)]
+        assert texts[0] == "reset to configured values"
+        assert texts[1].startswith("heat-up: overshoot +0.15 °C")
+        assert "→ landed +0.15 °C: on target, no vote" in texts[1]
+
     def test_a_change_on_trial_holds_the_rest(self):
         t = self._tuner()
         t._pending = {"ts": 0.0, "prev": A._tuning_dict(t._params), "ref_overshoot": None,
@@ -379,14 +458,37 @@ class TestEntity:
         _cycle(ent)
         state = sensor.native_value
         assert state.startswith("Heat-up: 2.3 below (0.8 or more heats at full power)")
-        assert "| room 18.2 → 20.5 Comfort | TRV 16.0 | Tado 25.0" in state
+        # The heat command went out; the valve still reports off.
+        assert "| room 18.2 → 20.5 Comfort | TRV 16.0 off | Tado 25.0" in state
         attrs = sensor.extra_state_attributes
-        assert attrs["doing"] == state
+        assert list(attrs) == ["log"]                           # nothing that drifts
         assert attrs["log"][0].endswith(state)                  # newest first
         assert attrs["log"][1].endswith("Started (Home Assistant restart or room reload)"
                                          "; nothing saved to take back")
-        assert attrs["trv_c"] == 16.0 and attrs["tado"] == "25.0"
-        assert {"log", "doing"} <= sensor._unrecorded_attributes
+        assert sensor._unrecorded_attributes == frozenset({"log"})
+        # The live line is on the thermostat, not recorded.
+        assert ent.extra_state_attributes["activity"] == state
+        assert "activity" in ent._unrecorded_attributes
+
+    def test_each_line_is_written_as_its_own_state(self, monkeypatch):
+        """An event and the decision after it in one cycle: both reach the
+        recorder (the history is the log)."""
+        clock, ent, sensor = self._start(monkeypatch)
+        sensor.hass = ent.hass
+        written = []
+        sensor.async_write_ha_state = lambda: written.append(sensor.native_value)
+        _feed(ent, 18.2, 16.0, 5.0, off=True)
+        _cycle(ent)
+        ent.hass.set(WINDOW, "on")
+        ent._async_window_changed(_event("on"))
+        _fire_last_timer()
+        assert "Window open, switching to frost protection" in written
+        assert written[-1].startswith("Window open: valve off until it closes")
+        before = len(written)
+        clock.tick()
+        _feed(ent, 18.0, 16.0, 5.0, off=True)
+        _cycle(ent)                                       # the same decision: no line
+        assert all(w == written[before - 1] for w in written[before:])
 
     def test_window_events_and_lines(self, monkeypatch):
         clock, ent, _ = self._start(monkeypatch)
@@ -435,14 +537,15 @@ class TestEntity:
         _feed(ent, 19.0, 18.0, 20.5)
         _cycle(ent)
         t.last_event = "heat-up: overshoot -0.35 °C, dead time 15 min, coast 7 min"
-        t.last_verdict = "stopped 0.35 °C short: vote 1 of 2 for less braking"
-        t.verdicts += 1
+        t._set_verdict(["stopped 0.35 °C short: vote 1 of 2 for less braking"])
         for _ in range(3):
             clock.tick()
             _cycle(ent)
         lines = [x for x in _texts(ent) if x.startswith("Auto-tune: ")]
-        assert lines == ["Auto-tune: heat-up: overshoot -0.35 °C, dead time 15 min, "
-                         "coast 7 min → stopped 0.35 °C short: vote 1 of 2 for less braking"]
+        assert len(lines) == 1
+        assert lines[0].startswith(
+            "Auto-tune: heat-up: overshoot -0.35 °C, dead time 15 min, coast 7 min → "
+            "stopped 0.35 °C short: vote 1 of 2 for less braking")
 
     def test_events_are_logged_with_the_logger_at_its_default(self, monkeypatch):
         clock, ent, _ = self._start(monkeypatch)

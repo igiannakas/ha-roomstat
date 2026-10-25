@@ -162,17 +162,19 @@ class Outlook:
 
 
 def outlook(error_c: float, room_slope_c_per_s: float | None,
-            config: RegulationConfig) -> Outlook:
+            config: RegulationConfig, td_s: float | None = None) -> Outlook:
     """The heat-up end, stop and release predictions for this error and slope.
 
     The regulator decides on these, and the activity log explains its
-    decisions with the same numbers."""
+    decisions with the same numbers (``td_s``: the braking time the cycle
+    used, if the tuner has changed it since)."""
     rising = falling = 0.0
     if room_slope_c_per_s is not None and math.isfinite(room_slope_c_per_s):
         deadband = config.slope_deadband_c_per_h / 3600.0
         rising = max(0.0, room_slope_c_per_s - deadband)
         falling = max(0.0, -room_slope_c_per_s - deadband)
-    td_s = config.tuning.td_s
+    if td_s is None:
+        td_s = config.tuning.td_s
     lead_s = td_s if math.isfinite(td_s) and td_s > 0 else 0.0
     # The stop looks at least as far ahead as a heat-up: the radiator's
     # coast (Td) is the same however the heat got there.

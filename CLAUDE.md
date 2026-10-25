@@ -307,14 +307,22 @@ auto-tune changed or why not — so the diagnostics and the HA log need not
 be read.
 
 - **The sensor** (`sensor.<room>_activity`, "Activity"): the state is the
-  latest line (clipped to HA's 255 characters), so its history and the
-  logbook are the log. Attributes: `doing` (the live decision line), `log`
-  (the last 30 lines, newest first, `HH:MM  text`), and the numbers behind
-  the line. None of the attributes go to the recorder
-  (`_unrecorded_attributes`): the history already has every line.
+  latest line, so its history and the logbook are the log. It is written
+  once per line (`_activity_write`), so an event and the decision after it
+  in one cycle are both recorded. Its only attribute is `log` (the last 30
+  lines, newest first, `HH:MM  text`, unrecorded), which changes only with
+  a new line: anything that drifts every cycle would make the recorder
+  write a `states` row per coordinator refresh (2.10.0 review). The live
+  decision line is the thermostat's `activity` attribute (unrecorded).
+  Lines fit HA's 255 characters: a decision line shortens its phrase, never
+  the `| room … | TRV … | Tado …` tail; a longer event is split into
+  `… `-continued lines (`split_lines`).
 - **Decision lines** (`describe_cycle`): `<what and why>[; why not] | room R
-  → S <preset> | TRV T [heating] | Tado <what it was told>[ (X waits: rate
-  limit / X wanted: under the 0.3 step / X failed)]`. The phrases use the
+  → S <preset> | TRV T [heating / off / on its Tado schedule] | Tado <what it
+  was told>[ (X waits: rate limit / X wanted: under the 0.3 step / X
+  failed)]`. The first decision after a start is no transition (a shut
+  valve resumes as coast, then stop: no coast happened), and the line uses
+  the braking time the cycle decided with, not one the tuner set after. The phrases use the
   regulator's own predictions (`regulation.outlook`): what stopping a
   heat-up now would leave, the coast's predicted landing, the stop's
   look-ahead, how far a stop is from its release; in hold P and I, and why
@@ -332,10 +340,12 @@ be read.
   warnings by default). **New room-level log calls must use it**, not
   `_LOGGER` with `self._config_entry.title`. Preset changes (`(by hand)`),
   temperatures set, switching on and off, and every start are events.
-- **Auto-tune**: after each cycle `_activity_tuner` logs, once, a new
-  verdict (`auto-tune: <episode> → <verdict>`, with "possible from HH:MM"
-  for a rate-limited change) or a new tuner event (heat-up started,
-  discarded, after a window).
+- **Auto-tune**: the tuner keeps a numbered journal (`journal_since`): each
+  event (`last_event` is a property that journals), and each verdict merged
+  with the episode it judges. After each cycle `_activity_tuner` logs what
+  is new, in order (`auto-tune: <episode> → <verdict>`, "possible from
+  HH:MM" for a rate-limited change), so a heat-up judged and the next one
+  started in the same sample are both logged.
 - The lines ride along in the restore-state extra data (`activity`), so a
   reload (every preset temperature change) keeps them; local times use HA's
   time zone (`dt_util.get_default_time_zone`).

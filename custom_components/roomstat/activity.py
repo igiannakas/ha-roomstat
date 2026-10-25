@@ -36,8 +36,10 @@ MAX_LINES = 30
 DECISION_REFRESH_S = 300.0
 # Home Assistant refuses a state longer than this.
 STATE_MAX_LEN = 255
-# Longest line kept (an auto-tune verdict can be long; the state is clipped).
+# Longest event kept (cut into state-sized lines, see split_lines).
 _TEXT_MAX_LEN = 1000
+# Timestamps a stored line may carry (2001-2286): anything else is corrupt.
+_TS_MIN, _TS_MAX = 1.0e9, 1.0e10
 
 # How a regulation cycle ended (CycleFacts.path).
 PATH_REGULATED = "regulated"
@@ -74,6 +76,29 @@ def clip(text: str, limit: int = STATE_MAX_LEN) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def split_lines(text: str, limit: int = STATE_MAX_LEN) -> list[str]:
+    """Cut text into pieces of at most ``limit`` characters at spaces, each
+    piece but the last ending in ' …' and each but the first starting with
+    '… ', so a long auto-tune verdict survives in the state history whole."""
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    rest = text
+    while rest:
+        head = "… " if pieces else ""
+        room = limit - len(head)
+        if len(rest) <= room:
+            pieces.append(head + rest)
+            break
+        room -= 2                                   # the trailing " …"
+        cut = rest.rfind(" ", 0, room + 1)
+        if cut <= room // 2:
+            cut = room
+        pieces.append(head + rest[:cut].rstrip() + " …")
+        rest = rest[cut:].lstrip()
+    return pieces
+
+
 @dataclass(frozen=True)
 class Entry:
     """One line of the activity log."""
@@ -91,9 +116,14 @@ class ActivityLog:
         self._entries: deque[Entry] = deque(maxlen=max_lines)
         self.current: str | None = None    # the latest decision, live
 
-    def add_event(self, ts: float, text: str) -> None:
-        """Something happened (always a new line)."""
-        self._entries.append(Entry(ts, clip(text, _TEXT_MAX_LEN), False))
+    def add_event(self, ts: float, text: str) -> int:
+        """Something happened: one line, or several if it is longer than a
+        state may be (each is written as its own state, so the recorder
+        keeps all of it).  Returns the number of lines added."""
+        chunks = split_lines(clip(text, _TEXT_MAX_LEN))
+        for chunk in chunks:
+            self._entries.append(Entry(ts, chunk, False))
+        return len(chunks)
 
     def add_decision(self, ts: float, text: str, key: str = "",
                      refresh_s: float = DECISION_REFRESH_S) -> bool:
@@ -101,7 +131,7 @@ class ActivityLog:
         while only its numbers move at most every ``refresh_s``; always
         after an event, so the latest line is again what the room is doing.
         Returns whether a line was added."""
-        text = clip(text, _TEXT_MAX_LEN)
+        text = clip(text, STATE_MAX_LEN)
         self.current = text
         last = self._entries[-1] if self._entries else None
         if last is not None and last.decision:
@@ -144,12 +174,11 @@ class ActivityLog:
                 continue
             ts, text, decision = item
             if (isinstance(ts, bool) or not isinstance(ts, (int, float))
-                    or not math.isfinite(ts) or not isinstance(text, str)
-                    or not isinstance(decision, bool)):
+                    or not math.isfinite(ts) or not _TS_MIN <= ts <= _TS_MAX
+                    or not isinstance(text, str) or not isinstance(decision, bool)):
                 continue
-            if lines and ts < lines[-1].ts:
-                continue
-            lines.append(Entry(float(ts), clip(text, _TEXT_MAX_LEN), decision))
+            # The stored order is the log's order, also across a clock step.
+            lines.append(Entry(float(ts), clip(text, STATE_MAX_LEN), decision))
         self._entries.clear()
         self._entries.extend(lines[-(self._entries.maxlen or MAX_LINES):])
         return bool(lines)
@@ -170,6 +199,8 @@ class RoomLogAdapter(logging.LoggerAdapter):
         return f"{self.room}: {msg}", kwargs
 
     def log(self, level: int, msg: Any, *args: Any, **kwargs: Any) -> None:
+        # The record names the caller, not this method.
+        kwargs.setdefault("stacklevel", 2)
         if level >= logging.INFO:
             try:
                 text = str(msg) % args if args else str(msg)
@@ -199,8 +230,11 @@ class CycleFacts:
     setpoint_c: float | None = None
     target_label: str = ""          # "Comfort", "Away, nobody home", ...
     room_c: float | None = None
+    room_last_c: float | None = None  # the last reading, while the sensor is lost
     trv_c: float | None = None
     trv_heating: bool | None = None
+    trv_off: bool = False           # the valve reports off
+    trv_scheduled: bool = False     # the valve is back on its Tado schedule
     tado: str = "unknown"           # what the valve has been told: "21.1", "off", ...
     tado_c: float | None = None     # the same as a number (None when off or unknown)
     window: str | None = None       # WINDOW_* while a window matters
@@ -217,7 +251,7 @@ class CycleFacts:
     i_c: float = 0.0
     saturated: bool = False
     send: str = ""                  # the send decision (climate._last_reason)
-    send_error: str | None = None
+    td_s: float | None = None       # the braking time this cycle decided with
     sensor_lost_min: int | None = None
 
 
@@ -257,13 +291,13 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
     """What the regulator did and why (the regulated path)."""
     e = f.error_c if f.error_c is not None else 0.0
     slope_s = f.slope_c_per_h / 3600.0 if f.slope_c_per_h is not None else None
-    o = outlook(e, slope_s, cfg)
+    o = outlook(e, slope_s, cfg, td_s=f.td_s)
     rise = o.rising_c_per_s * 3600.0
     trend = _trend(f.slope_c_per_h, cfg)
     new = f.prev_mode != f.mode and not f.resumed
 
     if f.mode == MODE_HEAT:
-        if new:
+        if f.prev_mode != MODE_HEAT:      # also after a start: the decision to heat
             return (f"Heat-up: {_gap(e)} ({cfg.heatup_enter_c:.1f} or more heats at "
                     f"full power); {trend}")
         if f.slope_c_per_h is None:
@@ -281,15 +315,15 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
     if f.mode == MODE_STOP:
         if new and f.prev_mode == MODE_COAST:
             return f"Valve off: the coast reached the target, {trend}"
-        if new:
+        if new and e > 0:
             return (f"Valve off ahead of an overshoot: {_gap(e)}, {trend} would pass "
                     f"{(f.setpoint_c or 0.0) + cfg.stop_over_c:.1f} within "
                     f"{_minutes(o.stop_lead_s)}")
-        now = (f"now {o.release_c:.2f} below" if o.release_c > 0
-               else f"now {-o.release_c:.2f} above")
+        ahead = (f"{o.release_c:.2f} below" if o.release_c > 0
+                 else f"{-o.release_c:.2f} above")
         return (f"Valve off: {_gap(e)}, {trend}; heats again once heading "
                 f"{cfg.release_below_c:.1f} below within {_minutes(cfg.release_lead_s)} "
-                f"({now})")
+                f"(predicted: {ahead})")
 
     # Hold.
     if f.resumed:
@@ -312,7 +346,7 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
         push = f"asked for {_num(f.command_c)}"
     why_not = []
     if abs(e) >= cfg.integral_deadband_c:
-        why_not.append(f"I rests outside ±{cfg.integral_deadband_c:.1f}")
+        why_not.append(f"I decays outside ±{cfg.integral_deadband_c:.1f}")
     elif f.saturated:
         why_not.append("I frozen at the command limit")
     if cfg.integral_deadband_c <= e < cfg.heatup_enter_c:
@@ -349,9 +383,12 @@ def decision_key(f: CycleFacts, cfg: RegulationConfig) -> str:
     note = _tado_note(f, cfg)
     note_kind = ("failed" if "failed" in note else "waits" if "waits" in note else "")
     missing = ("room" if f.room_c is None else "valve") if f.path == PATH_WAITING else ""
+    # An open window or its re-warm wait reads the same whatever the mode.
+    mode = "" if f.window in (WINDOW_OPEN, WINDOW_REWARM) else (f.mode or "")
     return "|".join((
-        f.path, missing, f.mode or "", f.window or "", _num(f.setpoint_c), f.target_label,
+        f.path, missing, mode, f.window or "", _num(f.setpoint_c), f.target_label,
         f.tado, note_kind, "held" if f.room_held else "", "gap" if f.room_bridged else "",
+        "off" if f.trv_off else "auto" if f.trv_scheduled else "",
     ))
 
 
@@ -367,8 +404,8 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
         missing = "the room sensor" if f.room_c is None else "the valve's reading"
         phrase = f"Waiting for {missing}: nothing sent"
     elif f.path == PATH_SENSOR_LOST:
-        phrase = (f"Room sensor unavailable for {f.sensor_lost_min or 0} min: "
-                  "the valve keeps its last setting")
+        phrase = (f"Room sensor unavailable for {f.sensor_lost_min or 0} min: not "
+                  "regulating (full heat is never left on)")
     elif f.window == WINDOW_OPEN:
         phrase = "Window open: valve off until it closes"
     elif f.window == WINDOW_REWARM:
@@ -383,11 +420,26 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
         if f.room_bridged:
             phrase += " (room sensor gap: last reading used)"
 
-    room = f"room {_num(f.room_c)}"
+    if f.path == PATH_SENSOR_LOST:
+        room = "room unavailable" + (
+            f" (last {_num(f.room_last_c)})" if f.room_last_c is not None else "")
+    else:
+        room = f"room {_num(f.room_c)}"
     if f.setpoint_c is not None and f.path not in (PATH_SUMMER, PATH_OFF):
         room += f" → {_num(f.setpoint_c)}"
         if f.target_label:
             room += f" {f.target_label}"
-    trv = f"TRV {_num(f.trv_c)}" + (" heating" if f.trv_heating else "")
+    trv = f"TRV {_num(f.trv_c)}" + _trv_state(f)
     tado = f"Tado {f.tado}{_tado_note(f, cfg)}"
-    return f"{phrase} | {room} | {trv} | {tado}"
+    tail = f" | {room} | {trv} | {tado}"
+    # The numbers at the end are what a line is read for: a long phrase is
+    # shortened, never the tail.
+    return clip(phrase, max(40, STATE_MAX_LEN - len(tail))) + tail
+
+
+def _trv_state(f: CycleFacts) -> str:
+    if f.trv_off:
+        return " off"
+    if f.trv_scheduled:
+        return " on its Tado schedule"
+    return " heating" if f.trv_heating else ""

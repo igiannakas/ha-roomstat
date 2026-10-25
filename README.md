@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.10.0-blue)
+![Version](https://img.shields.io/badge/version-2.10.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -182,9 +182,9 @@ Controller → Heat-up braking time**, with **Learn heat-up braking** off.
 
 ## Activity log
 
-Each room has a sensor named **Activity**, for example
-`sensor.living_room_thermostat_activity`. Its state is the latest line, so
-its history (and the logbook) is the room's log. For example:
+Each room has a sensor named **Activity** (its entity ID follows the room's
+name, for example `sensor.living_room_thermostat_activity`). Its state is the
+latest line, so its history (and the logbook) is the room's log. For example:
 
 ```
 Holding (the coast stalled 0.5 short): 0.5 below, valve pushed 1.9 over its
@@ -193,12 +193,13 @@ reading (P +1.4, I +0.00; I rests outside ±0.3; full heat only from 0.8 below)
 ```
 
 - A new line is written when the decision changes (the mode, what the valve
-  is told, a command waiting or failing, the target), and every 5 minutes
-  while only the numbers move. The `doing` attribute is always the live
-  line.
+  is told, the valve's own state, a command waiting or failing, the target),
+  and every 5 minutes while only the numbers move. The thermostat's
+  `activity` attribute is always the live line.
 - Events get a line too: a mode or temperature change, the schedule, a
   window, nobody home, a command that failed or was sent again, a restart,
-  and each auto-tune verdict (what it changed, or why it changed nothing).
+  and each auto-tune verdict (what it changed, or why it changed nothing). A
+  verdict longer than a state allows continues on the next line (`…`).
 - The `log` attribute keeps the last 30 lines, newest first. It isn't stored
   in the recorder. To read it on a dashboard:
 
