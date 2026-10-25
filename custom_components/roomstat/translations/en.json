@@ -259,6 +259,9 @@
         "state": {
           "heat": "Heat-up", "coast": "Coast", "hold": "Hold", "stop": "Stop"
         }
+      },
+      "activity": {
+        "name": "Activity"
       }
     },
     "button": {

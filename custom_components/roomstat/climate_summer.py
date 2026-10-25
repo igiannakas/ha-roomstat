@@ -70,7 +70,7 @@ class SummerMixin:
         """
         if not self._summer_active:
             return
-        _LOGGER.info("Summer mode is on: %s refused", action)
+        self._log(_LOGGER).info("Summer mode is on: %s refused", action)
         self._attr_force_update = True
         try:
             self.async_write_ha_state()
@@ -119,7 +119,7 @@ class SummerMixin:
         self._preset_mode = PRESET_FROST_PROTECTION
         self._target_temp = SUMMER_TARGET_C
         self._summer_bypass_rate_limit = bypass_rate_limit
-        _LOGGER.info("Summer mode on: thermostat locked at %.1f °C", SUMMER_TARGET_C)
+        self._log(_LOGGER).info("Summer mode on: thermostat locked at %.1f °C", SUMMER_TARGET_C)
 
     def _exit_summer_mode(self, rearm_sensors: bool) -> None:
         """Unlock the thermostat and return to the schedule (else COMFORT)."""
@@ -131,7 +131,7 @@ class SummerMixin:
         # Start regulation fresh: no integral from before summer, dt = 0.
         self._reg_state = RegulationState()
         self._last_regulation_ts = 0.0
-        _LOGGER.info("Summer mode off: returning to %s", self._preset_mode)
+        self._log(_LOGGER).info("Summer mode off: returning to %s", self._preset_mode)
         if rearm_sensors:
             self._summer_rearm_sensors()
 

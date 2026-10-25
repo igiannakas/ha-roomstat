@@ -7,7 +7,9 @@
 * the regulation trace: the command sent to the valve, the room error and
   the controller mode, each cycle.  The first two are measurement sensors,
   so their 5-minute statistics outlive the recorder's purge and a season of
-  behaviour can be analysed after the fact; the mode is an enum.
+  behaviour can be analysed after the fact; the mode is an enum;
+* the activity log: what the room is doing and why, in plain lines
+  (activity.py, climate_activity.py).
 """
 from __future__ import annotations
 
@@ -203,7 +205,10 @@ async def async_setup_entry(
     tuning = [RoomstatTuningSensor(coordinator, entry, d) for d in TUNING_SENSORS]
     # Written by the regulation cycle so a tuning change shows immediately.
     coordinator.tuning_entities = tuning
-    async_add_entities([entity, override, *tuning])
+    activity = RoomstatActivitySensor(coordinator, entry)
+    # Written by every cycle and every event (climate_activity.py).
+    coordinator.activity_entity = activity
+    async_add_entities([entity, override, *tuning, activity])
 
 
 class RoomstatTuningSensor(CoordinatorEntity, SensorEntity):
@@ -338,3 +343,54 @@ class RoomstatScheduleOverrideSensor(CoordinatorEntity, SensorEntity):
         if climate is None:
             return 0
         return climate.schedule_override_remaining_minutes
+
+
+class RoomstatActivitySensor(CoordinatorEntity, SensorEntity):
+    """What the room is doing and why: the latest line of its activity log.
+
+    The state's history is the log: one line per regulation decision,
+    written when something in it changes, and one per event (presets,
+    schedule, window, presence, commands that failed or went out again,
+    auto-tune verdicts).  ``log`` holds the last lines, newest first, for a
+    quick read (a Markdown card), and ``doing`` the current decision.  None
+    of the attributes go to the recorder: the state history already has
+    every line, and the numbers have their own trace sensors.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "activity"
+    _unrecorded_attributes = frozenset(
+        {"doing", "mode", "room_c", "target_c", "trv_c", "tado", "log"}
+    )
+
+    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+        """Initialize the activity sensor."""
+        super().__init__(coordinator)
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_activity"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info so this entity appears on the same device."""
+        return DeviceInfo(identifiers={(DOMAIN, self._entry.entry_id)})
+
+    @property
+    def _climate(self) -> Any:
+        return getattr(self.coordinator, "climate_entity", None)
+
+    @property
+    def available(self) -> bool:
+        """Available once the room's climate entity is."""
+        return self._climate is not None
+
+    @property
+    def native_value(self) -> str | None:
+        """The latest line."""
+        climate = self._climate
+        return None if climate is None else climate.activity_state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """The current decision, the numbers behind it and the recent lines."""
+        climate = self._climate
+        return None if climate is None else climate.activity_attributes()

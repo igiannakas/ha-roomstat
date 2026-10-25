@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import datetime
 import enum
 import importlib.util
 import sys
@@ -179,6 +180,8 @@ def _install_ha_stubs() -> None:
     mod("homeassistant.helpers.restore_state", ExtraStoredData=ExtraStoredData,
         RestoreEntity=RestoreEntity)
     mod("homeassistant.helpers.update_coordinator", CoordinatorEntity=CoordinatorEntity)
+    mod("homeassistant.util")
+    mod("homeassistant.util.dt", get_default_time_zone=lambda: datetime.UTC)
 
 
 def _load_entity_package():

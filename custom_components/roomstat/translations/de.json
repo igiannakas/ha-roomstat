@@ -259,6 +259,9 @@
         "state": {
           "heat": "Aufheizen", "coast": "Ausrollen", "hold": "Halten", "stop": "Stopp"
         }
+      },
+      "activity": {
+        "name": "Aktivität"
       }
     },
     "button": {

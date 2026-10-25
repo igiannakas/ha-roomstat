@@ -94,9 +94,8 @@ class ScheduleMixin:
             self._schedule_start_override(sticky=True)
         elif preset_mode == ctrl.schedule_preset:
             if ctrl.override_active:
-                _LOGGER.info(
-                    "%s: the schedule's preset picked by hand, override ended",
-                    self._config_entry.title,
+                self._log(_LOGGER).info(
+                    "the schedule's preset picked by hand, override ended",
                 )
             ctrl.clear_override()
         else:
@@ -116,9 +115,8 @@ class ScheduleMixin:
             and self._preset_mode not in (PRESET_AWAY, PRESET_FROST_PROTECTION)
         ):
             ctrl.clear_override()
-            _LOGGER.info(
-                "%s: the Away or Off picked by hand is over, the schedule applies",
-                self._config_entry.title,
+            self._log(_LOGGER).info(
+                "the Away or Off picked by hand is over, the schedule applies",
             )
 
     def _schedule_note_manual_temperature(self) -> None:
@@ -135,16 +133,15 @@ class ScheduleMixin:
             self._async_schedule_override_expired,
             sticky=sticky,
         )
-        _LOGGER.info(
-            "%s: schedule override started (%s)",
-            self._config_entry.title,
+        self._log(_LOGGER).info(
+            "schedule override started (%s)",
             "sticky" if sticky else (f"{duration} min" if duration else "until next change"),
         )
 
     async def _async_schedule_override_expired(self, _now) -> None:
         """Override timer ran out: return to the schedule."""
         self._schedule_ctrl.timer_fired()
-        _LOGGER.info("%s: schedule override expired", self._config_entry.title)
+        self._log(_LOGGER).info("schedule override expired")
         await self._async_follow_schedule(trigger="override_expired")
 
     async def async_resume_schedule(self) -> None:
@@ -161,7 +158,7 @@ class ScheduleMixin:
                 translation_key="no_schedule",
             )
         self._schedule_ctrl.clear_override()
-        _LOGGER.info("%s: schedule resumed", self._config_entry.title)
+        self._log(_LOGGER).info("schedule resumed")
         if self._presence_ctrl.end_override():
             # The room takes the schedule's preset quietly, then away mode
             # saves it for the return (one regulation cycle, no heat call
@@ -169,7 +166,7 @@ class ScheduleMixin:
             preset = self._schedule_ctrl.schedule_preset
             if preset is not None:
                 self._apply_quietly(SavedState(preset, self._get_preset_target(preset)))
-            _LOGGER.info("%s: nobody is home, back to away", self._config_entry.title)
+            self._log(_LOGGER).info("nobody is home, back to away")
             await self._async_reenter_away(trigger="resume_schedule")
             return
         await self._async_follow_schedule(trigger="resume_schedule")
@@ -194,7 +191,7 @@ class ScheduleMixin:
         preset = parse_schedule_preset(state)
         if preset is None:
             if state not in (None, "unavailable", "unknown"):
-                _LOGGER.warning(
+                self._log(_LOGGER).warning(
                     "Schedule helper %s has unsupported value %r – ignored",
                     self._schedule_entity_id,
                     state,
@@ -202,7 +199,7 @@ class ScheduleMixin:
             return
         apply_now = self._schedule_ctrl.schedule_changed(preset)
         if apply_now and not self._summer_active:
-            _LOGGER.info("%s: schedule switching to %s", self._config_entry.title, preset)
+            self._log(_LOGGER).info("schedule switching to %s", preset)
             self.hass.async_create_task(
                 self._async_apply_preset(preset, trigger="schedule")
             )
@@ -239,7 +236,7 @@ class ScheduleMixin:
             return
 
         if ctrl.rearm(self.hass, time.time(), self._async_schedule_override_expired):
-            _LOGGER.info("Startup: schedule override expired while HA was down")
+            self._log(_LOGGER).info("Startup: schedule override expired while HA was down")
 
         if not ctrl.override_active and ctrl.schedule_preset is not None:
             # Follow the schedule without side effects (not added yet).

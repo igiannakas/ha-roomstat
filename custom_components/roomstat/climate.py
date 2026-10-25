@@ -42,6 +42,7 @@ from .autotune import (
     SlopeEstimator,
     Tuning,
 )
+from .climate_activity import ActivityMixin
 from .climate_controllers import (
     STARTUP_ARM_OPEN,
     STARTUP_RESTORE,
@@ -124,8 +125,9 @@ class _AutomationExtraData(ExtraStoredData):
     The out-of-band monitor's low since the last setback rides along under
     ``out_of_band``, the last TRV command under ``command``
     (CommandRecord: a reload seconds after a command must not forget it),
-    and the room slope's recent samples under ``slope`` (a restart in the
-    middle of a heat-up must not blind its predicted stop).
+    the room slope's recent samples under ``slope`` (a restart in the
+    middle of a heat-up must not blind its predicted stop), and the activity
+    log's lines under ``activity`` (a reload must not empty it).
     """
 
     def __init__(
@@ -135,12 +137,14 @@ class _AutomationExtraData(ExtraStoredData):
         out_of_band: dict[str, Any] | None = None,
         command: dict[str, Any] | None = None,
         slope: dict[str, Any] | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
         self._out_of_band = out_of_band
         self._command = command
         self._slope = slope
+        self._activity = activity
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -153,6 +157,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["command"] = self._command
         if self._slope is not None:
             data["slope"] = self._slope
+        if self._activity is not None:
+            data["activity"] = self._activity
         return data
 
 
@@ -173,6 +179,7 @@ async def async_setup_entry(
 
 
 class RoomstatClimate(
+    ActivityMixin,
     RegulationMixin,
     PresetMixin,
     ScheduleMixin,
@@ -240,6 +247,8 @@ class RoomstatClimate(
             ),
         )
         self._slope = SlopeEstimator()
+        # The activity log (climate_activity.py): set up before anything logs.
+        self._activity_setup()
         # Set if the tuner ever raises: it is then ignored until restart.
         self._autotune_failed = False
         self._apply_active_tuning()
@@ -455,7 +464,7 @@ class RoomstatClimate(
         try:
             summary = self._autotuner.summary(now=time.time())
         except Exception:  # noqa: BLE001 - diagnostics must never break state writes
-            _LOGGER.exception("%s: auto-tune summary failed", self._config_entry.title)
+            self._log(_LOGGER).exception("auto-tune summary failed")
             self._autotune_failed = True
             self._apply_active_tuning()     # fall back to the configured values
             return {"status": STATUS_DISABLED, "error": "auto-tune failed, see log"}
@@ -467,7 +476,7 @@ class RoomstatClimate(
         """Forget learned values and return to the configured ones."""
         self._autotuner.reset()
         self._apply_active_tuning()
-        _LOGGER.info("%s: auto-tune reset to configured values", self._config_entry.title)
+        self._log(_LOGGER).info("auto-tune reset to configured values")
         self._write_state_with_binary_sensor()
 
     @staticmethod
@@ -510,6 +519,11 @@ class RoomstatClimate(
             if isinstance(extra_dict, dict):
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
+                # What the tuner last did is in its restored state, not new.
+                self._activity_tuner_seen = (
+                    self._autotuner.verdicts, self._autotuner.last_event
+                )
+                self._activity.restore(extra_dict.get("activity"))
                 self._band_monitor.restore(extra_dict.get("out_of_band"))
                 # The last command, if it was only seconds ago (an entry
                 # reload): its rate limit, and that it may not show in the
@@ -523,6 +537,11 @@ class RoomstatClimate(
                         self._config_entry.title,
                         "known" if self._slope.slope_c_per_s() is not None else "too short yet",
                     )
+        # A line in the activity log, so a gap in it reads as what it was.
+        self._log(_LOGGER).info(
+            "started (Home Assistant restart or room reload)%s",
+            "" if extra is not None else "; nothing saved to take back",
+        )
 
         # Carry on a heat burst (or stop) the TRV is still holding.  What
         # the TRV holds is the last command it took (or one still on its
@@ -587,13 +606,13 @@ class RoomstatClimate(
                 self._boost_cancel = async_call_later(
                     self.hass, boost.remaining_s, self._async_boost_expired
                 )
-                _LOGGER.info(
+                self._log(_LOGGER).info(
                     "Startup: boost resumed, %d min remaining",
                     math.ceil(boost.remaining_s / 60),
                 )
             else:
                 self._apply_saved_preset(boost.fallback)
-                _LOGGER.info(
+                self._log(_LOGGER).info(
                     "Startup: boost ended while HA was down, reverting to %s",
                     boost.fallback.preset,
                 )
@@ -716,20 +735,18 @@ class RoomstatClimate(
             # while HA was down is handled at once, as at any other time.
             action = presence_startup_action(True, bool(presence_sensor), state)
             if action == STARTUP_RESTORE:
-                _LOGGER.info(
-                    "%s: startup, presence sensor is %s, the change made while "
+                self._log(_LOGGER).info(
+                    "startup, presence sensor is %s, the change made while "
                     "nobody was home stays",
-                    self._config_entry.title,
                     state if presence_sensor else "not configured",
                 )
                 self._presence_ctrl.end_override()
             elif self._presence_ctrl.rearm_override(
                 self.hass, time.time(), self._async_presence_override_expired
             ):
-                _LOGGER.info(
-                    "%s: startup, the limit of the change made while nobody was "
+                self._log(_LOGGER).info(
+                    "startup, the limit of the change made while nobody was "
                     "home ran out while Home Assistant was down",
-                    self._config_entry.title,
                 )
             return
 
@@ -737,7 +754,7 @@ class RoomstatClimate(
             # Re-armed from the persisted snapshot.
             action = presence_startup_action(True, bool(presence_sensor), state)
             if action == STARTUP_RESTORE:
-                _LOGGER.info(
+                self._log(_LOGGER).info(
                     "Startup: presence automation was active, sensor is %s – restoring",
                     state if presence_sensor else "not configured",
                 )
@@ -754,7 +771,7 @@ class RoomstatClimate(
                 # saved state so that coming home restores a useful preset
                 # instead of AWAY → AWAY (no-op).
                 self._presence_ctrl.activate(PRESET_COMFORT, self._comfort_target())
-                _LOGGER.info(
+                self._log(_LOGGER).info(
                     "Startup: preset AWAY restored, controller pre-activated "
                     "with COMFORT as saved state"
                 )
@@ -763,7 +780,7 @@ class RoomstatClimate(
                 self._presence_ctrl.handle_presence_away(
                     self.hass, delay, self._async_presence_away_action
                 )
-                _LOGGER.info("Startup: presence sensor is away, action in %ds", delay)
+                self._log(_LOGGER).info("Startup: presence sensor is away, action in %ds", delay)
         elif state not in ("unavailable", "unknown"):
             # Legacy (no snapshot): presence shows home but preset was restored
             # as AWAY – the user returned while HA was down.  With a snapshot
@@ -771,7 +788,7 @@ class RoomstatClimate(
             if self._preset_mode == PRESET_AWAY and persisted is None:
                 self._preset_mode = PRESET_COMFORT
                 self._target_temp = self._comfort_target()
-                _LOGGER.info(
+                self._log(_LOGGER).info(
                     "Startup: presence is home but preset was AWAY, "
                     "switching to COMFORT"
                 )
@@ -784,7 +801,7 @@ class RoomstatClimate(
             self._window_ctrl.is_active, bool(window_sensor), state
         )
         if action == STARTUP_RESTORE:
-            _LOGGER.info(
+            self._log(_LOGGER).info(
                 "Startup: window automation was active, sensor is %s – restoring",
                 state if window_sensor else "not configured",
             )
@@ -794,7 +811,7 @@ class RoomstatClimate(
             self._window_ctrl.handle_window_opened(
                 self.hass, delay, self._async_window_action
             )
-            _LOGGER.info("Startup: window sensor is open, action in %ds", delay)
+            self._log(_LOGGER).info("Startup: window sensor is open, action in %ds", delay)
 
     def _apply_saved_preset(self, saved: SavedState) -> None:
         """Switch to a saved preset/temperature without side effects."""
@@ -815,6 +832,7 @@ class RoomstatClimate(
             self._band_monitor.as_dict(),
             self._command_record().as_dict(),
             self._slope.to_dict(),
+            self._activity.as_dict(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -938,6 +956,10 @@ class RoomstatClimate(
 
         previous_mode = self._hvac_mode
         self._hvac_mode = hvac_mode
+        if hvac_mode != previous_mode:
+            self._log(_LOGGER).info(
+                "switched %s", "off" if hvac_mode == HVACMode.OFF else "on (heat)"
+            )
         self.async_write_ha_state()
 
         # Forward HVAC mode to the source TRV entity
@@ -966,7 +988,7 @@ class RoomstatClimate(
                     self._window_ctrl.handle_window_opened(
                         self.hass, delay, self._async_window_action
                     )
-                    _LOGGER.info(
+                    self._log(_LOGGER).info(
                         "HVAC OFF→HEAT: window still open, frost action in %ds",
                         delay,
                     )
@@ -996,10 +1018,11 @@ class RoomstatClimate(
         except (ValueError, TypeError):
             return
         if not math.isfinite(temp_f):
-            _LOGGER.warning("Ignoring non-finite temperature: %s", temp)
+            self._log(_LOGGER).warning("Ignoring non-finite temperature: %s", temp)
             return
         # Clamp to safe range
         temp_f = max(self._config.min_target_c, min(self._config.max_target_c, temp_f))
+        self._log(_LOGGER).info("temperature set to %.1f °C", temp_f)
 
         # A manual temperature overrides the schedule (see climate_schedule.py)
         self._schedule_note_manual_temperature()
@@ -1014,9 +1037,8 @@ class RoomstatClimate(
         # An open window still wins: save the temperature for its close.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(PRESET_NONE, temp_f)
-            _LOGGER.info(
-                "%s: window open, %.1f °C saved for the close",
-                self._config_entry.title, temp_f,
+            self._log(_LOGGER).info(
+                "window open, %.1f °C saved for the close", temp_f,
             )
             self.async_write_ha_state()
             return

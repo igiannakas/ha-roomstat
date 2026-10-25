@@ -82,6 +82,9 @@
           "hold": "mdi:approximately-equal",
           "stop": "mdi:stop-circle-outline"
         }
+      },
+      "activity": {
+        "default": "mdi:text-box-search-outline"
       }
     },
     "binary_sensor": {

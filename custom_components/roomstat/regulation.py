@@ -147,6 +147,48 @@ def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
 # Regulator
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Outlook:
+    """The predictions one cycle's mode is decided on (one-sided, see the
+    module docstring).  Errors are setpoint - room: positive is below."""
+
+    rising_c_per_s: float     # the rise beyond the slope deadband, 0 if none
+    falling_c_per_s: float    # the fall beyond the slope deadband, 0 if none
+    lead_s: float             # the braking time Td (0: no lead)
+    stop_lead_s: float        # max(stop_lead_s, Td)
+    landing_c: float          # left to go once the radiator's heat is out: error - Td x rise
+    stop_landing_c: float     # error - stop_lead x rise (<= -stop_over_c: stop)
+    release_c: float          # error + release_lead x fall (>= release_below_c: release)
+
+
+def outlook(error_c: float, room_slope_c_per_s: float | None,
+            config: RegulationConfig) -> Outlook:
+    """The heat-up end, stop and release predictions for this error and slope.
+
+    The regulator decides on these, and the activity log explains its
+    decisions with the same numbers."""
+    rising = falling = 0.0
+    if room_slope_c_per_s is not None and math.isfinite(room_slope_c_per_s):
+        deadband = config.slope_deadband_c_per_h / 3600.0
+        rising = max(0.0, room_slope_c_per_s - deadband)
+        falling = max(0.0, -room_slope_c_per_s - deadband)
+    td_s = config.tuning.td_s
+    lead_s = td_s if math.isfinite(td_s) and td_s > 0 else 0.0
+    # The stop looks at least as far ahead as a heat-up: the radiator's
+    # coast (Td) is the same however the heat got there.
+    stop_lead_s = max(config.stop_lead_s, lead_s)
+    return Outlook(
+        rising_c_per_s=rising,
+        falling_c_per_s=falling,
+        lead_s=lead_s,
+        stop_lead_s=stop_lead_s,
+        # Where the room ends up once the heat still in the radiator is out.
+        landing_c=error_c - lead_s * rising,
+        stop_landing_c=error_c - stop_lead_s * rising,
+        release_c=error_c + config.release_lead_s * falling,
+    )
+
+
 class FeedforwardPiRegulator:
     """Roomstat's regulator (see the module docstring)."""
 
@@ -159,21 +201,12 @@ class FeedforwardPiRegulator:
         config: RegulationConfig,
     ) -> str:
         """The mode for this cycle (see the module docstring)."""
-        rising = falling = 0.0
-        if room_slope_c_per_s is not None and math.isfinite(room_slope_c_per_s):
-            deadband = config.slope_deadband_c_per_h / 3600.0
-            rising = max(0.0, room_slope_c_per_s - deadband)
-            falling = max(0.0, -room_slope_c_per_s - deadband)
-        td_s = config.tuning.td_s
-        lead_s = td_s if math.isfinite(td_s) and td_s > 0 else 0.0
-        # Where the room ends up once the heat still in the radiator is out.
-        landing = error_c - lead_s * rising
-
+        o = outlook(error_c, room_slope_c_per_s, config)
         if mode == MODE_HEAT:
-            return MODE_COAST if landing <= config.heatup_exit_c else MODE_HEAT
-        if error_c >= config.heatup_enter_c and landing > config.heatup_exit_c:
+            return MODE_COAST if o.landing_c <= config.heatup_exit_c else MODE_HEAT
+        if error_c >= config.heatup_enter_c and o.landing_c > config.heatup_exit_c:
             return MODE_HEAT
-        if mode == MODE_COAST and error_c > 0 and rising > 0:
+        if mode == MODE_COAST and error_c > 0 and o.rising_c_per_s > 0:
             return MODE_COAST
         # A coast that has reached the target (or a shut valve resumed after
         # a restart with the room at or above it) stays shut until the room
@@ -182,16 +215,10 @@ class FeedforwardPiRegulator:
         if mode == MODE_COAST and error_c <= 0:
             return MODE_STOP
         # Near the target: fine adjustments, with a firm stop ahead of an
-        # overshoot that lasts until the room needs heat again.  It looks at
-        # least as far ahead as a heat-up: the radiator's coast (Td) is the
-        # same however the heat got there.
-        stop_lead_s = max(config.stop_lead_s, lead_s)
-        if error_c - stop_lead_s * rising <= -config.stop_over_c:
+        # overshoot that lasts until the room needs heat again.
+        if o.stop_landing_c <= -config.stop_over_c:
             return MODE_STOP
-        if (
-            mode == MODE_STOP
-            and error_c + config.release_lead_s * falling < config.release_below_c
-        ):
+        if mode == MODE_STOP and o.release_c < config.release_below_c:
             return MODE_STOP
         return MODE_HOLD
 

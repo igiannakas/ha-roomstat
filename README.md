@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.9.2-blue)
+![Version](https://img.shields.io/badge/version-2.10.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -94,6 +94,12 @@ changes.
   even after the recorder has purged the detail. With debug logging on for
   `custom_components.roomstat`, every cycle also writes one line to the log
   with its whole decision.
+- **An activity log per room.** The **Activity** sensor says in a line what
+  the room is doing and why, and why it isn't doing something else (no full
+  heat yet, a command waiting for the rate limit), with the valve's own
+  reading and what the valve has been told. It also notes events (modes,
+  schedule, windows, presence, failed commands) and what auto-tune changed
+  or why it changed nothing. See [Activity log](#activity-log).
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual
@@ -173,6 +179,36 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 
 You can set the braking time by hand instead, under **Configure →
 Controller → Heat-up braking time**, with **Learn heat-up braking** off.
+
+## Activity log
+
+Each room has a sensor named **Activity**, for example
+`sensor.living_room_thermostat_activity`. Its state is the latest line, so
+its history (and the logbook) is the room's log. For example:
+
+```
+Holding (the coast stalled 0.5 short): 0.5 below, valve pushed 1.9 over its
+reading (P +1.4, I +0.00; I rests outside ±0.3; full heat only from 0.8 below)
+| room 19.5 → 20.0 Comfort | TRV 19.2 heating | Tado 21.1
+```
+
+- A new line is written when the decision changes (the mode, what the valve
+  is told, a command waiting or failing, the target), and every 5 minutes
+  while only the numbers move. The `doing` attribute is always the live
+  line.
+- Events get a line too: a mode or temperature change, the schedule, a
+  window, nobody home, a command that failed or was sent again, a restart,
+  and each auto-tune verdict (what it changed, or why it changed nothing).
+- The `log` attribute keeps the last 30 lines, newest first. It isn't stored
+  in the recorder. To read it on a dashboard:
+
+```yaml
+type: markdown
+content: >-
+  {% for line in state_attr('sensor.living_room_thermostat_activity', 'log') %}
+  - {{ line }}
+  {% endfor %}
+```
 
 ## Schedule
 

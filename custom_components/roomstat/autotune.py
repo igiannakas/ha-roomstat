@@ -794,6 +794,18 @@ def _tuning_dict(t: Tuning) -> dict[str, float]:
     return {"kp": round(t.kp, 6), "ki": round(t.ki, 8), "td_s": round(t.td_s, 1)}
 
 
+def _change_text(cur: Tuning, new: Tuning) -> str:
+    """'Kp 3.00→2.55, braking 13.1→7.0 min' for the values that differ."""
+    parts = []
+    if abs(new.kp - cur.kp) > 0.005 * max(cur.kp, 1e-9):
+        parts.append(f"Kp {cur.kp:.2f}→{new.kp:.2f}")
+    if abs(new.ki - cur.ki) > 0.005 * max(cur.ki, 1e-12):
+        parts.append(f"Ki {cur.ki:.5f}→{new.ki:.5f}")
+    if abs(new.td_s - cur.td_s) >= 1.0:
+        parts.append(f"braking {cur.td_s / 60:.1f}→{new.td_s / 60:.1f} min")
+    return ", ".join(parts) or "nothing"
+
+
 class Autotuner:
     """Learns per-room Kp / Ki / Td from everyday heat-ups and holds.
 
@@ -863,6 +875,15 @@ class Autotuner:
         self._counters = {"heatups": 0, "holds": 0, "updates": 0, "rollbacks": 0}
         self.last_update_reason = ""
         self.last_event = "waiting for a heat-up"
+        # What the last judged episode did to the values, or why it changed
+        # nothing (the activity log), and when a change it wants may be made
+        # (a rate limit), as a timestamp.  ``verdicts`` counts them, so a
+        # caller can tell a new verdict from the same text again.
+        self.last_verdict = ""
+        self.last_verdict_until: float | None = None
+        self.verdicts = 0
+        self._update_note = ""
+        self._update_until: float | None = None
 
     def reset(self) -> None:
         """Forget everything learned and return to the configured values."""
@@ -1107,9 +1128,21 @@ class Autotuner:
         }[name]
         self._trim[name] = _clamp(self._trim[name] * factor, lo, hi)
 
+    def _set_verdict(self, notes: list[str]) -> None:
+        """Record what the episode just judged did, or why it changed nothing."""
+        parts = [n for n in notes if n]
+        if self._update_note:
+            parts.append(self._update_note)
+        self.last_verdict = "; ".join(parts)
+        self.last_verdict_until = self._update_until
+        self.verdicts += 1
+        self._update_note = ""
+        self._update_until = None
+
     def _on_heatup(self, m: HeatupMetrics | None, now: float) -> str | None:
         if m is None:
             self.last_event = "heat-up too short to analyse"
+            self._set_verdict(["nothing learned"])
             return None
         c = self.cfg
         self._heatups.append(m)
@@ -1124,8 +1157,12 @@ class Autotuner:
                if m.later_rise_c is not None and m.later_rise_c >= 0.05 else "")
         )
         os = m.overshoot_c
+        notes: list[str] = []
         if os is None:
-            return self._maybe_update(now, "heat-up")
+            notes.append("no overshoot vote (cut short below the target)")
+            reason = self._maybe_update(now, "heat-up")
+            self._set_verdict(notes)
+            return reason
 
         # Residual trims on top of the coast-based Td target.  More braking
         # (safe direction) needs one episode, less braking needs confirm_up.
@@ -1135,9 +1172,16 @@ class Autotuner:
         td_near_model = td_model is None or m.td_s >= 0.85 * td_model
         braking = m.td_s > 0                       # a braking time was set (learned or manual)
         learns_td = self.derivative_allowed and braking
+        need = c.confirm_up
         if os > c.overshoot_target_c + 0.1:
             if learns_td and td_near_model:
                 self._trim_by("td_s", 1.15)
+                notes.append(f"overshoot {os:+.2f} °C: more braking (×1.15)")
+            elif learns_td:
+                notes.append(f"overshoot {os:+.2f} °C, but it braked well under the "
+                             "learned braking time: no vote")
+            else:
+                notes.append(f"overshoot {os:+.2f} °C: the braking time is not learned here")
             self._votes["td_down"] = 0
             self._votes["kp_up"] = 0
         elif os < -c.undershoot_sag_c:
@@ -1146,30 +1190,49 @@ class Autotuner:
             # room that never got there with demand still positive is
             # under-powered (cold weather, small radiator): more gain will
             # not help, so it is not evidence either way.
-            if not m.crossed or m.truncated:
-                pass
+            short = f"stopped {-os:.2f} °C short"
+            if not m.crossed:
+                notes.append(f"{short} with the valve never told to stop "
+                             "(not enough heat): no vote")
+            elif m.truncated:
+                notes.append(f"{short} but cut short: no vote")
             elif braking:
                 if learns_td:
                     self._votes["td_down"] += 1
-                    if self._votes["td_down"] >= c.confirm_up:
+                    if self._votes["td_down"] >= need:
                         self._trim_by("td_s", 0.85)
                         self._votes["td_down"] = 0
-                # Manual braking time with learning off: the user's Td is
-                # the cause; raising Kp would not help.
+                        notes.append(f"{short}: less braking (×0.85, {need} of {need} votes)")
+                    else:
+                        notes.append(f"{short}: vote {self._votes['td_down']} of {need} "
+                                     "for less braking")
+                else:
+                    # Manual braking time with learning off: the user's Td is
+                    # the cause; raising Kp would not help.
+                    notes.append(f"{short}: the braking time is set by hand, not learned")
             else:
                 self._votes["kp_up"] += 1
-                if self._votes["kp_up"] >= c.confirm_up:
+                if self._votes["kp_up"] >= need:
                     self._trim_by("kp", 1.1)
                     self._votes["kp_up"] = 0
+                    notes.append(f"{short} with no braking time: more Kp (×1.1)")
+                else:
+                    notes.append(f"{short} with no braking time: vote "
+                                 f"{self._votes['kp_up']} of {need} for more Kp")
         elif os < 0.5 * c.overshoot_target_c and learns_td and not m.truncated:
             # Comfortably inside the target: give a little speed back.
             self._votes["td_down"] += 1
-            if self._votes["td_down"] >= c.confirm_up:
+            if self._votes["td_down"] >= need:
                 self._trim_by("td_s", 0.9)
                 self._votes["td_down"] = 0
+                notes.append(f"landed {os:+.2f} °C: a little less braking (×0.9)")
+            else:
+                notes.append(f"landed {os:+.2f} °C: vote {self._votes['td_down']} of {need} "
+                             "for a little less braking")
         else:
             self._votes["td_down"] = 0
             self._votes["kp_up"] = 0
+            notes.append(f"landed {os:+.2f} °C: on target, no vote")
 
         if self._pending is not None and now > self._pending["ts"]:
             self._pending["overshoots"].append(os)
@@ -1178,9 +1241,14 @@ class Autotuner:
                 ref = self._pending["ref_overshoot"]
                 if (ref is not None and med is not None
                         and med > ref + c.rollback_margin_c and med > c.overshoot_target_c):
-                    return self._rollback(now, f"overshoot rose to {med:.2f} °C")
+                    reason = self._rollback(now, f"overshoot rose to {med:.2f} °C")
+                    self._set_verdict(notes + [reason])
+                    return reason
                 self._accept_pending()
-        return self._maybe_update(now, "heat-up")
+                notes.append("the last change passed its trial")
+        reason = self._maybe_update(now, "heat-up")
+        self._set_verdict(notes)
+        return reason
 
     def _on_hold(self, m: HoldMetrics | None, now: float) -> str | None:
         c = self.cfg
@@ -1188,6 +1256,10 @@ class Autotuner:
             return None
         if m.heating_fraction < c.hold_min_heating_fraction:
             self.last_event = "hold window ignored (no heating – passive cool-down)"
+            self._set_verdict([
+                f"the valve heated {m.heating_fraction:.0%} of the 3 h (needs "
+                f"{c.hold_min_heating_fraction:.0%}): Kp and Ki are judged only while it heats"
+            ])
             return None
         self._holds.append(m)
         del self._holds[:-4]
@@ -1201,6 +1273,10 @@ class Autotuner:
                 f"hold: oscillation ±{m.amplitude_c:.2f} °C"
                 + (f", period {m.period_s / 60:.0f} min" if m.period_s else "")
             )
+            notes = [
+                "a fast swing: less Kp (×0.85)" if fast
+                else "a slow swing: less Ki (×0.7)"
+            ]
             emergency = m.amplitude_c >= c.emergency_amplitude_factor * c.osc_amplitude_c
             rolled = None
             if self._pending is not None and (emergency or not self._pending["ref_osc"]):
@@ -1208,16 +1284,21 @@ class Autotuner:
                 # else: it is never accepted silently.
                 rolled = self._rollback(now, "oscillation after the last change")
                 if not emergency:
+                    self._set_verdict(notes + [rolled])
                     return rolled
+                notes.append(rolled)
             if emergency:
                 # Cut from where the values actually are, so a trim that was
                 # raised but not yet applied cannot swallow the cut.
                 self._anchor_trims(only_down=True)
                 self._trim_by("kp", 0.85)
                 self._trim_by("ki", 0.7)
+                notes.append("a large swing: emergency cut of Kp and Ki")
             reason = self._maybe_update(now, "oscillation", emergency=emergency)
+            self._set_verdict(notes)
             return reason or rolled
         self.last_event = f"hold: mean error {m.mean_error_c:+.2f} °C, no oscillation"
+        notes = ["no swing: Kp stays (it moves only on a swing)"]
         # Only a room that stays too *cold* while heating, with no swinging
         # at all, argues for a faster integral.  A room that stays too warm is
         # coasting heat (Td's job) and a partial swing is not an offset: both
@@ -1227,9 +1308,17 @@ class Autotuner:
             if self._votes["ki_up"] >= c.confirm_up:
                 self._trim_by("ki", 1.2)
                 self._votes["ki_up"] = 0
+                notes.append(f"stays {m.mean_error_c:.2f} °C under: more Ki (×1.2)")
+            else:
+                notes.append(f"stays {m.mean_error_c:.2f} °C under: vote "
+                             f"{self._votes['ki_up']} of {c.confirm_up} for more Ki")
         else:
             self._votes["ki_up"] = 0
-        return self._maybe_update(now, "hold")
+            notes.append(f"no lasting offset ({m.mean_error_c:+.2f} °C, needs "
+                         f"{c.hold_offset_c:.2f} under): no Ki vote")
+        reason = self._maybe_update(now, "hold")
+        self._set_verdict(notes)
+        return reason
 
     # -- updates ------------------------------------------------------------------
     @staticmethod
@@ -1240,7 +1329,13 @@ class Autotuner:
 
     def _maybe_update(self, now: float, trigger: str, *, emergency: bool = False) -> str | None:
         c = self.cfg
+        self._update_until = None
         if not emergency and self._pending is not None:
+            judged = len(self._pending.get("overshoots") or [])
+            self._update_note = (
+                "no change while the last one is on trial "
+                f"({judged} of {self._pending.get('needs', c.confirm_up)} heat-ups judged)"
+            )
             return None
         cur = self._params
         tgt = self._targets()
@@ -1277,11 +1372,18 @@ class Autotuner:
 
         changed = new != cur
         if not changed:
+            self._update_note = self._unchanged_note(cur, tgt)
             return None
         more_heat = (new.kp > cur.kp * 1.0001 or new.ki > cur.ki * 1.0001
                      or new.td_s < cur.td_s - 1.0)
         interval = c.min_interval_up_s if more_heat else c.min_interval_down_s
         if not emergency and self._last_change_ts and now - self._last_change_ts < interval:
+            self._update_note = (
+                f"wants {_change_text(cur, new)}, but "
+                f"{'a change towards more heat' if more_heat else 'a gentler change'} waits "
+                f"{interval / 3600:.0f} h after the last one"
+            )
+            self._update_until = self._last_change_ts + interval
             return None
 
         if more_heat:
@@ -1313,8 +1415,41 @@ class Autotuner:
         if abs(new.td_s - cur.td_s) >= 1.0:
             parts.append(f"td {cur.td_s / 60:.0f}→{new.td_s / 60:.0f} min")
         self.last_update_reason = f"{trigger}: " + ", ".join(parts)
+        self._update_note = f"changed {_change_text(cur, new)}" + (
+            f" (on trial: judged on the next {c.confirm_up} heat-ups)"
+            if self._pending is not None else ""
+        )
         _LOGGER.info("Auto-tune update (%s)", self.last_update_reason)
         return self.last_update_reason
+
+    def _unchanged_note(self, cur: Tuning, tgt: Tuning) -> str:
+        """Why the values stay: at their targets, or the steps too small."""
+        c = self.cfg
+        m = self._model()
+        if m["theta_s"] is not None and self._baseline.ki > 0:
+            ki_why = f"Ki from the {m['theta_s'] / 60:.0f}-min dead time"
+        else:
+            have = sum(1 for h in self._heatups if h.theta_s)
+            ki_why = (f"Ki as configured until {c.simc_min_episodes} heat-ups give a "
+                      f"dead time (has {have})")
+        if self.derivative_allowed and m["coast_s"] is not None:
+            td_why = (f"braking = coast {m['coast_s'] / 60:.1f} min × "
+                      f"{self._trim['td_s']:.2f}")
+        else:
+            td_why = "braking not learned yet" if self.derivative_allowed else "braking set by hand"
+        close = (
+            abs(tgt.kp - cur.kp) <= 0.005 * max(cur.kp, 1e-9)
+            and abs(tgt.ki - cur.ki) <= 0.005 * max(cur.ki, 1e-12)
+            and (not self.derivative_allowed or abs(tgt.td_s - cur.td_s) < 1.0)
+        )
+        values = (f"Kp {cur.kp:.2f}, Ki {cur.ki:.5f}"
+                  + (f", braking {cur.td_s / 60:.1f} min" if self.derivative_allowed else ""))
+        if close:
+            return f"no change: {values} are at their targets ({ki_why}; {td_why})"
+        want = (f"Kp {tgt.kp:.2f}, Ki {tgt.ki:.5f}"
+                + (f", braking {tgt.td_s / 60:.1f} min" if self.derivative_allowed else ""))
+        return (f"no change: {values}; targets {want} are within the dead-bands or the "
+                f"bounds ({ki_why}; {td_why})")
 
     def _anchor_trims(self, only_down: bool = False) -> None:
         """Set the trims so the targets equal the current values.

@@ -36,21 +36,30 @@ HA-free (testable directly):        HA bridge:
 parameters.py → regulation.py       climate.py (entity, mixin composition)
 parameters.py → autotune.py         ├─ climate_regulation.py (RegulationMixin)
 climate_controllers.py              ├─ climate_presets.py (PresetMixin)
-                                    ├─ climate_schedule.py (ScheduleMixin)
+regulation.py → activity.py         ├─ climate_schedule.py (ScheduleMixin)
                                     ├─ climate_summer.py (SummerMixin)
+                                    ├─ climate_activity.py (ActivityMixin)
                                     └─ __init__.py (coordinator), config_flow.py
 ```
 
 Build new logic in the HA-free modules first (`parameters.py`,
-`regulation.py`, `autotune.py`, `climate_controllers.py`), then wire it into
-the HA modules.
+`regulation.py`, `autotune.py`, `climate_controllers.py`, `activity.py`),
+then wire it into the HA modules.
 
 ### Key files
 
 - `parameters.py`: all defaults (RegulationConfig, PresetConfig,
   CorrectionTuning, BehaviourConfig, AutotuneConfig).
-- `regulation.py`: the controller (modes heat / coast / hold / stop).
-- `autotune.py`: background tuning of Kp, Ki and the braking time Td.
+- `regulation.py`: the controller (modes heat / coast / hold / stop);
+  `outlook()` holds the predictions a mode is decided on, which the
+  activity log explains with.
+- `autotune.py`: background tuning of Kp, Ki and the braking time Td. Each
+  judged episode leaves a verdict (`last_verdict`, `last_verdict_until`,
+  `verdicts`): what it changed, or why it changed nothing (a vote short, on
+  trial, rate limit, at the targets).
+- `activity.py`: the activity log (`ActivityLog`), the decision line per
+  cycle (`describe_cycle`, `decision_key`) and `RoomLogAdapter` (see
+  "Activity log" below).
 - `climate_controllers.py`: window, presence, summer and schedule state
   machines (`window_recovery_wait`: the close delay runs on until the room
   has stopped re-warming by itself), restart persistence helpers,
@@ -75,11 +84,15 @@ the HA modules.
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
 - `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
+- `climate_activity.py`: the room's activity log on the entity: a decision
+  line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
+  verdicts, the sensor's state and attributes, persistence (`activity`).
 - `number.py`: preset temperatures. `sensor.py`: boost remaining, schedule
   override remaining, auto-tune sensors, and the regulation trace (command to
   the valve, room error as measurement sensors — long-term statistics outlive
   the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
-  an enum). `button.py`: resume schedule, reset auto-tune.
+  an enum), and the activity log (`RoomstatActivitySensor`).
+  `button.py`: resume schedule, reset auto-tune.
   `binary_sensor.py`: sensor degraded, out of band.
 - `config_flow.py`: setup and the options flow (sections).
 - `repairs.py`: repairs for entity settings whose entity was deleted, renamed
@@ -284,6 +297,48 @@ Read this before changing `regulation.py` or `parameters.py`.
   command creeping by 0.1 °C does not end it, and a resend of a command the
   valve had shown and then left does not add to it. The same pacing holds
   for the summer lock and Roomstat's own off.
+
+## Activity log
+
+The owner's request (25 Oct 2026): one sensor per room that reads like a
+debug log — what Roomstat does and why, why it does *not* do something, the
+valve's reading and what the valve has been told, events, and what
+auto-tune changed or why not — so the diagnostics and the HA log need not
+be read.
+
+- **The sensor** (`sensor.<room>_activity`, "Activity"): the state is the
+  latest line (clipped to HA's 255 characters), so its history and the
+  logbook are the log. Attributes: `doing` (the live decision line), `log`
+  (the last 30 lines, newest first, `HH:MM  text`), and the numbers behind
+  the line. None of the attributes go to the recorder
+  (`_unrecorded_attributes`): the history already has every line.
+- **Decision lines** (`describe_cycle`): `<what and why>[; why not] | room R
+  → S <preset> | TRV T [heating] | Tado <what it was told>[ (X waits: rate
+  limit / X wanted: under the 0.3 step / X failed)]`. The phrases use the
+  regulator's own predictions (`regulation.outlook`): what stopping a
+  heat-up now would leave, the coast's predicted landing, the stop's
+  look-ahead, how far a stop is from its release; in hold P and I, and why
+  not more (`I rests outside ±0.3`, `full heat only from 0.8 below`). Every
+  cycle exit writes one (summer, off, no data, room sensor lost, waiting,
+  regulated). A new line at once when the decision changes
+  (`decision_key`: the mode, the window, the target and preset, what the
+  valve is told, a waiting or failed command), and at most every
+  `DECISION_REFRESH_S` (5 min) while only its numbers move; always after an
+  event, so the latest line is again what the room is doing. A toy heat-up,
+  coast and hold wrote 32 lines in 150 min (125 without the refresh rule).
+- **Events**: every room message at info or above goes through
+  `self._log(_LOGGER)` (a `RoomLogAdapter`: the room's name in front, and a
+  line in the activity log whatever the logger's level — HA logs only
+  warnings by default). **New room-level log calls must use it**, not
+  `_LOGGER` with `self._config_entry.title`. Preset changes (`(by hand)`),
+  temperatures set, switching on and off, and every start are events.
+- **Auto-tune**: after each cycle `_activity_tuner` logs, once, a new
+  verdict (`auto-tune: <episode> → <verdict>`, with "possible from HH:MM"
+  for a rate-limited change) or a new tuner event (heat-up started,
+  discarded, after a window).
+- The lines ride along in the restore-state extra data (`activity`), so a
+  reload (every preset temperature change) keeps them; local times use HA's
+  time zone (`dt_util.get_default_time_zone`).
 
 ## Failure handling
 

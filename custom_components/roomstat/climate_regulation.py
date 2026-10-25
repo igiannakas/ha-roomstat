@@ -9,6 +9,14 @@ import time
 from homeassistant.components.climate import PRESET_BOOST, HVACMode
 from homeassistant.exceptions import HomeAssistantError
 
+from .activity import (
+    PATH_NO_DATA,
+    PATH_OFF,
+    PATH_REGULATED,
+    PATH_SENSOR_LOST,
+    PATH_SUMMER,
+    PATH_WAITING,
+)
 from .autotune import AutotuneSample
 from .climate_controllers import (
     BAND_WARM,
@@ -80,6 +88,9 @@ class RegulationMixin:
         for ent in getattr(self.coordinator, "tuning_entities", ()):
             if ent.hass is not None:
                 ent.async_write_ha_state()
+        activity = getattr(self.coordinator, "activity_entity", None)
+        if activity is not None and activity.hass is not None:
+            activity.async_write_ha_state()
 
     def _window_sensor_on(self) -> bool:
         sensor = self._config_entry.options.get(CONF_WINDOW_SENSOR_ID)
@@ -142,23 +153,21 @@ class RegulationMixin:
         except Exception:  # noqa: BLE001 - reporting must never stop the state writes
             if not self._band_failed:
                 self._band_failed = True
-                _LOGGER.exception(
-                    "%s: the out-of-band check failed", self._config_entry.title
+                self._log(_LOGGER).exception(
+                    "the out-of-band check failed"
                 )
             return
         minutes = int((now - state.since) / 60) if state.since is not None else 0
         if state.on and (not was.on or was.reason != state.reason):
-            _LOGGER.warning(
-                "%s: out of band (%s): room %+.2f °C from the target for %d min",
-                self._config_entry.title, state.reason, state.deviation_c, minutes,
+            self._log(_LOGGER).warning(
+                "out of band (%s): room %+.2f °C from the target for %d min", state.reason, state.deviation_c, minutes,
             )
         elif was.on and not state.on:
-            _LOGGER.info("%s: back within the band", self._config_entry.title)
+            self._log(_LOGGER).info("back within the band")
         elif state.reason == BAND_WARM and was.reason != BAND_WARM:
-            _LOGGER.info(
-                "%s: room %+.2f °C from the target for %d min with the radiator "
-                "cold (sun or another source); not an alarm",
-                self._config_entry.title, state.deviation_c, minutes,
+            self._log(_LOGGER).info(
+                "room %+.2f °C from the target for %d min with the radiator "
+                "cold (sun or another source); not an alarm", state.deviation_c, minutes,
             )
 
     def _autotune_eligible(self) -> bool:
@@ -205,16 +214,16 @@ class RegulationMixin:
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop
-            _LOGGER.exception(
-                "%s: auto-tune failed and is paused until restart; using the "
+            self._log(_LOGGER).exception(
+                "auto-tune failed and is paused until restart; using the "
                 "configured Kp/Ki/braking time",
-                self._config_entry.title,
             )
             self._autotune_failed = True
             self._apply_active_tuning()
             return
+        # What it learned, changed, or decided not to change (once each).
+        self._activity_tuner()
         if reason:
-            _LOGGER.info("%s: auto-tune %s", self._config_entry.title, reason)
             self._apply_active_tuning()
 
     async def _async_regulation_cycle_timer(self, _now) -> None:
@@ -249,6 +258,8 @@ class RegulationMixin:
         if self._summer_active:
             self._note_cycle_completed(now)
             await self._async_summer_enforce(now)
+            self._activity_cycle(now, PATH_SUMMER)
+            self._activity_schedule_write()
             return
 
         # Off: no regulation, but make sure the TRV is off too.  The cycle
@@ -256,12 +267,15 @@ class RegulationMixin:
         if self._hvac_mode == HVACMode.OFF:
             self._note_cycle_completed(now)
             await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
+            self._activity_cycle(now, PATH_OFF)
+            self._activity_schedule_write()
             return
 
         # Guard: skip when coordinator data is stale (update method raised an exception).
         if not self.coordinator.last_update_success:
             _LOGGER.debug("Skipping regulation cycle – coordinator update failed")
             self._last_reason = "coordinator_unavailable"
+            self._activity_cycle(now, PATH_NO_DATA)
             self._write_state_with_binary_sensor()
             return
 
@@ -293,7 +307,7 @@ class RegulationMixin:
         sensor_lost = False
         if room_temp is not None:
             if self._room_sensor_lost_logged:
-                _LOGGER.info("%s: room sensor is back", self._config_entry.title)
+                self._log(_LOGGER).info("room sensor is back")
             self._room_sensor_lost_logged = False
             self._room_missing_since = None
             self._last_valid_room_temp = room_temp
@@ -329,10 +343,9 @@ class RegulationMixin:
             # long outage is reported (a repair after
             # ROOM_SENSOR_UNAVAILABLE_REPORT_S, see repairs.py), not bridged.
             self._room_sensor_lost_logged = True
-            _LOGGER.warning(
-                "%s: room sensor unavailable for %d min; the radiator keeps "
-                "its last setting until it is back",
-                self._config_entry.title, int(missing_for / 60),
+            self._log(_LOGGER).warning(
+                "room sensor unavailable for %d min; the radiator keeps "
+                "its last setting until it is back", int(missing_for / 60),
             )
 
         if sensor_lost and tado_internal is not None:
@@ -355,11 +368,15 @@ class RegulationMixin:
             else:
                 self._last_reason = "waiting_for_sensors"
             self._note_cycle_completed(now)
+            self._activity_cycle(
+                now, PATH_SENSOR_LOST, sensor_lost_min=int(missing_for / 60)
+            )
             self._write_state_with_binary_sensor()
             return
 
         if room_temp is None or tado_internal is None:
             self._last_reason = "waiting_for_sensors"
+            self._activity_cycle(now, PATH_WAITING, room_c=room_temp)
             self._write_state_with_binary_sensor()
             return
 
@@ -386,6 +403,7 @@ class RegulationMixin:
             slope = self._slope.slope_c_per_s()
 
         # 4. Compute regulation
+        prev_mode = self._reg_state.mode
         result = self._regulator.compute(
             setpoint_c=setpoint,
             room_temp_c=room_temp,
@@ -439,6 +457,10 @@ class RegulationMixin:
                 result.p_correction_c, result.i_correction_c, self._last_reason,
             )
 
+        self._activity_cycle(
+            now, PATH_REGULATED, room_c=room_temp, setpoint_c=setpoint,
+            prev_mode=prev_mode, slope_c_per_s=slope,
+        )
         self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()
 
@@ -656,9 +678,8 @@ class RegulationMixin:
                     self._drift_grace_s(trv), self._resend_count + 1, RESEND_BACKOFF_MAX_S
                 )
                 again = f" (again; next check in {next_s / 60:.0f} min)"
-            _LOGGER.info(
-                "%s: %s holds %s, not the %s sent; sending again%s",
-                self._config_entry.title, trv.entity_id, _held_text(trv),
+            self._log(_LOGGER).info(
+                "%s holds %s, not the %s sent; sending again%s", trv.entity_id, _held_text(trv),
                 _command_text(self._last_sent_setpoint, floor), again,
             )
             self._last_sent_setpoint = None
@@ -900,9 +921,8 @@ class RegulationMixin:
         ):
             send = True
         elif since >= self._config.min_command_interval_s:
-            _LOGGER.info(
-                "%s: %s holds %s, not off; sending off again",
-                self._config_entry.title, trv.entity_id, _held_text(trv),
+            self._log(_LOGGER).info(
+                "%s holds %s, not off; sending off again", trv.entity_id, _held_text(trv),
             )
             send = True
             # Taken but never shown: back off (one shown and then left is a
@@ -946,15 +966,13 @@ class RegulationMixin:
         prefer_fallback = self._prefer_fallback()
         preferred, backup = (fallback_id, source_id) if prefer_fallback else (source_id, fallback_id)
         if trv.is_fallback == prefer_fallback:
-            _LOGGER.info(
-                "%s: %s available again, back on it",
-                self._config_entry.title,
+            self._log(_LOGGER).info(
+                "%s available again, back on it",
                 preferred,
             )
         else:
-            _LOGGER.warning(
-                "%s: %s unavailable, using %s",
-                self._config_entry.title,
+            self._log(_LOGGER).warning(
+                "%s unavailable, using %s",
                 preferred,
                 backup,
             )
@@ -969,7 +987,7 @@ class RegulationMixin:
         title = self._config_entry.title
         if err is None:
             if self._last_command_error is not None:
-                _LOGGER.info("%s: commands to %s work again", title, entity_id)
+                self._log(_LOGGER).info("commands to %s work again", entity_id)
             self._last_command_error = None
             return
         text = str(err) or type(err).__name__
@@ -979,10 +997,10 @@ class RegulationMixin:
         if message == self._last_command_error:
             _LOGGER.debug("%s: %s", title, message)
         elif isinstance(err, (TimeoutError, HomeAssistantError)):
-            _LOGGER.warning("%s: %s", title, message)
+            self._log(_LOGGER).warning("%s", message)
         else:
             # Not an expected outcome of a service call: keep the traceback.
-            _LOGGER.error("%s: %s", title, message, exc_info=err)
+            self._log(_LOGGER).error("%s", message, exc_info=err)
         self._last_command_error = message
 
     async def _async_call_trv(
@@ -1021,7 +1039,7 @@ class RegulationMixin:
         Returns whether the TRV took it.
         """
         if not entity_id:
-            _LOGGER.warning("No TRV entity – cannot switch it off")
+            self._log(_LOGGER).warning("No TRV entity – cannot switch it off")
             return False
         _LOGGER.debug("Switching %s off", entity_id)
         sent = await self._async_call_trv(entity_id, "set_hvac_mode", {"hvac_mode": HVACMode.OFF})
@@ -1055,7 +1073,7 @@ class RegulationMixin:
         """
         source_entity = entity_id or self._config_entry.data.get("source_entity_id")
         if not source_entity:
-            _LOGGER.warning("No source_entity_id configured – cannot send command to Tado")
+            self._log(_LOGGER).warning("No source_entity_id configured – cannot send command to Tado")
             return False
 
         if timer_s:
@@ -1100,7 +1118,7 @@ class RegulationMixin:
         if self._regulation_stalled:
             self._regulation_stalled = False
             self._watchdog_shut_tried = False
-            _LOGGER.info("%s: regulation is running again", self._config_entry.title)
+            self._log(_LOGGER).info("regulation is running again")
 
     async def _async_watchdog_check(self, _now=None) -> None:
         """Periodic watchdog, on its own timer (never the cycle's).
@@ -1118,9 +1136,8 @@ class RegulationMixin:
             return
         if not self._regulation_stalled:
             self._regulation_stalled = True
-            _LOGGER.warning(
-                "%s: no regulation cycle has completed for %d min (last reason: %s)%s",
-                self._config_entry.title,
+            self._log(_LOGGER).warning(
+                "no regulation cycle has completed for %d min (last reason: %s)%s",
                 int((now - self._last_cycle_completed_ts) / 60),
                 self._last_reason,
                 "; shutting the valve" if self._last_sent_was_max else "",
@@ -1159,9 +1176,8 @@ class RegulationMixin:
                 or not is_maximum(trv.setpoint_c, hi)
             ):
                 self._last_sent_was_max = False
-                _LOGGER.info(
-                    "%s: watchdog: %s holds %s, not the maximum; nothing to shut",
-                    self._config_entry.title, trv.entity_id, _held_text(trv),
+                self._log(_LOGGER).info(
+                    "watchdog: %s holds %s, not the maximum; nothing to shut", trv.entity_id, _held_text(trv),
                 )
                 return
             self._watchdog_shut_tried = True
@@ -1170,8 +1186,8 @@ class RegulationMixin:
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST
-                _LOGGER.warning(
-                    "%s: watchdog switched %s off", self._config_entry.title,
+                self._log(_LOGGER).warning(
+                    "watchdog switched %s off",
                     trv.entity_id,
                 )
 

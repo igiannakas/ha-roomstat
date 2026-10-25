@@ -16,6 +16,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.core import callback
 
+from .activity import preset_name
 from .climate_controllers import SavedState, window_recovery_wait
 from .const import (
     CONF_COMFORT_TARGET,
@@ -104,9 +105,8 @@ class PresetMixin:
         if window_sensor:
             current = self.hass.states.get(window_sensor)
             if current is None or current.state != "on":
-                _LOGGER.info(
-                    "%s: window action skipped, the sensor is now %s",
-                    self._config_entry.title,
+                self._log(_LOGGER).info(
+                    "window action skipped, the sensor is now %s",
                     current.state if current else "unavailable",
                 )
                 self._window_ctrl.cancel_all()
@@ -126,7 +126,7 @@ class PresetMixin:
         # is not active – checked above), so it is a valid restore target.
         self._window_ctrl.activate(saved_preset, saved_temp)
         self._preset_mode = PRESET_FROST_PROTECTION
-        _LOGGER.info("%s: window open, switching to frost protection", self._config_entry.title)
+        self._log(_LOGGER).info("window open, switching to frost protection")
         self.async_write_ha_state()
         await self._async_regulation_cycle(trigger="window_open")
 
@@ -150,11 +150,10 @@ class PresetMixin:
         ):
             if not self._window_recovery_logged:
                 self._window_recovery_logged = True
-                _LOGGER.info(
-                    "%s: window closed, the room is re-warming on its own%s; "
+                self._log(_LOGGER).info(
+                    "window closed, the room is re-warming on its own%s; "
                     "heating waits until that slows below %.1f °C/h (at most "
                     "%d min)",
-                    self._config_entry.title,
                     "" if slope is None else f" at {slope * 3600:+.1f} °C/h",
                     WINDOW_RECOVERY_RATE_C_PER_H, int(WINDOW_RECOVERY_MAX_S / 60),
                 )
@@ -163,9 +162,8 @@ class PresetMixin:
             )
             return
         if self._window_recovery_logged:
-            _LOGGER.info(
-                "%s: room recovery over after %d min%s",
-                self._config_entry.title, int(waited / 60),
+            self._log(_LOGGER).info(
+                "room recovery over after %d min%s", int(waited / 60),
                 "" if slope is None else f" ({slope * 3600:+.1f} °C/h)",
             )
         self._window_recovery_logged = False
@@ -182,7 +180,7 @@ class PresetMixin:
         """
         if not self._window_ctrl.close_delay_active:
             return
-        _LOGGER.info("%s: window close delay ended, %s", self._config_entry.title, reason)
+        self._log(_LOGGER).info("window close delay ended, %s", reason)
         self._window_ctrl.cancel_timers()  # the close timer must not fire later
         self._restore_window_state(notify=False)
 
@@ -203,9 +201,8 @@ class PresetMixin:
             # preset (COMFORT without a schedule).
             if preset_to_restore == PRESET_BOOST:
                 preset_to_restore = self._fallback_preset()
-                _LOGGER.info(
-                    "%s: window restore, BOOST replaced by %s",
-                    self._config_entry.title, preset_to_restore,
+                self._log(_LOGGER).info(
+                    "window restore, BOOST replaced by %s", preset_to_restore,
                 )
             # Safety net: don't restore AWAY when presence sensor shows home
             if preset_to_restore == PRESET_AWAY:
@@ -214,10 +211,9 @@ class PresetMixin:
                     ps = self.hass.states.get(presence_sensor)
                     if ps and ps.state not in ("off", "unavailable", "unknown"):
                         preset_to_restore = self._fallback_preset()
-                        _LOGGER.info(
-                            "%s: window restore, AWAY overridden to %s "
-                            "(presence is home)",
-                            self._config_entry.title, preset_to_restore,
+                        self._log(_LOGGER).info(
+                            "window restore, AWAY overridden to %s "
+                            "(presence is home)", preset_to_restore,
                         )
             self._preset_mode = preset_to_restore
             if preset_to_restore == PRESET_COMFORT:
@@ -229,7 +225,7 @@ class PresetMixin:
             elif saved.temp is not None:
                 self._target_temp = saved.temp
             self._drop_stale_sticky_override()
-        _LOGGER.info("%s: window closed, restoring the previous preset", self._config_entry.title)
+        self._log(_LOGGER).info("window closed, restoring the previous preset")
         if not notify:
             return
         self.hass.async_create_task(
@@ -274,14 +270,13 @@ class PresetMixin:
         Returns True when away mode was entered (the room is regulated, or
         frost protection stays for an open window), False when skipped.
         """
-        title = self._config_entry.title
         if self._summer_active:
             return False
         # Safety: if the controller is already active (e.g. a stale timer fired
         # after a sensor flicker), do not overwrite the saved preset.
         if self._presence_ctrl.is_active:
-            _LOGGER.info(
-                "%s: presence away action skipped, already away", title
+            self._log(_LOGGER).info(
+                "presence away action skipped, already away"
             )
             return False
 
@@ -292,9 +287,8 @@ class PresetMixin:
             state = current.state if current is not None else None
             reports_nothing = state is None or state in ("unavailable", "unknown")
             if state != "off" and not (unknown_is_away and reports_nothing):
-                _LOGGER.info(
-                    "%s: presence away action skipped, the sensor is now %s",
-                    title, state if state is not None else "unavailable",
+                self._log(_LOGGER).info(
+                    "presence away action skipped, the sensor is now %s", state if state is not None else "unavailable",
                 )
                 self._presence_ctrl.cancel_timer()
                 return False
@@ -308,7 +302,7 @@ class PresetMixin:
             )
             # Update window saved state to AWAY so frost->close restores AWAY
             self._window_ctrl.update_saved(PRESET_AWAY, self._config.presets.away_target_c)
-            _LOGGER.info("%s: nobody home while the window is open, AWAY saved for later", title)
+            self._log(_LOGGER).info("nobody home while the window is open, AWAY saved for later")
             self._write_state_with_binary_sensor()
             return True
 
@@ -333,10 +327,10 @@ class PresetMixin:
             # return (also when the schedule's own preset then is Off).
             if self._schedule_ctrl.override_active and self._schedule_ctrl.override_sticky:
                 self._schedule_ctrl.clear_override()
-                _LOGGER.info("%s: the Away picked by hand is now away mode", title)
+                self._log(_LOGGER).info("the Away picked by hand is now away mode")
         self._presence_ctrl.activate(saved_preset, saved_temp)
         self._preset_mode = PRESET_AWAY
-        _LOGGER.info("%s: nobody home, switching to AWAY", title)
+        self._log(_LOGGER).info("nobody home, switching to AWAY")
         self.async_write_ha_state()
         await self._async_regulation_cycle(trigger="presence_away")
         return True
@@ -348,9 +342,8 @@ class PresetMixin:
         if presence_sensor:
             current = self.hass.states.get(presence_sensor)
             if current is None or current.state == "off":
-                _LOGGER.info(
-                    "%s: presence home action skipped, the sensor is now %s",
-                    self._config_entry.title,
+                self._log(_LOGGER).info(
+                    "presence home action skipped, the sensor is now %s",
                     current.state if current else "unavailable",
                 )
                 return
@@ -364,12 +357,10 @@ class PresetMixin:
 
         ``notify=False``: see :meth:`_restore_window_state`.
         """
-        title = self._config_entry.title
         if self._presence_ctrl.override_active:
             self._presence_ctrl.restore()  # ends the override
-            _LOGGER.info(
-                "%s: someone is home, the change made while nobody was home stays",
-                title,
+            self._log(_LOGGER).info(
+                "someone is home, the change made while nobody was home stays",
             )
             if notify:
                 self._write_state_with_binary_sensor()
@@ -377,16 +368,15 @@ class PresetMixin:
 
         saved = self._presence_ctrl.restore()
         if saved.preset is None:
-            _LOGGER.info("%s: someone is home, nothing to restore", title)
+            self._log(_LOGGER).info("someone is home, nothing to restore")
             return
 
         # If window automation is active, update the window's saved state
         # instead of changing the current preset (frost protection stays).
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(saved.preset, saved.temp)
-            _LOGGER.info(
-                "%s: someone is home while the window is open, %s saved for the close",
-                title, saved.preset,
+            self._log(_LOGGER).info(
+                "someone is home while the window is open, %s saved for the close", saved.preset,
             )
             return
 
@@ -395,7 +385,7 @@ class PresetMixin:
         # short one-off, so return to the schedule preset (COMFORT without one).
         if preset_to_restore == PRESET_BOOST:
             preset_to_restore = self._fallback_preset()
-            _LOGGER.info("%s: presence restore, BOOST replaced by %s", title, preset_to_restore)
+            self._log(_LOGGER).info("presence restore, BOOST replaced by %s", preset_to_restore)
         self._preset_mode = preset_to_restore
         # If restoring COMFORT, take the current comfort_target from options
         # (it may have been changed via number entity while away).
@@ -404,7 +394,7 @@ class PresetMixin:
         elif saved.temp is not None:
             self._target_temp = saved.temp
         self._drop_stale_sticky_override()
-        _LOGGER.info("%s: someone is home, restoring %s", title, preset_to_restore)
+        self._log(_LOGGER).info("someone is home, restoring %s", preset_to_restore)
         if not notify:
             return
         self.hass.async_create_task(
@@ -452,10 +442,9 @@ class PresetMixin:
                 base = self._fallback_preset()
                 saved = SavedState(base, self._get_preset_target(base))
             self._apply_saved_preset(SavedState(base, saved.temp))
-        _LOGGER.info(
-            "%s: changed by hand while nobody is home, away is held off until "
+        self._log(_LOGGER).info(
+            "changed by hand while nobody is home, away is held off until "
             "someone is home%s",
-            self._config_entry.title,
             f" or for {round(limit_s / 60)} min at most" if limit_s > 0 else "",
         )
 
@@ -470,7 +459,6 @@ class PresetMixin:
         ctrl = self._presence_ctrl
         if not ctrl.override_active:
             return
-        title = self._config_entry.title
         if self._summer_active:
             ctrl.override_timer_fired()
             return
@@ -484,15 +472,14 @@ class PresetMixin:
             ctrl.extend_override(
                 self.hass, time.time(), limit_s, self._async_presence_override_expired
             )
-            _LOGGER.info(
-                "%s: nobody came home, but the change heats no more than away: it "
-                "stays (looked at again in %d min)",
-                title, round(limit_s / 60),
+            self._log(_LOGGER).info(
+                "nobody came home, but the change heats no more than away: it "
+                "stays (looked at again in %d min)", round(limit_s / 60),
             )
             self._write_state_with_binary_sensor()
             return
         ctrl.override_timer_fired()
-        _LOGGER.info("%s: nobody came home after the change by hand, back to away", title)
+        self._log(_LOGGER).info("nobody came home after the change by hand, back to away")
         await self._async_reenter_away(trigger="presence_override_expired")
 
     def _held_change_target_c(self) -> float:
@@ -530,10 +517,9 @@ class PresetMixin:
         too – so coming home restores what it would have without it: the
         schedule's preset, else what away mode had saved before the change.
         """
-        title = self._config_entry.title
         ctrl = self._presence_ctrl
         if not ctrl.override_active:
-            _LOGGER.info("%s: Away picked while nobody is home, already away", title)
+            self._log(_LOGGER).info("Away picked while nobody is home, already away")
             self._write_state_with_binary_sensor()
             return
         before = ctrl.get_before_override()
@@ -549,10 +535,9 @@ class PresetMixin:
         else:
             base = SavedState(PRESET_COMFORT, self._comfort_target())
         self._apply_quietly(base)
-        _LOGGER.info(
-            "%s: Away picked while nobody is home, the change is cancelled and %s "
-            "comes back with you",
-            title, base.preset,
+        self._log(_LOGGER).info(
+            "Away picked while nobody is home, the change is cancelled and %s "
+            "comes back with you", base.preset,
         )
         await self._async_reenter_away(trigger="preset_change")
 
@@ -595,7 +580,7 @@ class PresetMixin:
             await self.async_resume_schedule()
             return
         if preset_mode not in PRESET_LIST:
-            _LOGGER.warning("Unknown preset mode: %s", preset_mode)
+            self._log(_LOGGER).warning("Unknown preset mode: %s", preset_mode)
             return
         # Away while nobody is home is away mode itself, not a manual
         # (sticky) Away: it ends a change by hand, and coming home restores.
@@ -634,7 +619,6 @@ class PresetMixin:
         No state is written here.  A preset picked by hand (``manual``) is
         never held back by away mode, only by an open window.
         """
-        title = self._config_entry.title
         # A preset during the window's close delay ends the wait.
         self._end_window_close_delay(f"preset changed to {preset_mode}")
 
@@ -648,8 +632,8 @@ class PresetMixin:
                 self._presence_ctrl.update_saved(
                     preset_mode, self._get_preset_target(preset_mode)
                 )
-                _LOGGER.info(
-                    "%s: nobody home, %s saved for the return", title, preset_mode
+                self._log(_LOGGER).info(
+                    "nobody home, %s saved for the return", preset_mode
                 )
                 return False
         elif manual and self._presence_ctrl.override_active:
@@ -662,9 +646,8 @@ class PresetMixin:
         # frost protection itself: the user wants frost after the window closes.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(preset_mode, self._get_preset_target(preset_mode))
-            _LOGGER.info(
-                "%s: window open, %s saved for the close, keeping frost protection",
-                title, preset_mode,
+            self._log(_LOGGER).info(
+                "window open, %s saved for the close, keeping frost protection", preset_mode,
             )
             return False
 
@@ -694,11 +677,15 @@ class PresetMixin:
             self._boost_cancel = async_call_later_boost(
                 self.hass, duration_s, self._async_boost_expired
             )
-            _LOGGER.info(
-                "%s: boost started for %d min", title, self._config.presets.boost_duration_min
+            self._log(_LOGGER).info(
+                "boost started for %d min", self._config.presets.boost_duration_min
             )
 
-        _LOGGER.debug("%s: preset changed: %s → %s", title, old_preset, preset_mode)
+        if preset_mode != old_preset:
+            self._log(_LOGGER).info(
+                "preset %s → %s%s", preset_name(old_preset), preset_name(preset_mode),
+                " (by hand)" if manual else "",
+            )
         return True
 
     async def _async_boost_expired(self, _now) -> None:
@@ -706,20 +693,18 @@ class PresetMixin:
         self._boost_cancel = None
         self._boost_end_ts = 0.0
 
-        title = self._config_entry.title
         # With a schedule, boost ends back on the schedule (and ends the
         # override the boost started).
         if self.schedule_configured and self._schedule_ctrl.schedule_preset:
             self._schedule_ctrl.clear_override()
-            _LOGGER.info(
-                "%s: boost over, returning to the schedule (%s)",
-                title, self._schedule_ctrl.schedule_preset,
+            self._log(_LOGGER).info(
+                "boost over, returning to the schedule (%s)", self._schedule_ctrl.schedule_preset,
             )
             await self._async_follow_schedule(trigger="boost_expired")
             return
 
         restore_preset = self._boost_saved_preset
-        _LOGGER.info("%s: boost over, back to %s", title, restore_preset)
+        self._log(_LOGGER).info("boost over, back to %s", restore_preset)
 
         # PRESET_NONE (manual mode) is not in PRESET_LIST and would be rejected
         # by async_set_preset_mode, so handle it directly.
@@ -727,11 +712,11 @@ class PresetMixin:
             # Don't override active window/presence automation – save for later.
             if self._window_ctrl.is_active:
                 self._window_ctrl.update_saved(PRESET_NONE, self._boost_saved_temp)
-                _LOGGER.info("%s: boost over while the window is open, saved for the close", title)
+                self._log(_LOGGER).info("boost over while the window is open, saved for the close")
                 return
             if self._presence_ctrl.is_active:
                 self._presence_ctrl.update_saved(PRESET_NONE, self._boost_saved_temp)
-                _LOGGER.info("%s: boost over while nobody is home, saved for the return", title)
+                self._log(_LOGGER).info("boost over while nobody is home, saved for the return")
                 return
             if self._boost_saved_temp is not None:
                 self._target_temp = self._boost_saved_temp
