@@ -143,4 +143,12 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
             "reason": state.reason,
             "reference_c": state.reference_c,
             "radiator_heated": state.radiator_heated,
+            # The evidence behind radiator_heated (None outside an excursion).
+            "heated_during": state.heated_during,
+            "heated_before_min": (
+                round(state.heated_before_s / 60.0, 1)
+                if state.heated_before_s is not None
+                else None
+            ),
+            "radiator_rise_c": state.radiator_rise_c,
         }

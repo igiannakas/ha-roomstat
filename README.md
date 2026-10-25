@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.10.2-blue)
+![Version](https://img.shields.io/badge/version-2.10.3-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -267,15 +267,19 @@ heating is on, with no summer mode, no window open and a working room sensor:
 
 - A room still cooling down after its target was lowered (Night) isn't too
   warm. One that warms up again by 0.5 °C from its lowest point is — if the
-  radiator did it: the valve reported heating, or the valve's own reading
-  climbed well above the room. A room warmed by the sun or an appliance with
-  the radiator cold is **warm**, not an alarm: the sensor stays off and
-  `reason` says `warm`.
+  radiator did it: the valve reported heating while the room was too warm,
+  or it heated long enough in the half hour before to explain the rise
+  (7.5 minutes for 0.5 °C; a short top-up can't), or the valve's own reading
+  stands 2 °C further above the room than when the radiator was cold. A
+  room warmed by the sun, people or an appliance is **warm**, not an
+  alarm: the sensor stays off and `reason` says `warm`.
 - The 2 hours start again with each rise of the target, so a heat-up doesn't
   count.
 - Attributes: `reason` (`hot`, `cold`, or `warm` while off), `deviation_c`
   (room minus target), `since` (when it went out of band, set while on or
-  warm) and `radiator_heated`.
+  warm), `radiator_heated`, and the evidence for it: `heated_during`,
+  `heated_before_min` and `radiator_rise_c`. The room's activity log says
+  the same in words.
 - Change the limits under **Configure → Out-of-band alarm**.
 
 A notification for it (put your own entity ids in):

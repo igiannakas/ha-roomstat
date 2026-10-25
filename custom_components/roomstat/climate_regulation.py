@@ -24,6 +24,7 @@ from .climate_controllers import (
     PENDING_OFF,
     CommandPacer,
     CommandRecord,
+    OutOfBandMonitor,
     TrvReading,
     command_limits,
     cycle_stalled,
@@ -158,17 +159,20 @@ class RegulationMixin:
                 )
             return
         minutes = int((now - state.since) / 60) if state.since is not None else 0
+        setpoint = self._effective_setpoint()
         if state.on and (not was.on or was.reason != state.reason):
             self._log(_LOGGER).warning(
-                "out of band (%s): room %+.2f °C from the target for %d min", state.reason, state.deviation_c, minutes,
+                "out of band (%s) for %d min: %s", state.reason, minutes,
+                OutOfBandMonitor.describe(state, setpoint, cfg.band_c),
+            )
+        elif state.reason == BAND_WARM and was.reason != BAND_WARM:
+            # Also hot turning warm: the radiator has cooled, the room has not.
+            self._log(_LOGGER).info(
+                "too warm for %d min, not from the radiator (not an alarm): %s",
+                minutes, OutOfBandMonitor.describe(state, setpoint, cfg.band_c),
             )
         elif was.on and not state.on:
             self._log(_LOGGER).info("back within the band")
-        elif state.reason == BAND_WARM and was.reason != BAND_WARM:
-            self._log(_LOGGER).info(
-                "room %+.2f °C from the target for %d min with the radiator "
-                "cold (sun or another source); not an alarm", state.deviation_c, minutes,
-            )
 
     def _autotune_eligible(self) -> bool:
         """Whether this cycle is normal heating the auto-tuner may learn from.

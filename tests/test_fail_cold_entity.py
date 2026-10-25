@@ -515,7 +515,9 @@ class TestOutOfBandEntity:
         assert attrs["since"] is not None
         assert not any(r.levelno == logging.WARNING and "out of band" in r.getMessage()
                        for r in caplog.records)
-        assert any("radiator cold" in r.getMessage() for r in caplog.records)
+        assert any("not from the radiator" in r.getMessage() for r in caplog.records)
+        assert attrs["heated_during"] is False and attrs["heated_before_min"] == 0.0
+        assert attrs["radiator_rise_c"] == pytest.approx(0.0)
 
     def test_hot_when_the_trv_reading_climbs_with_the_valve_silent(self, monkeypatch):
         """No hvac_action from the entity, but the TRV's own reading climbs

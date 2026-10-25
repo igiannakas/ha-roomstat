@@ -330,6 +330,89 @@ class TestOutOfBandRadiatorEvidence:
         t, _ = _feed(mon, t, [19.9, 20.1, 20.3, 20.4] * 3, 20.0, heating=False, trv=12.0)
         t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=12.3)
         assert states[-1].on and states[-1].reason == C.BAND_HOT
+        assert states[-1].heated_before_s == pytest.approx(14 * 60.0)
+        assert states[-1].heated_during is False
+
+    def test_heating_less_than_the_band_can_explain_is_no_cause(self):
+        """Band / the fastest radiator here (4 °C/h): 7.5 min for 0.5 °C."""
+        assert C.OutOfBandMonitor.heated_min_s(0.5) == pytest.approx(450.0)
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [19.6] * 7, 20.0, heating=True, trv=10.0)    # 7 min
+        t, _ = _feed(mon, t, [20.0] * 10, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=10.0)
+        assert not states[-1].on and states[-1].reason == C.BAND_WARM
+        assert states[-1].heated_before_s == pytest.approx(7 * 60.0)
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [19.6] * 8, 20.0, heating=True, trv=10.0)    # 8 min
+        t, _ = _feed(mon, t, [20.0] * 10, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=10.0)
+        assert states[-1].on and states[-1].reason == C.BAND_HOT
+
+    def test_only_the_look_back_counts(self):
+        """Heating that ended more than 30 min before the room went too warm
+        counts for nothing, however long it was."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [19.0] * 40, 20.0, heating=True, trv=10.0)
+        t, _ = _feed(mon, t, [20.0] * 25, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=10.0)
+        assert states[-1].heated_before_s == pytest.approx(5 * 60.0)
+        assert not states[-1].on
+
+    def test_a_pause_counts_for_two_minutes_at_most(self):
+        """A heating report stands until the next one, but a gap (a restart)
+        is no evidence of more heating."""
+        mon = C.OutOfBandMonitor()
+        mon.update(0.0, 19.6, 20.0, eligible=True, valve_heating=True, trv_c=10.0, **BAND)
+        t, _ = _feed(mon, 900.0, [20.0] * 4, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, heating=False, trv=10.0)
+        assert states[-1].heated_before_s == pytest.approx(C.HEATING_SAMPLE_MAX_S)
+
+    def test_heating_unknown_leaves_the_trv_reading_to_decide(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, trv=10.0)
+        t, states = _feed(mon, t, [20.55] * 31, 20.0, trv=10.6)
+        assert states[-1].heated_before_s is None and states[-1].heated_during is None
+        assert states[-1].radiator_rise_c == pytest.approx(0.05)
+        assert not states[-1].on and states[-1].radiator_heated is False
+
+    def test_a_cooled_radiator_turns_hot_into_warm(self):
+        """Hot on the TRV's reading alone: once the radiator has cooled while
+        the room stays warm, the room is warm for another reason."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, states = _feed(mon, t, [20.6] * 31, 20.0, heating=False, trv=13.0)
+        assert states[-1].on and states[-1].radiator_rise_c == pytest.approx(2.4)
+        t, states = _feed(mon, t, [20.6] * 5, 20.0, heating=False, trv=11.0)
+        assert not states[-1].on and states[-1].reason == C.BAND_WARM
+
+    def test_describe(self):
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=10.0)
+        t, _ = _feed(mon, t, [19.6] * 3, 5.0, heating=False, trv=10.0)       # lowered
+        t, states = _feed(mon, t, [20.6] * 31, 5.0, heating=False, trv=10.0)
+        text = C.OutOfBandMonitor.describe(states[-1], 5.0, 0.5)
+        assert text == (
+            "room 20.60 °C, 1.00 over its low of 19.60 (target 5.0); the valve "
+            "heated 0 of the 30 min before (7.5 needed), its reading is 0.0 °C "
+            "over its cold level (2.0 needed)"
+        )
+        # Hot names only what made it hot.
+        hot = _replay(TestOutOfBandReplays.LIVING_22_OCT)[125]
+        assert C.OutOfBandMonitor.describe(hot, 20.0, 0.5) == (
+            "room 20.61 °C, 0.61 over the target 20.0; the valve heated 12 of the "
+            "30 min before"
+        )
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0)
+        t, states = _feed(mon, t, [20.6] * 31, 20.0)
+        assert C.OutOfBandMonitor.describe(states[-1], 20.0, 0.5) == (
+            "room 20.60 °C, 0.60 over the target 20.0; nothing known about the valve"
+        )
+        mon = C.OutOfBandMonitor()
+        t, states = _feed(mon, 0.0, [19.4] * 121, 20.0)
+        assert C.OutOfBandMonitor.describe(states[-1], 20.0, 0.5) == (
+            "room 19.40 °C, 0.60 under the target 20.0"
+        )
 
     def test_valve_that_heated_long_before_is_not_the_cause(self):
         mon = C.OutOfBandMonitor()
@@ -379,6 +462,159 @@ class TestOutOfBandRadiatorEvidence:
         state = mon.update(t, 20.3, 20.0, eligible=True, valve_heating=False,
                            trv_c=10.3, **BAND)
         assert state.reason is None and state.since is None and state.radiator_heated is None
+
+
+def _replay(case, *, valve_silent=False, setpoint=None):
+    """Feed a recorded episode: 5-minute means held for each minute, the
+    valve's heating report and the target per minute."""
+    mon = C.OutOfBandMonitor()
+    if "restore" in case:
+        mon.restore(case["restore"])
+    eligible = case.get("eligible", lambda m: True)
+    target = setpoint or case["setpoint"]
+    states = []
+    for m in range(len(case["room"]) * 5):
+        states.append(mon.update(
+            m * 60.0, case["room"][m // 5], target(m), eligible=eligible(m),
+            valve_heating=None if valve_silent else case["heating"](m),
+            trv_c=case["trv"][m // 5], **BAND,
+        ))
+    return states
+
+
+def _old_rule_hot(state):
+    """What the rule before 2.10.3 made of the same evidence: any heating in
+    the look-back, or the gap 1 °C above its low."""
+    return state.reason in (C.BAND_HOT, C.BAND_WARM) and bool(
+        state.heated_during
+        or (state.heated_before_s or 0.0) > 0.0
+        or (state.radiator_rise_c is not None and state.radiator_rise_c >= 1.0)
+    )
+
+
+class TestOutOfBandReplays:
+    """Every out-of-band alarm of 18-25 Oct 2026 (recorder 5-minute means of
+    the room sensor and of the Tado zone's own reading; the valve's heating
+    from the zone's heating power).  Under the old rule each of these was
+    hot; the false ones are warm now, the real one is still hot."""
+
+    # 25 Oct, second bedroom, from 07:50 UTC.  The room dipped to 19.6 at
+    # 09:40, a hold topped up 09:45-09:52 (8 min, 26-84 %), Frost protection
+    # was picked at 09:52, and the room rose 1.5 °C with the valve shut and
+    # its reading flat.  Hot at 10:50 under the old rule.
+    SECOND_25_OCT = dict(
+        room=[20.23, 20.23, 20.21, 20.20, 20.19, 20.20, 20.20, 20.21, 20.21, 20.22,
+              20.22, 20.18, 20.14, 20.16, 20.15, 20.15, 20.15, 20.14, 20.13, 20.14,
+              20.14, 20.12, 19.97, 19.85, 19.67, 19.63, 19.69, 19.78, 19.96, 20.04,
+              20.28, 20.59, 20.79, 20.89, 20.99, 21.05, 20.94, 20.85, 20.73],
+        trv=[15.59, 15.41, 15.41, 15.36, 15.18, 15.18, 15.18, 15.18, 15.04, 15.04,
+             15.04, 14.97, 14.87, 14.87, 14.87, 14.75, 14.72, 14.72, 14.70, 14.61,
+             14.61, 14.60, 14.54, 14.35, 14.34, 14.40, 14.53, 14.57, 14.74, 14.81,
+             14.92, 15.05, 15.14, 15.14, 15.14, 15.28, 15.28, 15.15, 15.07],
+        heating=lambda m: 115 <= m <= 122,
+        setpoint=lambda m: 20.0 if m < 123 else 5.0,
+    )
+    # 22 Oct, study, from 14:00 UTC: Comfort 20, warm since the morning, the
+    # valve shut all day (0 % heating).  The valve's reading fell 15.4 ->
+    # 13.9 and recovered with the room flat: three hot alarms (18:26,
+    # 18:33-19:03, 20:45-20:59 local) under the old rule.
+    STUDY_22_OCT = dict(
+        room=[20.99, 21.01, 21.04, 21.08, 21.11, 21.14, 21.16, 21.17, 21.18, 21.18,
+              21.19, 21.19, 21.20, 21.22, 21.23, 21.24, 21.25, 21.25, 21.25, 21.25,
+              21.25, 21.25, 21.25, 21.24, 21.23, 21.23, 21.18, 21.14, 21.10, 21.10,
+              21.11, 21.11, 21.09, 21.06, 21.05, 21.08, 21.08, 21.08, 21.06, 21.04,
+              21.02, 20.98, 20.98, 20.97, 20.94, 20.87, 20.79, 20.76, 20.74, 20.71,
+              20.74, 20.79, 20.84, 20.89, 20.91, 20.94, 20.95, 20.95, 20.94, 20.95,
+              20.98, 21.02, 21.04, 21.04, 21.06, 21.14, 21.16, 21.21, 21.26, 21.25,
+              21.20, 21.16, 21.13, 21.09, 21.06, 21.04, 21.01, 21.00],
+        trv=[15.25, 15.25, 15.25, 15.29, 15.29, 15.29, 15.29, 15.34, 15.35, 15.35,
+             15.32, 15.31, 15.31, 15.31, 15.29, 15.28, 15.28, 15.32, 15.35, 15.35,
+             15.35, 15.30, 15.30, 15.30, 15.11, 15.11, 15.00, 14.93, 14.76, 14.61,
+             14.46, 14.36, 14.25, 14.08, 13.92, 13.96, 14.26, 14.44, 14.60, 14.68,
+             14.68, 14.59, 14.61, 14.73, 14.73, 14.72, 14.66, 14.49, 14.41, 14.28,
+             14.28, 14.28, 14.34, 14.36, 14.36, 14.39, 14.39, 14.39, 14.39, 14.40,
+             14.41, 14.41, 14.41, 14.43, 14.43, 14.56, 14.65, 14.83, 14.87, 15.06,
+             15.06, 15.06, 15.09, 15.14, 15.14, 15.15, 15.17, 15.17],
+        heating=lambda m: False,
+        setpoint=lambda m: 20.0,
+        restore={"min_since": 19.9, "setpoint": 20.0},
+    )
+    # 25 Oct, study, from 05:30 UTC: Night 18 -> Comfort 20 at 06:00, full
+    # power 06:00-06:12; the heat-up landed at 20.06 (06:35), then the room
+    # went on to 20.9 with the valve shut.  Hot at 07:57 under the old rule
+    # (the valve's reading still 1.6 °C up on the cooling radiator).
+    STUDY_25_OCT = dict(
+        room=[19.34, 19.35, 19.36, 19.39, 19.43, 19.41, 19.40, 19.40, 19.45, 19.55,
+              19.64, 19.78, 19.88, 19.98, 20.05, 20.06, 20.06, 20.08, 20.18, 20.25,
+              20.31, 20.38, 20.44, 20.49, 20.55, 20.59, 20.63, 20.67, 20.71, 20.74,
+              20.75, 20.76, 20.80, 20.84, 20.89, 20.90, 20.86, 20.80, 20.73, 20.66,
+              20.59, 20.54, 20.49, 20.44, 20.41, 20.42, 20.42, 20.41],
+        trv=[13.73, 13.69, 13.69, 13.70, 13.71, 13.71, 13.75, 14.26, 15.35, 16.27,
+             17.13, 17.83, 18.21, 18.38, 18.51, 18.58, 18.53, 18.34, 18.27, 18.23,
+             18.08, 17.93, 17.81, 17.61, 17.47, 17.35, 17.18, 16.96, 16.92, 16.75,
+             16.58, 16.54, 16.37, 16.37, 16.23, 16.19, 15.96, 15.96, 15.83, 15.75,
+             15.75, 15.62, 15.54, 15.54, 15.43, 15.36, 15.36, 15.36],
+        heating=lambda m: 30 <= m < 42,
+        setpoint=lambda m: 18.0 if m < 30 else 20.0,
+    )
+    # 22 Oct, living room, from 09:00 local: a window 09:35-10:14 (Frost),
+    # Comfort again with full power 10:12-10:24, the room over the band from
+    # 10:35.  Hot 11:04-11:17: the radiator's doing (with the recovery).
+    LIVING_22_OCT = dict(
+        room=[19.97, 20.01, 20.08, 20.09, 20.09, 20.07, 20.03, 16.53, 16.49, 17.98,
+              18.45, 18.71, 18.83, 18.97, 19.03, 19.16, 19.38, 19.82, 20.27, 20.53,
+              20.67, 20.69, 20.72, 20.68, 20.68, 20.61, 20.56, 20.52, 20.47, 20.40,
+              20.31],
+        trv=[15.1, 15.2, 15.6, 15.6, 15.5, 15.3, 15.2, 14.6, 13.0, 12.8, 12.5, 12.2,
+             12.0, 11.8, 11.5, 11.5, 11.4, 11.8, 12.3, 12.9, 13.4, 13.6, 13.8, 13.9,
+             13.8, 13.7, 13.5, 13.3, 13.0, 12.8, 12.6],
+        heating=lambda m: 72 <= m < 84,
+        setpoint=lambda m: 5.0 if 35 <= m < 75 else 20.0,
+        eligible=lambda m: not 35 <= m < 75,
+    )
+
+    def test_a_short_top_up_is_not_the_cause(self):
+        states = _replay(self.SECOND_25_OCT)
+        assert not any(s.on for s in states)
+        warm = states[180]                                   # 10:50
+        assert warm.reason == C.BAND_WARM and warm.radiator_heated is False
+        assert warm.reference_c == pytest.approx(19.63)
+        assert warm.heated_before_s == pytest.approx(3 * 60.0)   # 09:50-09:52
+        assert warm.radiator_rise_c < C.RADIATOR_RISE_C / 4
+        assert _old_rule_hot(warm)
+
+    def test_the_valves_reading_swinging_with_the_valve_shut_is_not_the_radiator(self):
+        states = _replay(self.STUDY_22_OCT)
+        judged = [s for s in states if s.reason]
+        assert judged and all(s.reason == C.BAND_WARM for s in judged)
+        rise = max(s.radiator_rise_c for s in judged)
+        assert 1.0 <= rise < C.RADIATOR_RISE_C
+        assert any(_old_rule_hot(s) for s in judged)
+
+    def test_a_radiator_cooling_after_its_heat_up_is_not_the_cause(self):
+        states = _replay(self.STUDY_25_OCT)
+        judged = [s for s in states if s.reason]
+        assert judged and all(s.reason == C.BAND_WARM for s in judged)
+        assert all(s.heated_before_s == 0.0 for s in judged)
+        assert max(s.radiator_rise_c for s in judged) < C.RADIATOR_RISE_C
+        assert _old_rule_hot(judged[0])
+
+    def test_full_power_just_before_is_still_hot(self):
+        states = _replay(self.LIVING_22_OCT)
+        on = [m for m, s in enumerate(states) if s.on]
+        assert on == list(range(125, 140))                   # 11:05-11:19
+        assert states[125].heated_before_s == pytest.approx(12 * 60.0)
+        assert states[125].radiator_rise_c < C.RADIATOR_RISE_C   # (b) alone
+
+    def test_the_valves_reading_shows_a_real_heat_up(self):
+        """The same study morning with the valve silent and the target at
+        19: full power lifted its reading 4 °C over its cold level, which
+        alone makes it hot, until the radiator has cooled below 2 °C."""
+        states = _replay(self.STUDY_25_OCT, valve_silent=True, setpoint=lambda m: 19.0)
+        on = [m for m, s in enumerate(states) if s.on]
+        assert on and on[0] == 90                            # 07:00
+        assert states[90].radiator_rise_c > 3.5
+        assert states[on[-1] + 1].reason == C.BAND_WARM
 
 
 class TestOutOfBandCold:

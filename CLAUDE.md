@@ -526,21 +526,43 @@ is updating.
   reading. Hot: room ≥ max(setpoint, `min_since`) + 0.5 °C for 30 min,
   `min_since` = the lowest reading since the setpoint was last lowered
   (persisted; the first reading when nothing is saved), **and the radiator
-  is the cause**: the TRV reported heating (`TrvReading.heating`, the
-  entity's `hvac_action`; the Tado cloud derives it from the zone's heating
-  power, HomeKit from the valve) during the excursion or within 30 min
-  before it (`HEATED_LOOKBACK_S`: the heat arrives after the valve shut), or
-  the TRV − room gap stands ≥ 1 °C (`RADIATOR_RISE_C`) above its lowest of
-  the last 3 h (`GAP_WINDOW_S`: the radiator cold; a hot radiator lifts the
-  valve's reading far more than the room, the sun lifts both). Otherwise the
-  state is `warm`: attributes only, sensor off, one info log. 16 Oct 2026:
-  a sunny afternoon lifted four rooms 1.5–2.3 °C with every valve at 0 %
-  and produced four hot alarms under the plain rule; the replay in
-  `tests/test_fail_cold.py` is warm. With nothing known about the valve
-  (no `hvac_action`, no reading) hot needs no evidence. The 11 Oct setback
-  (20 → 18 at 21:30, still 18.66 at 06:00) never fires; "setpoint + 0.5"
-  alone was on all night. Cold: 0.5 °C below for 120 min, restarted by every
-  setpoint rise. `since` is set while on or warm.
+  is the cause** (2.10.3): the TRV reported heating (`TrvReading.heating`,
+  the entity's `hvac_action`; the Tado cloud derives it from the zone's
+  heating power, HomeKit from the valve) *during* the excursion (Roomstat
+  never heats a room 0.5 over its target), or it heated at least band /
+  `RADIATOR_MAX_RATE_C_PER_H` (4 °C/h: 7.5 min for 0.5 °C) in the 30 min
+  before it began (`HEATED_LOOKBACK_S`: the heat arrives after the valve
+  shut; each report stands until the next, at most `HEATING_SAMPLE_MAX_S`;
+  taken once, when the excursion begins), or the TRV − room gap stands
+  ≥ 2 °C (`RADIATOR_RISE_C`) above its lowest of the last 3 h
+  (`GAP_WINDOW_S`: the radiator cold; a hot radiator lifts the valve's
+  reading far more than the room, the sun lifts both; judged each update,
+  so a radiator that cools turns hot into warm). Otherwise the state is
+  `warm`: attributes only, sensor off, one info log. The evidence is in
+  `BandState` (`heated_during`, `heated_before_s`, `radiator_rise_c`, also
+  attributes) and the log line says it in words
+  (`OutOfBandMonitor.describe`). 16 Oct 2026: a sunny afternoon lifted four
+  rooms 1.5–2.3 °C with every valve at 0 % and produced four hot alarms
+  under the plain rule; the replay in `tests/test_fail_cold.py` is warm.
+  2.10.3 (`TestOutOfBandReplays`, every alarm of 18–25 Oct): until then any
+  heating in the look-back counted and the gap needed only 1 °C. 25 Oct,
+  second bedroom: a hold's top-up heated 8 min (3 in the look-back), Frost
+  was picked, and the room rose 1.5 °C with the valve shut and its reading
+  flat — hot. 22 Oct, study: the valve shut all day, its reading fell
+  15.4 → 13.9 and recovered with the room flat (the gap swung 1.0–1.4) —
+  three hot alarms. 25 Oct, study: a 12-min heat-up landed at +0.06, the
+  room went on to +0.9 by itself while the radiator cooled (gap +1.6) —
+  hot. All warm now. Still hot: 22 Oct, living room, full power 12 min
+  right before a +0.7 overshoot after a window (gap only +1.1, so the
+  look-back carries it). The thresholds: 25 Oct, 12 min (study) and 35 min
+  (living room) at full power lifted the gap 4–5 °C and it stayed 2 °C up
+  for about an hour; the fastest rise per hour of heating seen is 3.3 °C
+  (the study's 12 minutes gave 0.66 °C, coast included). With nothing
+  known about the valve (no `hvac_action`, no reading) hot needs no
+  evidence. The 11 Oct setback (20 → 18 at 21:30, still 18.66 at 06:00)
+  never fires; "setpoint + 0.5" alone was on all night. Cold: 0.5 °C below
+  for 120 min, restarted by every setpoint rise. `since` is set while on or
+  warm.
 - **Entity gone:** every coordinator update checks the entity settings (TRV,
   room sensor, fallback, window, presence, summer, schedule). One with
   neither a state nor a registry entry (deleted, renamed), or disabled in the
