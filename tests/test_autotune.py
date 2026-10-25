@@ -172,6 +172,10 @@ class TestSlopeEstimator:
         assert est.slope_c_per_s() == 0.0
 
 
+def _clamp01(x):
+    return 0.0 if x < 0 else 1.0 if x > 1 else x
+
+
 def _synthetic_heatup(theta_min=12.0, rate=2.0, sp=20.0, y0=18.5, overshoot=0.3,
                       cross_after_reach_min=-10.0, minutes=240, glitch=False):
     """Room: flat for theta, ramps at `rate`, then eases into sp + overshoot."""
@@ -239,6 +243,106 @@ class TestAnalyseHeatup:
         assert m.overshoot_c == pytest.approx(0.1, abs=0.02)
         old = A.analyse_heatup(samples, cfg=P.AutotuneConfig(theta_min_step_c=0.8), **kw)
         assert old.theta_s is None           # what 2.4 learned from it
+
+    def test_a_later_rise_is_not_this_heatups_coast(self):
+        """Living room, 24 Oct 2026, 11:18 comfort 20 from 19.03 °C, one
+        reading a minute; the stop came at 37.5 min.  The room's own coast
+        stalled at 19.97 about 20 min later, then lunch guests (CO2 490 ->
+        650 ppm) took it to 20.49 with the valve shut.  2.9.1 booked it as
+        +0.48 °C, a 33-min coast and a 46-min dead time; the braking time went
+        10.3 -> 13.1 min and the next morning stopped 0.35 °C short."""
+        room = [
+            19.035, 19.03, 19.025, 19.025, 19.025, 19.02, 19.025, 19.04, 19.05, 19.055, 19.065, 19.085,
+            19.1, 19.12, 19.14, 19.165, 19.185, 19.21, 19.23, 19.25, 19.27, 19.285, 19.315, 19.34,
+            19.365, 19.395, 19.42, 19.445, 19.465, 19.49, 19.515, 19.54, 19.57, 19.595, 19.615, 19.63,
+            19.655, 19.675, 19.705, 19.725, 19.75, 19.775, 19.8, 19.82, 19.845, 19.865, 19.885, 19.895,
+            19.905, 19.925, 19.935, 19.94, 19.945, 19.955, 19.96, 19.97, 19.97, 19.975, 19.975, 19.975,
+            19.975, 19.975, 19.975, 19.97, 19.97, 19.97, 19.96, 19.95, 19.955, 19.96, 19.97, 19.98,
+            19.99, 20, 20.005, 20.02, 20.04, 20.075, 20.12, 20.16, 20.195, 20.23, 20.255, 20.285,
+            20.32, 20.35, 20.375, 20.395, 20.415, 20.43, 20.435, 20.435, 20.435, 20.46, 20.475, 20.485,
+            20.475, 20.47, 20.46, 20.455, 20.455, 20.465, 20.475, 20.475, 20.455, 20.43, 20.41, 20.385,
+            20.37, 20.355, 20.345, 20.335, 20.32, 20.31, 20.3, 20.29, 20.28, 20.27, 20.265, 20.255,
+            20.245, 20.235, 20.22, 20.205, 20.2, 20.195, 20.205, 20.22, 20.215, 20.21, 20.2, 20.2,
+            20.215, 20.24, 20.26, 20.26, 20.26, 20.25, 20.245, 20.255, 20.275, 20.275,
+        ]
+        cross = 37.55 * 60.0
+        samples = [(k * 60.0, y, 2.0 if k * 60.0 < cross else -2.0) for k, y in enumerate(room)]
+        m = A.analyse_heatup(samples, start_ts=0.0, setpoint_c=20.0, cfg=CFG,
+                             cross_ts=cross, tuning=A.Tuning(3.0, 0.00056, 620.0))
+        assert m.overshoot_c == pytest.approx(-0.02, abs=0.02)
+        assert m.coast_s / 60 == pytest.approx(11.5, abs=1.5)
+        assert m.theta_s / 60 == pytest.approx(10.5, abs=1.5)
+        assert m.rate_c_per_h == pytest.approx(1.5, abs=0.15)
+        assert m.later_rise_c == pytest.approx(0.5, abs=0.03)
+
+    def _with_later_rise(self, overshoot=0.1, rise_c=0.6, after_min=80.0):
+        """The synthetic heat-up, plus +rise_c over 30 min starting
+        after_min after the room reached the target (people coming in)."""
+        s, cross = _synthetic_heatup(overshoot=overshoot)
+        t_reach = (12.0 + (20.0 - 18.5) / 2.0 * 60.0) * 60.0
+        t0 = t_reach + after_min * 60.0
+        bumped = [(t, y + rise_c * _clamp01((t - t0) / 1800.0), d) for t, y, d in s]
+        return s, bumped, cross
+
+    def test_a_rise_after_the_coast_stalled_changes_nothing_learned(self):
+        base, bumped, cross = self._with_later_rise()
+        kw = dict(start_ts=0.0, setpoint_c=20.0, cfg=CFG, cross_ts=cross * 60.0,
+                  tuning=A.Tuning(0.6, 0.002))
+        m0 = A.analyse_heatup(base, **kw)
+        m1 = A.analyse_heatup(bumped, **kw)
+        assert m0.later_rise_c is None
+        assert m1.overshoot_c == pytest.approx(m0.overshoot_c, abs=0.01)
+        assert m1.coast_s == pytest.approx(m0.coast_s, rel=0.05)
+        assert m1.theta_s == pytest.approx(m0.theta_s, abs=30.0)
+        assert m1.rate_c_per_h == pytest.approx(m0.rate_c_per_h, rel=0.02)
+        # +0.6 on a room that had meanwhile cooled 0.1 below its own peak.
+        assert m1.later_rise_c == pytest.approx(0.5, abs=0.03)
+
+    def test_a_coast_that_keeps_creeping_is_kept_whole(self):
+        """No new rise: the slow tail still counts (as before 2.9.2)."""
+        s, cross = _synthetic_heatup(overshoot=0.3)
+        m = A.analyse_heatup(s, start_ts=0.0, setpoint_c=20.0, cfg=CFG,
+                             cross_ts=cross * 60.0, tuning=A.Tuning(0.6, 0.002))
+        assert m.later_rise_c is None
+        assert m.overshoot_c == pytest.approx(max(y for _, y, _ in s) - 20.0, abs=0.002)
+
+    def test_a_stop_inside_the_dead_time_keeps_the_rise_that_follows(self):
+        """Told to stop before the room had visibly moved: the heat already
+        sent still arrives, and that rise is this heat-up's coast."""
+        samples = []
+        for k in range(150):
+            m = float(k)
+            y = 19.0 if m < 12 else 19.0 + 0.8 * (1 - math.exp(-(m - 12) / 20.0))
+            samples.append((k * 60.0, y, 2.0 if k < 6 else -1.0))
+        r = A.analyse_heatup(samples, start_ts=0.0, setpoint_c=20.0, cfg=CFG,
+                             cross_ts=6 * 60.0, tuning=A.Tuning(0.6, 0.002))
+        assert r.later_rise_c is None
+        assert r.overshoot_c == pytest.approx(-0.2, abs=0.01)
+
+    def test_the_status_says_what_was_not_counted(self):
+        _, bumped, cross = self._with_later_rise()
+        t = _tuner(td=600.0)
+        m = A.analyse_heatup(bumped, start_ts=0.0, setpoint_c=20.0, cfg=CFG,
+                             cross_ts=cross * 60.0, tuning=A.Tuning(0.6, 0.002, 600.0))
+        t._on_heatup(m, m.ts)
+        assert "later rise +0.50 °C not counted" in t.last_event
+
+    def test_learning_stored_before_2_9_2_is_kept(self):
+        """Stored heat-ups have no later_rise_c: they load as they are, so
+        installing the update does not restart learning."""
+        old = _tuner(kp=3.0, ki=0.001, td=660.0)
+        for k in range(3):
+            old._on_heatup(_heatup(DAY * (k + 1), 0.05, coast=780.0, td=660.0), DAY * (k + 1))
+        data = old.as_dict()
+        for h in data["heatups"]:
+            h.pop("later_rise_c")
+        new = _tuner(kp=3.0, ki=0.001, td=660.0, stored=data)
+        for name in ("kp", "ki", "td_s"):
+            assert getattr(new.active_tuning(), name) == pytest.approx(
+                getattr(old.active_tuning(), name), rel=1e-4)
+        assert len(new._heatups) == 3
+        assert all(h.later_rise_c is None for h in new._heatups)
+        assert new._model()["coast_s"] == pytest.approx(old._model()["coast_s"])
 
     def test_small_step_gives_no_dead_time(self):
         s, cross = _synthetic_heatup(y0=19.5)

@@ -178,6 +178,16 @@ class AutotuneConfig:
     # A TRV demand this high after the demand went <= 0 means heating
     # restarted (a stepped top-up): the episode ends there.
     heatup_reheat_demand_c: float = 1.0
+    # A heat-up is measured up to its own first peak: once the TRV was told
+    # to stop and the room, having risen, rises no faster than this over 10
+    # min, its coast has stalled, and a rise after that (rate_min_c_per_h or
+    # faster) is people, sun or a small hold push, not this heat-up's
+    # radiator (24 Oct 2026, living room: the room stalled at 19.97, then
+    # lunch guests took it to 20.49 with the valve shut; booked as a 33-min
+    # coast, +0.48 °C and a 46-min dead time, it raised the braking time
+    # 10.3 -> 13.1 min and the next morning stopped 0.35 °C short).  The
+    # regulator's slope deadband.
+    coast_stall_c_per_h: float = 0.1
     # Smaller steps still show overshoot and coast, but the dead time and
     # heating rate need a bigger rise to stand out from sensor noise.  0.6
     # for both: with a 0.01 °C sensor a 0.6 °C rise is 60 steps, and in mild

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.9.1-blue)
+![Version](https://img.shields.io/badge/version-2.9.2-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -154,6 +154,9 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 - It learns from heat-ups: a target that rises by 0.5 °C or more while the
   room is cooler, for example a schedule going from Night to Comfort. The
   dead time and heat-up rate need a rise of 0.6 °C or more.
+- It measures a heat-up only up to the room's own peak. If the room stops
+  rising and then rises again with no heat (people, sun), that later rise is
+  not counted. The status shows how much was left out.
 - The first values appear after the first heat-up, and they settle in about a
   week.
 - A heat-up carries on after a restart or a settings change. If readings stop

@@ -612,6 +612,32 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   (one stall vote); the study's episode would have booked its 45-min
   recovery as coast. Resuming after presence-away, summer or off still
   counts: there the room really cooled.
+
+  **A heat-up is measured only up to its own first peak** (2.9.2,
+  `_coast_end`). Once the room, having risen, has stalled after the stop
+  (10-min slope ≤ `coast_stall_c_per_h`, 0.1 °C/h) and then rises again
+  (≥ `rate_min_c_per_h`, 0.2 °C/h), the new rise is not this radiator: the
+  peak, overshoot, coast and the dead-time tangent end where it began
+  (`HeatupMetrics.later_rise_c`, shown in the status). A coast that just
+  creeps on is kept whole, and a stall before the room was seen rising
+  (inside the dead time) is not one. Only the shape is used, no CO2 or
+  presence. Evidence, living room: 23 Oct (on target at 07:05, people from
+  07:40 took it to 20.35: booked +0.35, coast 20 min) and 24 Oct lunch
+  (stalled at 19.97, guests took it to 20.49: +0.48, coast 33 min, θ 46 min)
+  raised Td 7.9 → 13.1 min and cut the SIMC Ki 0.00056 → 0.0003 (θ median
+  22 min); on 25 Oct the morning heat-up stopped 0.74 short and peaked
+  −0.35. Replayed 21–25 Oct: those two become +0.05 / −0.02 with 11-min
+  coasts and θ 12 / 10.5 min, the five others are unchanged, and the
+  learned Td is 7.6 instead of 13.2 min, Ki 0.00045 instead of 0.0003.
+  Simulator (four rooms, 5 and 11 °C, two seeds, heat-ups at 06:00 and
+  12:00): empty rooms unchanged (hold RMS 0.060, commands, no rollbacks);
+  with +0.8 °C/h of people after each heat-up, rollbacks 18 → 4, hold RMS
+  0.144 → 0.140, lowest heat-up peak −0.68 → −0.63, highest +0.02. Stored
+  episodes are kept on the update (owner's decision: no learning reset);
+  the two bad ones roll out of the 5-episode history. Not handled: people
+  in the room *during* a heat-up steepen its rise, so the exit predicts too
+  much coast (25 Oct: 3.3 °C/h at the exit against about 2.5 on empty
+  mornings).
 - **SIMC is used only for Ti** (= 4(τc + θ), τc = 1.5 θ), as a basis for Ki,
   and as the justification for Td ≈ coast. **SIMC's Kc is not used:** the only
   gain estimate (rate / demand) is self-referential, because the demand is

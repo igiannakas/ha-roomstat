@@ -295,6 +295,9 @@ class HeatupMetrics:
     td_s: float = 0.0
     truncated: bool = False            # ended early (schedule moved on)
     crossed: bool = False              # TRV demand went <= 0 (we told it to stop)
+    # How far the room rose above the heat-up's own peak after its coast was
+    # over (people, sun, a small hold push).  Not counted; shown in the status.
+    later_rise_c: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {k: (round(v, 6) if isinstance(v, float) else v)
@@ -310,7 +313,8 @@ class HeatupMetrics:
             return None
         if m.overshoot_c is not None and not _finite(m.overshoot_c):
             return None
-        for name in ("theta_s", "rate_c_per_h", "demand0_c", "coast_s", "coast_rise_c", "reach_s"):
+        for name in ("theta_s", "rate_c_per_h", "demand0_c", "coast_s", "coast_rise_c",
+                     "reach_s", "later_rise_c"):
             if getattr(m, name) is not None and not _finite(getattr(m, name)):
                 setattr(m, name, None)
         # Values that feed divisions must be strictly positive.
@@ -377,6 +381,46 @@ def _median_filter(values: list[float], k: int = 3) -> list[float]:
     return out
 
 
+_COAST_WINDOW_S = 600.0
+
+
+def _coast_end(ts: list[float], ys: list[float], cross_index: int,
+               cfg: AutotuneConfig) -> int:
+    """Index of the last sample that belongs to the heat-up's own coast.
+
+    After the TRV was told to stop, the radiator's heat tails off: the room
+    rises ever more slowly, then stops, and never speeds up again by itself.
+    So once the room, having risen, stalled after the stop (a 10-min window
+    ending at or after it rising no faster than ``cfg.coast_stall_c_per_h``)
+    and then rises again (a window at ``cfg.rate_min_c_per_h`` or faster),
+    the new rise is something else -- people coming in, sun, a small hold
+    push below ``heatup_reheat_demand_c`` -- and the coast ends where it
+    began.  A coast that just creeps on is kept whole, and so is a stall
+    inside the dead time (before the room was seen rising at all).  Returns
+    the last index when nothing rose again.
+    """
+    rising = False
+    stall_j: int | None = None
+    j0 = 0
+    for j in range(len(ts)):
+        while ts[j] - ts[j0] > _COAST_WINDOW_S:
+            j0 += 1
+        if ts[j] - ts[j0] < 0.8 * _COAST_WINDOW_S:
+            continue
+        sl = theil_sen(list(zip(ts[j0:j + 1], ys[j0:j + 1])))
+        if sl is None:
+            continue
+        rate_h = sl * 3600.0
+        if stall_j is None:
+            if rising and j >= cross_index and rate_h <= cfg.coast_stall_c_per_h:
+                stall_j = j
+        elif rate_h >= cfg.rate_min_c_per_h:
+            return max(j0, stall_j)
+        if rate_h >= cfg.rate_min_c_per_h:
+            rising = True
+    return len(ts) - 1
+
+
 def analyse_heatup(
     samples: list[tuple[float, float, float | None]],
     *,
@@ -400,6 +444,12 @@ def analyse_heatup(
     still valid), and the coast is reported as a lower bound (the tuner only
     ever lets lower bounds *raise* the braking time).  A cut-off episode can
     therefore never argue for *less* braking.
+
+    Everything is measured up to the end of the heat-up's own coast
+    (:func:`_coast_end`): the peak, the overshoot, the coast and the rise
+    searched for the dead time.  The episode itself runs on until the room
+    has settled, so a later rise would otherwise be booked as this
+    radiator's coast.
     """
     if len(samples) < 10:
         return None
@@ -413,8 +463,10 @@ def analyse_heatup(
     if y0 is None:
         return None
     end_ts = ts[-1]
-    peak_i = max(range(len(ys)), key=lambda i: ys[i])
+    own_end = len(ys) - 1 if cross_index is None else _coast_end(ts, ys, cross_index, cfg)
+    peak_i = max(range(own_end + 1), key=lambda i: ys[i])
     peak = ys[peak_i]
+    later_rise = max(ys[own_end:]) - peak if own_end < len(ys) - 1 else 0.0
 
     # Tangent method on the rising part: steepest 10-min Theil-Sen line.
     win = 600.0
@@ -468,7 +520,7 @@ def analyse_heatup(
         pre = [(t, y) for t, y in zip(ts, ys) if t_c - win <= t <= t_c]
         s_cross = theil_sen(pre) if len(pre) >= 5 else None
         y_cross = _median(ys[max(0, cross_index - 1):cross_index + 2])
-        post_peak = max(ys[cross_index:])
+        post_peak = max(ys[cross_index:own_end + 1])
         if y_cross is not None:
             coast_rise = max(0.0, post_peak - y_cross)
             if s_cross is not None and s_cross * 3600.0 >= cfg.rate_min_c_per_h:
@@ -479,7 +531,8 @@ def analyse_heatup(
     if early:
         demand0 = max(early)
 
-    reach = next((t for t, y in zip(ts, ys) if y >= setpoint_c - 0.1), None)
+    reach = next((t for t, y in zip(ts[:own_end + 1], ys[:own_end + 1])
+                  if y >= setpoint_c - 0.1), None)
     return HeatupMetrics(
         ts=end_ts, start_ts=start_ts, setpoint_c=setpoint_c,
         step_c=step, overshoot_c=overshoot,
@@ -488,6 +541,7 @@ def analyse_heatup(
         reach_s=(reach - start_ts) if reach is not None else None,
         kp=tuning.kp, ki=tuning.ki, td_s=tuning.td_s, truncated=truncated,
         crossed=cross_ts is not None,
+        later_rise_c=later_rise if later_rise > 0 else None,
     )
 
 
@@ -1066,6 +1120,8 @@ class Autotuner:
             f"heat-up{' (cut short)' if m.truncated else ''}: overshoot {os_txt}"
             + (f", dead time {m.theta_s / 60:.0f} min" if m.theta_s else "")
             + (f", coast {m.coast_s / 60:.0f} min" if m.coast_s is not None else "")
+            + (f", later rise +{m.later_rise_c:.2f} °C not counted"
+               if m.later_rise_c is not None and m.later_rise_c >= 0.05 else "")
         )
         os = m.overshoot_c
         if os is None:
