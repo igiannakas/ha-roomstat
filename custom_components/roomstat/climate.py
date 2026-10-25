@@ -523,9 +523,7 @@ class RoomstatClimate(
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
                 # What the tuner last did is in its restored state, not new.
-                self._activity_tuner_seen = (
-                    self._autotuner.verdicts, self._autotuner.last_event
-                )
+                self._activity_tuner_seq = self._autotuner.journal_seq
                 self._activity.restore(extra_dict.get("activity"))
                 self._band_monitor.restore(extra_dict.get("out_of_band"))
                 # The last command, if it was only seconds ago (an entry

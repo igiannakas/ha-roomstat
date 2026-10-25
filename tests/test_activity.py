@@ -530,6 +530,22 @@ class TestEntity:
         assert after[: len(before)] == before
         assert after[-1] == "Started (Home Assistant restart or room reload)"
 
+    def test_a_restart_does_not_log_the_tuners_old_news(self, monkeypatch):
+        clock, ent, _ = self._start(monkeypatch)
+        ent._autotune_enabled = True
+        ent._autotuner.last_event = "heat-up: overshoot -0.35 °C"
+        _feed(ent, 20.5, 19.0, 20.5)
+        _cycle(ent)
+        data = ent.extra_restore_state_data.as_dict()
+        new = _make_entity({"autotune_enabled": True})
+        _run(_start(new, extra=_Extra(data)))
+        new.coordinator.data = ent.coordinator.data
+        clock.tick()
+        _cycle(new)
+        after_start = _texts(new)[_texts(new).index(
+            "Started (Home Assistant restart or room reload)"):]
+        assert not any(t.startswith("Auto-tune: ") for t in after_start)
+
     def test_an_auto_tune_verdict_is_logged_once(self, monkeypatch):
         clock, ent, _ = self._start(monkeypatch)
         ent._autotune_enabled = True
