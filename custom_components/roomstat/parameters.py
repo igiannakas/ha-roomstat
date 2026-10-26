@@ -41,6 +41,27 @@ DEFAULT_SENSOR_GRACE_S: int = 300      # seconds to use last-valid room_temp whe
 # share one bridge; spacing the commands means it never gets a burst.
 TRV_COMMAND_SPACING_S: float = 5.0
 
+# More heat asked for by a change by hand (a preset, a temperature, Heat,
+# resume schedule) waits this long after the last such change, so a second
+# press replaces it instead of following it.  Less heat and off go at once.
+# A Tado valve that gets an off seconds after a heat command can take the
+# heat and not the off: 25 Oct 2026, 25 °C followed by off 5 s (master
+# bedroom) and 15 s later (second bedroom), the zones showed off at once and
+# the valves heated at 100 % for 15 and 13 min; an off half an hour after
+# the heat is taken within 5 min.  The presses came 9 s apart (Comfort, then
+# Frost protection), 19 Oct 10 s (20 → 22 → 20).
+MANUAL_SETTLE_S: float = 15.0
+
+# An off sent less than this after a heat command to the same valve is sent
+# once more this long after it (climate_controllers.off_confirm_after).  The
+# settle above only joins presses less than MANUAL_SETTLE_S apart: Comfort,
+# then Frost protection 20 s later, sends the heat at 15 s and the off 5 s
+# after it, the pattern of 25 Oct (2.10.4 review).  One extra command, only
+# in that case; the owner's choice (26 Oct 2026).  Whether a second off
+# reaches a valve that kept the heat over the first is not proven yet: watch
+# the zones' heating % after one.
+OFF_CONFIRM_S: float = 60.0
+
 # A TRV whose setpoint still differs from the last command this long after it
 # was sent did not take it (lost on the way, or a Tado schedule block ended
 # the override): the command is sent again.  This replaces blind periodic
@@ -368,6 +389,35 @@ class RegulationConfig:
     # rooms (Td exit, then coast).
     heatup_enter_c: float = 0.8
     heatup_exit_c: float = 0.1
+    # A hold that pushes hard ends like a heat-up (2.10.4).  Once the hold's
+    # push (command - the valve's reading = (1 + Kp) x error + I) reaches
+    # hold_push_c, the valve is at or near full output and the radiator
+    # fills with heat as in a heat-up: the push then ends on the heat-up's
+    # exit (error - Td x rise <= heatup_exit_c) and coasts, until the hold
+    # is left (coast, stop or heat-up).  Without it such a push ended on the
+    # stop rule, 0.2 °C of landing later.  26 Oct 2026, second bedroom: a
+    # 0.76 deficit at 06:00 (just under heatup_enter_c) ran as a hold at
+    # +3.1 over the valve's reading, which the valve answered at 100 %; the
+    # stop rule shut it at 06:31, the heat-up exit would have at 06:28 (Td
+    # 25 min), and the room went on rising for 24 min on the radiator's
+    # heat.  2.5 (owner's choice, 26 Oct 2026; 3.0 was proposed): the Tado
+    # answers +1..+3 by throttling and pulsing (30-40 % on average) once its
+    # radiator is warm, +3 and more from a cold radiator at full power.
+    # Simulated (four rooms, 5-12 °C outside, morning deficits 0.4-1.2, two
+    # seeds, auto-tune on; tests/plant_sim.py), 2.5 against today: morning
+    # peak +0.19..+0.22 -> +0.10..+0.14 in the generic living room at 0.6-0.7
+    # deficits (Td 15-18 min learned), +0.24 -> +0.18 in the generic slow
+    # room at a 0.4 deficit and +0.16 -> +0.13 at 5 °C; the fitted living
+    # room within +-0.01; the fitted second bedroom +0.01..+0.03 (it learns a
+    # Td of about 0: its coast stalls just short and the hold tops up); hold
+    # RMS within +-0.01 except +0.02 in the generic living room at a 0.4
+    # deficit; commands -9..+13 %; heat-ups (deficit 1.2) unchanged.  3.0
+    # left the generic living room at +0.15 at 12 °C / 0.6 (2.5: +0.10) and
+    # the 0.4 deficits as they are, with the fitted rooms the same within
+    # 0.02.  2.0 did no better.  Any rising hold (no threshold) halved the
+    # generic rooms' hold RMS but more than doubled the fitted second
+    # bedroom's commands (stopping at the target, again).
+    hold_push_c: float = 2.5
     # Near the target, a firm stop (the minimum) once the room is predicted
     # to be stop_over_c over the target within the braking time Td, but at
     # least stop_lead_s, so the radiator's leftover heat lands at most

@@ -157,6 +157,7 @@ class ScheduleMixin:
                 translation_domain=DOMAIN,
                 translation_key="no_schedule",
             )
+        self.note_change_by_hand()
         self._schedule_ctrl.clear_override()
         self._log(_LOGGER).info("schedule resumed")
         if self._presence_ctrl.end_override():

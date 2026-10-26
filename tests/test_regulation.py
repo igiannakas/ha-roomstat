@@ -374,6 +374,73 @@ class TestModes:
         assert res.mode == "heat"
 
 
+class TestFullPush:
+    """A hold whose push (command - the valve's reading) reaches hold_push_c
+    (2.5) ends like a heat-up: on the heat-up's exit, then a coast (2.10.4;
+    26 Oct 2026, second bedroom: a 0.76 deficit, +3.1, the valve at 100 %,
+    stopped by the stop rule 3 min after the heat-up exit)."""
+
+    def test_the_threshold(self):
+        assert RegulationConfig().hold_push_c == 2.5
+
+    def test_a_hold_that_pushes_hard_ends_like_a_heat_up(self):
+        reg = make_regulator()
+        res, st = step(reg, RegulationState(), 19.3)              # +3.5 over the valve
+        assert res.mode == "hold" and res.full_push and st.full_push
+        res, st = step(reg, st, 19.6, slope_c_per_h=1.5)          # +2.0 now, still on
+        assert res.mode == "hold" and res.full_push
+        res, st = step(reg, st, 19.7, slope_c_per_h=1.5)          # lands 0.07 short
+        assert res.mode == "coast" and res.target_for_tado_c == 5.0
+        assert not st.full_push
+
+    def test_a_gentle_hold_still_ends_on_the_stop_rule(self):
+        """The same room and slope after a small push: the stop rule's 0.1
+        over, not the heat-up's 0.1 short (stopping at the target costs 2-3x
+        the commands)."""
+        res, st = step(make_regulator(), RegulationState(), 19.7, slope_c_per_h=1.5)
+        assert res.mode == "hold" and not res.full_push
+        res, _ = step(make_regulator(), st, 19.95, slope_c_per_h=1.2)
+        assert res.mode == "stop"
+
+    def test_the_push_decides_not_the_deficit(self):
+        reg = make_regulator()
+        res, _ = step(reg, RegulationState(integral_c=-1.5), 19.3)   # 3.5 - 1.5
+        assert not res.full_push
+        res, _ = step(reg, RegulationState(integral_c=0.6), 19.6)    # 2.0 + 0.6
+        assert res.full_push
+
+    def test_a_hold_entered_afresh_starts_gentle(self):
+        """A flag left from before (a coast, a stop, a restart setting the
+        mode) never carries into a new hold."""
+        reg = make_regulator()
+        for mode, room, slope in (("stop", 19.9, 0.0), ("coast", 19.8, 0.0)):
+            res, _ = step(reg, RegulationState(mode=mode, full_push=True), room,
+                          slope_c_per_h=slope)
+            assert res.mode == "hold" and not res.full_push
+
+    def test_one_sided_no_prediction_no_coast(self):
+        """Falling, flat, unknown slope, or at the target: a full push does
+        not coast (the stop rule keeps the overshoot side)."""
+        reg = make_regulator()
+        pushing = RegulationState(full_push=True)
+        for room, slope in ((19.7, -1.0), (19.7, 0.0), (19.95, 0.05)):
+            res, _ = step(reg, pushing, room, slope_c_per_h=slope)
+            assert res.mode == "hold" and res.full_push
+        res = reg.compute(setpoint_c=20.0, room_temp_c=19.75, tado_internal_c=19.75,
+                          time_delta_s=60.0, state=pushing, room_slope_c_per_s=None)
+        assert res.mode == "hold"
+        res, _ = step(reg, pushing, 20.05, slope_c_per_h=1.0)
+        assert res.mode == "stop"
+
+    def test_the_braking_time_sets_its_lead(self):
+        """Td 25 min: 0.45 below at 1.3 °C/h lands 0.05 over -> coast."""
+        reg = make_regulator(tuning=CorrectionTuning(td_s=1500.0))
+        res, _ = step(reg, RegulationState(full_push=True), 19.55, slope_c_per_h=1.3)
+        assert res.mode == "coast"
+        res, _ = step(reg, RegulationState(), 19.55, slope_c_per_h=1.3)   # +2.25
+        assert res.mode == "hold"     # a gentle hold waits for the stop rule
+
+
 class TestFastFall:
     """A reading that fell fast_fall_c since the previous cycle is a draught
     or a glitch: that cycle keeps the previous reading (19 Oct 2026: 25 °C

@@ -159,6 +159,20 @@ def _install_ha_stubs() -> None:
         SensorDeviceClass=SensorDeviceClass, SensorEntity=SensorEntity,
         SensorEntityDescription=SensorEntityDescription, SensorStateClass=SensorStateClass,
     )
+
+    class NumberDeviceClass(str, enum.Enum):  # noqa: UP042
+        TEMPERATURE = "temperature"
+
+    class NumberMode(str, enum.Enum):  # noqa: UP042
+        BOX = "box"
+
+    class NumberEntity(_Entity):
+        pass
+
+    mod(
+        "homeassistant.components.number",
+        NumberDeviceClass=NumberDeviceClass, NumberEntity=NumberEntity, NumberMode=NumberMode,
+    )
     mod("homeassistant.config_entries", ConfigEntry=object)
     mod("homeassistant.const", ATTR_TEMPERATURE="temperature", PRECISION_TENTHS=0.1,
         UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"),
@@ -189,7 +203,7 @@ def _load_entity_package():
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [str(_ROOT)]
     sys.modules[pkg_name] = pkg
-    for name in ("climate", "binary_sensor", "sensor"):
+    for name in ("climate", "binary_sensor", "sensor", "number"):
         spec = importlib.util.spec_from_file_location(f"{pkg_name}.{name}", _ROOT / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"{pkg_name}.{name}"] = module
@@ -205,10 +219,12 @@ if not _HA_INSTALLED:
     sys.modules["roomstat_e2e.climate_regulation"].COMMAND_PACER.spacing_s = 0.0
     _binary_sensor = sys.modules["roomstat_e2e.binary_sensor"]
     _sensor = sys.modules["roomstat_e2e.sensor"]
+    _number = sys.modules["roomstat_e2e.number"]
 else:  # pragma: no cover
     _climate = None
     _binary_sensor = None
     _sensor = None
+    _number = None
 
 e2e = pytest.mark.skipif(
     _HA_INSTALLED, reason="end-to-end stubs are only used when HA is not installed"
@@ -321,6 +337,23 @@ def _fire_last_timer():
 
 def _active_timers():
     return [c for c in _CALL_LATER if not c["cancelled"]]
+
+
+def _settle(clock=None):
+    """Let a change by hand settle (parameters.MANUAL_SETTLE_S): move the
+    test clock past it (when the test has one) and run the cycle that was
+    scheduled for then."""
+    if clock is not None:
+        clock.tick(sys.modules["roomstat_e2e.parameters"].MANUAL_SETTLE_S + 1.0)
+    pending = [
+        c for c in _CALL_LATER
+        if not c["cancelled"]
+        and getattr(c["callback"], "__name__", "") == "_async_settled_cycle"
+    ]
+    assert pending, "no settled cycle scheduled"
+    entry = pending[-1]
+    entry["cancelled"] = True
+    _run(entry["callback"](None))
 
 
 def reset_timers() -> None:

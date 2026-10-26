@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
+from typing import Any
 
 from homeassistant.components.climate import PRESET_BOOST, HVACMode
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_call_later
 
 from .activity import (
     PATH_NO_DATA,
@@ -34,6 +37,7 @@ from .climate_controllers import (
     integration_step,
     is_maximum,
     is_off_command,
+    off_confirm_after,
     pending_command,
     resend_grace_s,
     trv_holds_command,
@@ -47,7 +51,9 @@ from .const import (
 )
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
+    MANUAL_SETTLE_S,
     MAX_INTEGRATION_STEP_S,
+    OFF_CONFIRM_S,
     RESEND_BACKOFF_MAX_S,
     TRV_COMMAND_SPACING_S,
     TRV_COMMAND_TIMEOUT_S,
@@ -234,6 +240,82 @@ class RegulationMixin:
         """Periodic timer callback."""
         await self._async_regulation_cycle(trigger="timer")
 
+    # -- a change by hand settles before it adds heat (MANUAL_SETTLE_S) -----
+    def note_change_by_hand(self) -> None:
+        """A preset, temperature, preset temperature, HVAC mode or resume
+        picked by the user (or any service call: the wait is by time).
+        Kept across the reload a preset temperature change causes."""
+        self._manual_change_ts = time.time()
+
+    def _restore_change_by_hand(self, ts: Any, now: float) -> None:
+        """Take back a change by hand still settling (an entry reload)."""
+        if (
+            isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            and math.isfinite(ts) and 0.0 <= now - ts < MANUAL_SETTLE_S
+        ):
+            self._manual_change_ts = float(ts)
+
+    def _settle_remaining_s(self, now: float) -> float:
+        """Seconds left until the last change by hand has settled (0: it
+        has, or none was made).  A clock that went back ends the wait."""
+        since = now - self._manual_change_ts
+        if since < 0 or since >= MANUAL_SETTLE_S:
+            return 0.0
+        return MANUAL_SETTLE_S - since
+
+    def _more_heat(self, now: float, target: float, trv: TrvReading) -> bool:
+        """The heat command *target* gives the valve more heat than it may
+        hold: more than a heat command of ours that may be on its way, else
+        than the setpoint it shows (on its Tado schedule: the block's); off,
+        an off of ours on its way, or nothing known is the frost level."""
+        floor = self._config.min_target_c
+        pending = self._pending(now, trv)
+        if pending == PENDING_HEAT:
+            held = self._last_heat_attempt_c
+        elif pending == PENDING_OFF or trv.off:
+            held = floor
+        else:
+            held = trv.setpoint_c
+        return target > (floor if held is None else held) + 0.05
+
+    def _hold_back(
+        self, now: float, target: float, trv: TrvReading
+    ) -> tuple[str, float] | None:
+        """Why the heat command *target* waits this cycle, if it does:
+        ``(reason, seconds)`` (0 seconds: until something else changes).
+
+        Only more heat (``_more_heat``) waits; less heat and off never do.
+        It waits while the window's open delay runs (the window is open and
+        its off is due) and, within MANUAL_SETTLE_S of a change by hand,
+        until the change has settled.  Both avoid a heat command followed
+        within seconds by an off, which a Tado valve may take as the heat
+        (25 Oct 2026).
+        """
+        if not self._more_heat(now, target, trv):
+            return None
+        if self._window_ctrl.open_delay_active:
+            return "window_pending", 0.0
+        settle_s = self._settle_remaining_s(now)
+        if settle_s > 0:
+            return f"settling({math.ceil(settle_s)}s)", settle_s
+        return None
+
+    def _schedule_settled_cycle(self, delay_s: float) -> None:
+        """Run a cycle when the change has settled (one at a time)."""
+        self._cancel_settled_cycle()
+        self._settle_cancel = async_call_later(
+            self.hass, delay_s + 0.1, self._async_settled_cycle
+        )
+
+    def _cancel_settled_cycle(self) -> None:
+        if self._settle_cancel is not None:
+            self._settle_cancel()
+            self._settle_cancel = None
+
+    async def _async_settled_cycle(self, _now) -> None:
+        self._settle_cancel = None
+        await self._async_regulation_cycle(trigger="settled")
+
     async def _async_regulation_cycle(self, trigger: str) -> None:
         """Execute one control cycle."""
         async with self._regulation_lock:
@@ -256,6 +338,12 @@ class RegulationMixin:
         # runs out: its start counts as unknown, so it is renewed now.
         if self._heat_timer_sent_ts is not None and self._heat_timer_sent_ts > now:
             self._heat_timer_sent_ts = None
+        # A heat command "in the future": its age is unknown, and an off to
+        # confirm was due a minute after an off that may be long gone.
+        if self._last_heat_command_ts is not None and self._last_heat_command_ts > now:
+            self._last_heat_command_ts = None
+        if self._off_confirm_ts is not None and self._off_confirm_ts - OFF_CONFIRM_S > now:
+            self._off_confirm_ts = now
 
         # Summer mode: no regulation, hold the TRV off.  The lock
         # is this cycle's decision (the watchdog counts it as completed).
@@ -390,8 +478,11 @@ class RegulationMixin:
         dt = integration_step(now, self._last_regulation_ts, MAX_INTEGRATION_STEP_S)
         self._last_regulation_ts = now
 
-        # 3. Effective setpoint (considers HVAC mode + preset)
+        # 3. Effective setpoint (considers HVAC mode + preset), and what the
+        # activity line names with it (read now: a change by hand during
+        # the send below must not label this decision).
         setpoint = self._effective_setpoint()
+        decided_as = self._activity_decided_as()
 
         # 3b. Robust room slope for the heat-up and stop predictions (only on fresh
         # readings; a bridged/stale value must not look like a flat room).
@@ -451,7 +542,9 @@ class RegulationMixin:
             _LOGGER.debug(
                 "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s%s | cmd %s"
                 " P %+.2f I %+.2f | %s",
-                self._config_entry.title, result.mode, setpoint, room_temp,
+                self._config_entry.title,
+                f"{result.mode} (full push)" if result.full_push else result.mode,
+                setpoint, room_temp,
                 " (fell fast: previous reading used)" if result.room_held else "",
                 "no slope" if slope is None else f"{slope * 3600:+.2f} °C/h",
                 tado_internal,
@@ -465,6 +558,7 @@ class RegulationMixin:
         self._activity_cycle(
             now, PATH_REGULATED, room_c=room_temp, setpoint_c=setpoint,
             prev_mode=prev_mode, slope_c_per_s=slope, td_s=td_used_s,
+            decided_as=decided_as,
         )
         self._note_cycle_completed(now)
         self._write_state_with_binary_sensor()
@@ -542,8 +636,40 @@ class RegulationMixin:
             self._last_heat_attempt_c = command_c
             self._last_heat_attempt_ts = now
             self._last_heat_attempt_ok = ok
+            # Heat wanted again: no off to confirm.
+            self._last_heat_command_ts = now
+            self._off_confirm_ts = None
         elif ok:
             self._clear_heat_attempt()
+            # An off seconds after a heat command is sent once more a minute
+            # later (OFF_CONFIRM_S); this one, if it is that confirmation,
+            # ends it (it comes a minute or more after the heat).
+            self._off_confirm_ts = off_confirm_after(
+                now, self._last_heat_command_ts, OFF_CONFIRM_S
+            )
+
+    def _off_confirm_due(self, now: float) -> bool:
+        """An off seconds after a heat command is due to be sent once more
+        (OFF_CONFIRM_S).  A failed attempt at it waits for the rate limit
+        like any other retry."""
+        due = self._off_confirm_ts
+        if due is None or now < due:
+            return False
+        return self._last_attempt_ok or (
+            now - self._last_command_sent_ts >= self._config.min_command_interval_s
+        )
+
+    async def _async_send_off_confirm(self, now: float, trv: TrvReading) -> bool:
+        """Send the off once more (see _off_confirm_due); returns whether the
+        TRV took it."""
+        self._log(_LOGGER).info(
+            "sending the off again: the last one came within %d s of a heat command, "
+            "and a Tado valve can keep the heat and drop such an off",
+            int(OFF_CONFIRM_S),
+        )
+        sent = await self._async_send_off_to_tado(trv.entity_id)
+        self._note_attempt(now, self._config.min_target_c, trv, sent)
+        return sent
 
     def _clear_heat_attempt(self) -> None:
         """No heat command of ours is on its way any more."""
@@ -607,6 +733,8 @@ class RegulationMixin:
             heat_c=self._last_heat_attempt_c,
             heat_ts=self._last_heat_attempt_ts,
             heat_ok=self._last_heat_attempt_ok,
+            heat_sent_ts=self._last_heat_command_ts,
+            off_confirm_ts=self._off_confirm_ts,
         )
 
     def _restore_command(self, data, now: float) -> bool:
@@ -637,6 +765,14 @@ class RegulationMixin:
             self._last_heat_attempt_c = record.heat_c
             self._last_heat_attempt_ts = record.heat_ts
             self._last_heat_attempt_ok = record.heat_ok
+        # An off seconds after a heat command, still to be sent once more.
+        if record.heat_sent_ts is not None and record.heat_sent_ts <= now:
+            self._last_heat_command_ts = record.heat_sent_ts
+        if (
+            record.off_confirm_ts is not None
+            and record.off_confirm_ts - OFF_CONFIRM_S <= now
+        ):
+            self._off_confirm_ts = record.off_confirm_ts
         return True
 
     # ------------------------------------------------------------------
@@ -684,7 +820,8 @@ class RegulationMixin:
                 )
                 again = f" (again; next check in {next_s / 60:.0f} min)"
             self._log(_LOGGER).info(
-                "%s holds %s, not the %s sent; sending again%s", trv.entity_id, _held_text(trv),
+                "%s holds %s, not the %s sent; it will be sent again%s", trv.entity_id,
+                _held_text(trv),
                 _command_text(self._last_sent_setpoint, floor), again,
             )
             self._last_sent_setpoint = None
@@ -783,7 +920,6 @@ class RegulationMixin:
                 else:
                     should_send = True
                     reason = "heat_timer_refresh"
-                    self._heat_timer_refresh_tried = True
             elif diff < self._config.min_change_threshold_c and not overlay_refresh_due:
                 reason = "already_at_target"
             elif diff < self._config.min_change_threshold_c and overlay_refresh_due:
@@ -817,8 +953,29 @@ class RegulationMixin:
         if not should_send:
             self._last_reason = reason
             return
+        # More heat than the valve has, while an off may follow within
+        # seconds (the window's, or a change by hand taken back): it waits.
+        held_back = self._hold_back(now, target, trv)
+        paced = False
+        if held_back is None and self._more_heat(now, target, trv):
+            # More heat is committed only once it has its turn at the bridge
+            # (the pacer spaces every room's commands: after a heating
+            # script, four rooms queue 0-15 s).  A change by hand or a window
+            # opening while it waits would otherwise be followed by its off
+            # seconds after this heat (2.10.4 review): asked again after the
+            # wait.  (The change's own cycle waits for this one's lock.)
+            await _wait_for_command_slot()
+            paced = True
+            held_back = self._hold_back(time.time(), target, trv)
+        if held_back is not None:
+            self._last_reason, wait_s = held_back
+            if wait_s > 0:
+                self._schedule_settled_cycle(wait_s)
+            return
+        if reason == "heat_timer_refresh":
+            self._heat_timer_refresh_tried = True
         sent = await self._async_send_to_tado(
-            target, trv.entity_id, timer_s=timer_s, maximum=maximum
+            target, trv.entity_id, timer_s=timer_s, maximum=maximum, paced=paced
         )
         self._note_attempt(now, target, trv, sent)
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
@@ -847,6 +1004,12 @@ class RegulationMixin:
         fallback switch, or before an entry reload).
         """
         floor = self._config.min_target_c
+        if self._off_confirm_due(now):
+            # Shown or not, an off seconds after a heat command is sent once
+            # more (OFF_CONFIRM_S).
+            sent = await self._async_send_off_confirm(now, trv)
+            self._last_reason = f"{'sent' if sent else 'send_failed'}(off_confirm)"
+            return
         if trv.off and pending != PENDING_HEAT:
             # The valve is off: the frost level is its baseline.
             self._note_trv_holds_off()
@@ -906,6 +1069,11 @@ class RegulationMixin:
         since = now - self._last_command_sent_ts
         self._note_trv_shows(trv)
         pending = self._pending(now, trv)
+        if trv.entity_id and self._off_confirm_due(now):
+            sent = await self._async_send_off_confirm(now, trv)
+            self._last_reason = "sent(off_confirm)" if sent else "send_failed(off_confirm)"
+            self._write_state_with_binary_sensor()
+            return
         send = False
         if trv.off and pending != PENDING_HEAT:
             self._note_trv_holds_off()
@@ -1009,12 +1177,15 @@ class RegulationMixin:
         self._last_command_error = message
 
     async def _async_call_trv(
-        self, entity_id: str, service: str, data: dict, *, domain: str = "climate"
+        self, entity_id: str, service: str, data: dict, *, domain: str = "climate",
+        paced: bool = False,
     ) -> bool:
         """Call a service on the TRV (``climate`` by default, ``tado`` for a
         timer overlay).  Never raises (except when the task is cancelled): a
-        failed command must not stop the cycle."""
-        await _wait_for_command_slot()
+        failed command must not stop the cycle.  ``paced``: the caller has
+        already waited for this command's turn (CommandPacer)."""
+        if not paced:
+            await _wait_for_command_slot()
         what = service if domain == "climate" else f"{domain}.{service}"
         try:
             async with asyncio.timeout(TRV_COMMAND_TIMEOUT_S):
@@ -1065,6 +1236,7 @@ class RegulationMixin:
         *,
         timer_s: float | None = None,
         maximum: bool = False,
+        paced: bool = False,
     ) -> bool:
         """Send a temperature command to the TRV (default: the configured one).
 
@@ -1072,7 +1244,8 @@ class RegulationMixin:
         (``tado.set_climate_timer``), else a Manual one
         (``climate.set_temperature``).  ``maximum``: the command is the
         highest the TRV takes (the watchdog replaces such a command if the
-        cycle stops).  Returns whether the TRV took it.  A failed command is
+        cycle stops).  ``paced``: its turn at the bridge has been waited for
+        already.  Returns whether the TRV took it.  A failed command is
         retried by the next cycle once the rate limit allows (no baseline,
         or the drift check).
         """
@@ -1093,6 +1266,7 @@ class RegulationMixin:
                 TADO_SERVICE_TIMER,
                 {"temperature": target_c, "time_period": format_time_period(timer_s)},
                 domain=TADO_DOMAIN,
+                paced=paced,
             )
         else:
             _LOGGER.debug("Sending %.1f°C to %s", target_c, source_entity)
@@ -1100,6 +1274,7 @@ class RegulationMixin:
                 source_entity,
                 "set_temperature",
                 {"temperature": target_c, "hvac_mode": HVACMode.HEAT},
+                paced=paced,
             )
         if sent:
             self._last_sent_setpoint = target_c

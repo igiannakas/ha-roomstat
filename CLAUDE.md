@@ -134,12 +134,34 @@ Read this before changing `regulation.py` or `parameters.py`.
     −5…−12 %, 14–26 min slower in the slow rooms). Ends when the
     coast is predicted to land within `heatup_exit_c` (0.1 °C): error −
     Td × rise ≤ 0.1, Td = the braking time (default 10 min, 0 = no lead).
-  - `coast` (minimum): after a heat-up, while the room is below the target
-    and still rising. One that reaches the target (error ≤ 0) becomes a
-    stop; one that stalls short hands over to hold.
+  - `coast` (minimum): after a heat-up (or a full push), while the room is
+    below the target and still rising. One that reaches the target (error ≤
+    0) becomes a stop; one that stalls short hands over to hold.
   - `hold`: the feedforward + PI command. Kp is the gain near the target:
     high (default 4) because a Tado answers small pushes late and partly.
-    The integral only moves in hold.
+    The integral only moves in hold. **A full push ends like a heat-up**
+    (2.10.4, `hold_push_c` 2.5, `RegulationState.full_push`): once the
+    hold's push over the valve's reading ((1 + Kp) × error + I) reaches
+    2.5 °C, the valve is at or near full output and fills the radiator as
+    a heat-up does, so until the room leaves the hold it coasts on the
+    heat-up's exit (error − Td × rise ≤ 0.1, rising only) instead of
+    waiting for the stop rule's 0.1 over. A hold entered afresh starts
+    gentle, also after a reload (the flag is not kept, like the integral:
+    a push still at 2.5 °C sets it again). 26 Oct 2026, second bedroom:
+    0.76 below at 06:00 (just under `heatup_enter_c`), +3.1 over the valve,
+    which ran at 100 %; the stop rule shut it at 06:31, the heat-up exit
+    says 06:28 (Td 25 min, replayed in `tests/test_control.py`), and the
+    room rose on the radiator's heat for 24 min after. 2.5 is the owner's
+    choice (3.0 proposed). Simulated (four rooms, 5–12 °C, deficits
+    0.4–1.2, two seeds): morning peaks +0.19…+0.22 → +0.10…+0.14 in the
+    generic living room at 0.6–0.7 deficits (Td 15–18 min learned), up to
+    0.06 lower in the generic slow room, the fitted living room within
+    ±0.01, the fitted second bedroom +0.01…+0.03 (its coast stalls just
+    short and is topped up), hold RMS within ±0.01 (+0.02 once), commands
+    −9…+13 %, heat-ups unchanged. 3.0 helped the generic living room less
+    (+0.15 at 12 °C / 0.6); every rising hold (no threshold) is the
+    dropped "stop at the target" (more than twice the commands in the
+    fitted second bedroom).
   - `stop` (minimum): a firm stop ahead of an overshoot, once error −
     max(`stop_lead_s` (10 min), Td) × rise ≤ −`stop_over_c` (0.1 °C): the
     radiator's coast is the same however the heat got there (11 Oct: a
@@ -319,18 +341,38 @@ be read.
   `… `-continued lines (`split_lines`).
 - **Decision lines** (`describe_cycle`): `<what and why>[; why not] | room R
   → S <preset> | TRV T [heating / off / on its Tado schedule] | Tado <what it
-  was told>[ (X waits: rate limit / X wanted: under the 0.3 step / X
-  failed)]`. The first decision after a start is no transition (a shut
-  valve resumes as coast, then stop: no coast happened), and the line uses
-  the braking time the cycle decided with, not one the tuner set after. The phrases use the
+  was told>[ (X waits: rate limit / X waits: a change by hand settling / X
+  waits: the window's delay / X wanted: under the 0.3 step / X failed)]`. The first decision after a
+  start is no transition (a shut valve resumes as coast, then stop: no coast
+  happened), and the line uses the braking time the cycle decided with, not
+  one the tuner set after, and the preset and window as the cycle decided
+  (`_activity_decided_as`, read before the send: 25 Oct 17:12 a line read
+  `room 16.6 → 20.0 Frost protection`, the preset picked while the 25 °C
+  went out). The phrases use the
   regulator's own predictions (`regulation.outlook`): what stopping a
   heat-up now would leave, the coast's predicted landing, the stop's
   look-ahead, how far a stop is from its release; in hold P and I, and why
-  not more (`I rests outside ±0.3`, `full heat only from 0.8 below`). Every
+  not more (`I rests outside ±0.3`, `full heat only from 0.8 below`). A stop
+  names what keeps it shut (2.10.4): still rising below the stop's line,
+  the overshoot forecast (`on that slope it would pass 20.1 within 25 min,
+  so it stays off`); otherwise where it heats again (`heats again at 19.9,
+  or 20 min ahead of it once falling`, with the 20-min forecast only while
+  falling). 26 Oct 06:42 it read `heats again once heading 0.1 below within
+  20 min (predicted: 0.11 below)` — met on paper while the valve stayed
+  shut, the release only looking at falls. A coast whose target fell below
+  the room (a lower preset mid heat-up) reads `Heat-up ended`, a hold a
+  target step released reads `Holding (released): 0.76 below` (two
+  decimals where one would read as the 0.8 of `full heat only from 0.8
+  below`), a full push `Holding, full push: … stops once the leftover heat
+  covers the rest` and its end `Full push ended, coasting`, and an open window
+  promises `valve off after its delay` only while the open delay runs
+  (`WindowAutomationController.open_delay_active`; otherwise `not acted on
+  until it next opens`). Every
   cycle exit writes one (summer, off, no data, room sensor lost, waiting,
   regulated). A new line at once when the decision changes
-  (`decision_key`: the mode, the window, the target and preset, what the
-  valve is told, a waiting or failed command), and at most every
+  (`decision_key`: the mode (a full push counts as its own), the window,
+  the target and preset, what the valve is told, a waiting or failed
+  command), and at most every
   `DECISION_REFRESH_S` (5 min) while only its numbers move; always after an
   event, so the latest line is again what the room is doing. A toy heat-up,
   coast and hold wrote 32 lines in 150 min (125 without the refresh rule).
@@ -433,10 +475,66 @@ is updating.
   after the drift grace, with the back-off (see "Lost commands"). Summer
   mode starting sends its off at once the same way. OFF → HEAT forwards no
   mode change to the TRV (2.8.4): the
-  regulation cycle that runs at once takes the valve out of off with one
-  `set_temperature` (`hvac_mode: heat`), or leaves it off if the room needs
+  regulation takes the valve out of off with one
+  `set_temperature` (`hvac_mode: heat`) once the change has settled (see
+  below), or leaves it off if the room needs
   no heat (`set_hvac_mode heat` would heat a Tado zone at the last
   temperature HA sent, 25 °C after a heat-up).
+- **A change by hand settles before it adds heat (2.10.4,
+  `MANUAL_SETTLE_S` 15 s):** a preset, temperature, preset temperature
+  (the number entities), HVAC mode or resume schedule accepted from a
+  service call (`note_change_by_hand`, after the call is validated: an
+  unknown preset or a resume without a schedule is no change) holds back
+  any command that gives the valve more heat than it may hold until no
+  further change has come for 15 s (`_hold_back`; a cycle is scheduled for
+  then, `_schedule_settled_cycle`, reason `settling(Ns)`, the activity line
+  `X waits: a change by hand settling`). "May hold": a heat command of ours
+  that may be on its way (`pending_command`, a timed-out one included),
+  else the setpoint it shows (on its Tado schedule, the block's); off, an
+  off of ours on its way, or nothing known is the frost level. Less heat
+  and off go at once. The wait is by time, not by who asks: within the
+  15 s an automation's heat waits too (the press may yet be taken back);
+  outside it nothing waits. A clock that went back ends it, and the time
+  rides along in the restore-state extra data (`manual_change_ts`, taken
+  back only within the 15 s), since a preset temperature change reloads
+  the room (it matters only when an event runs a cycle within those 15 s:
+  the first timed cycle after a reload comes after the 60-s interval).
+  More heat is committed only after its turn at the bridge
+  (`_wait_for_command_slot` before the check is asked again, then
+  `paced=True` to the send): after a heating script four rooms queue
+  0–15 s, and a change by hand during that wait was not seen (its own
+  cycle waits for the lock), so the stale heat went out with the off 5 s
+  behind it (2.10.4 review). While a window's open delay runs
+  (`open_delay_active`, reason `window_pending`, `X waits: the window's
+  delay`), more heat waits too, for the whole delay: the window is open
+  and its off is due. The window action marks its timer fired first
+  (`open_timer_fired`); one that finds the sensor shut runs a cycle, and
+  so does a window shut again within the delay. A repeated "on" (an
+  attribute update, on → unavailable → on) keeps the first open timer:
+  restarting it, as before 2.10.4, kept the window's off away for as long
+  as the sensor kept reporting. Presses further apart than the 15 s
+  (Comfort, then Frost 20 s later, sends the heat at 15 s and the off 5 s
+  after it) are caught by the **confirmation off** (`OFF_CONFIRM_S` 60 s,
+  owner's choice): an off the TRV took less than 60 s after a heat command
+  was tried (`_last_heat_command_ts`, `off_confirm_after`) is sent once
+  more at the first cycle 60 s or more after it (`_off_confirm_due`,
+  reason `off_confirm`, an event line "Sending the off again"), in every off path
+  (regulation, Roomstat's own off, summer), whatever the state shows: the
+  zone showed off at once on 25 Oct while the valve heated. A heat command
+  in between cancels it; a failed one is retried at the rate limit; the
+  confirmation itself comes a minute after the heat, so it is never
+  confirmed again; both times ride along in `CommandRecord`
+  (`heat_sent_ts`, `off_confirm_ts`). Whether a second off reaches a valve
+  that kept the heat over the first is not proven yet: check the zone's
+  heating % after the next one. Reason: a Tado valve that gets an off seconds
+  after a heat command can take the heat and not the off. 25 Oct 2026:
+  25 °C then off 5 s later (master bedroom 11:09) and 15 s later (second
+  bedroom 17:12, Comfort then Frost protection picked 9 s apart); both zones
+  showed off at once (Roomstat logged "Tado off") while the valves heated
+  at 100 % for 15 and 13 min (the zones' heating %). Over 19–26 Oct those
+  were the only two valves heating while told off; an off half an hour
+  after the heat is taken within 5 min. 19 Oct: 20 → 22 → 20 within 10 s
+  had sent 25 °C too.
 - **Room sensor lost:** the room sensor is meant to be reliable (owner's
   decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
@@ -493,6 +591,17 @@ is updating.
   heat on a 7–11 °C/h recovery slope. The auto-tuner starts no heat-up
   episode within `window_settle_s` (30 min) of a window (see "Auto-tune").
   The simulator has no windows; this is judged on the trace sensors.
+  Switching on or off by hand ends the window state (its saved preset is
+  restored; OFF → HEAT re-arms the window if it is still open), but **Heat
+  while already heating is no change and leaves the window alone** (2.10.4;
+  also its close delay; to end the window state by hand, Off then Heat):
+  the owner's heating scripts send `set_hvac_mode heat` to every room
+  before each preset, which until then ended the frost protection of any
+  room with a window open and restored its saved preset, and the preset
+  after it then heated at full power with the window open (25 Oct 2026,
+  master bedroom 11:09 and second bedroom 17:12: 25 °C sent, then the
+  preset's off seconds later, and the valves heated 13–15 min anyway; see
+  "A change by hand settles").
 - **Fail cold (timer overlays):** a maximum command left behind by a dead
   HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
   (TRV option, default 0: the safe landing needs the Tado app schedule at
@@ -613,7 +722,9 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   no heat call is sent and taken back. Once the sensor reads home again (home
   delay running), Away is an ordinary Away picked by someone at home. Not
   changes by hand: the schedule, Off → Heat (it resumes the schedule), Heat
-  when already heating (the heating scripts send it before the preset).
+  when already heating (the heating scripts send it before the preset; it
+  leaves an open window alone too, see "Windows"). Every user call still
+  starts the settle before more heat (`MANUAL_SETTLE_S`).
   Every other service call counts, an automation's or a voice assistant's
   too: a pre-heat from an automation should work the same (deliberate; the
   owner has no automation setting presets, schedules go through the helper).

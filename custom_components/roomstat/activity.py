@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .parameters import RegulationConfig
-from .regulation import MODE_COAST, MODE_HEAT, MODE_STOP, outlook
+from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD, MODE_STOP, outlook
 
 MAX_LINES = 30
 # While a decision stays the same and only its numbers move (the room, the
@@ -52,7 +52,8 @@ PATH_WAITING = "waiting"
 # What a window is doing to the room (CycleFacts.window).
 WINDOW_OPEN = "open"          # the window action holds the valve off
 WINDOW_REWARM = "rewarm"      # closed, in the close delay / re-warm wait
-WINDOW_PENDING = "pending"    # open, the window action not taken yet
+WINDOW_PENDING = "pending"    # open, the window's open delay still running
+WINDOW_IGNORED = "ignored"    # open, but no window action running or due
 
 
 # The presets as the UI names them (strings.json, preset_mode).
@@ -244,6 +245,7 @@ class CycleFacts:
     error_c: float | None = None
     slope_c_per_h: float | None = None
     room_held: bool = False         # a fast fall: the previous reading was used
+    full_push: bool = False         # a hold that ends like a heat-up (hold_push_c)
     room_bridged: bool = False      # a short sensor gap: the last reading was used
     command_c: float | None = None  # this cycle's target for the valve
     command_off: bool = False
@@ -265,12 +267,19 @@ def _num(value: float | None) -> str:
     return "?" if value is None or not math.isfinite(value) else f"{value:.1f}"
 
 
-def _gap(error_c: float) -> str:
-    if error_c >= 0.05:
-        return f"{error_c:.1f} below"
-    if error_c <= -0.05:
-        return f"{-error_c:.1f} above"
+def _gap(error_c: float, digits: int = 1) -> str:
+    half = 0.5 * 10.0 ** -digits
+    if error_c >= half:
+        return f"{error_c:.{digits}f} below"
+    if error_c <= -half:
+        return f"{-error_c:.{digits}f} above"
     return "on target"
+
+
+def _vs_target(error_c: float) -> str:
+    """'0.2 above the target', 'on the target'."""
+    gap = _gap(error_c)
+    return "on the target" if gap == "on target" else f"{gap} the target"
 
 
 def _trend(slope_c_per_h: float | None, cfg: RegulationConfig) -> str:
@@ -306,36 +315,59 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
         return (f"Full heat: {_gap(e)}, {trend}; stops once the leftover heat covers "
                 f"the rest (stopping now would leave {o.landing_c:.1f})")
 
+    over = (f.setpoint_c or 0.0) + cfg.stop_over_c       # the stop's line
     if f.mode == MODE_COAST:
-        if new and f.prev_mode == MODE_HEAT:
-            return (f"Coasting: valve shut with {e:.1f} to go; leftover heat predicted "
+        if e <= 0:
+            # The target fell below the room (a lower preset, a window): a
+            # heat-up ends as a coast, which the next cycle turns into a stop.
+            return f"Heat-up ended: valve shut, {_vs_target(e)}"
+        if new and f.prev_mode in (MODE_HEAT, MODE_HOLD):
+            # From a hold: a full push ending on the heat-up's exit.
+            what = "Coasting" if f.prev_mode == MODE_HEAT else "Full push ended, coasting"
+            return (f"{what}: valve shut with {e:.1f} to go; leftover heat predicted "
                     f"to land it ({rise:.1f} °C/h × {_minutes(o.lead_s)})")
         return f"Coasting: valve shut, {e:.1f} to go, still {trend}"
 
     if f.mode == MODE_STOP:
         if new and f.prev_mode == MODE_COAST:
             return f"Valve off: the coast reached the target, {trend}"
-        if new and e > 0:
+        # Still rising towards the stop's line (the radiator's leftover heat,
+        # mostly): the overshoot forecast decided the stop, and keeps it shut
+        # whatever the release would say.
+        towards_line = o.stop_landing_c <= -cfg.stop_over_c and e > -cfg.stop_over_c
+        if new and towards_line:
             return (f"Valve off ahead of an overshoot: {_gap(e)}, {trend} would pass "
-                    f"{(f.setpoint_c or 0.0) + cfg.stop_over_c:.1f} within "
-                    f"{_minutes(o.stop_lead_s)}")
-        ahead = (f"{o.release_c:.2f} below" if o.release_c > 0
-                 else f"{-o.release_c:.2f} above")
-        return (f"Valve off: {_gap(e)}, {trend}; heats again once heading "
-                f"{cfg.release_below_c:.1f} below within {_minutes(cfg.release_lead_s)} "
-                f"(predicted: {ahead})")
+                    f"{over:.1f} within {_minutes(o.stop_lead_s)}")
+        if towards_line:
+            return (f"Valve off: {_gap(e)}, still {trend}; on that slope it would "
+                    f"pass {over:.1f} within {_minutes(o.stop_lead_s)}, so it stays off")
+        heat_at = (f.setpoint_c or 0.0) - cfg.release_below_c
+        if o.falling_c_per_s > 0:
+            # The forecast leaves out the slope's deadband (as the release does).
+            ahead = (f"{o.release_c:.2f} below" if o.release_c > 0
+                     else f"{-o.release_c:.2f} above")
+            return (f"Valve off: {_gap(e)}, {trend}; heats again "
+                    f"{_minutes(cfg.release_lead_s)} before it reaches {heat_at:.1f} "
+                    f"(forecast for {_minutes(cfg.release_lead_s)} ahead: {ahead})")
+        return (f"Valve off: {_gap(e)}, {trend}; heats again at {heat_at:.1f}, or "
+                f"{_minutes(cfg.release_lead_s)} ahead of it once falling")
 
     # Hold.
     if f.resumed:
         head = "Holding (resumed)"
     elif f.prev_mode == MODE_STOP:
-        head = (f"Holding (released: heading {o.release_c:.1f} below within "
-                f"{_minutes(cfg.release_lead_s)})")
+        if e >= cfg.release_below_c - 0.005:
+            head = "Holding (released)"     # the gap follows
+        else:
+            head = (f"Holding (released: heading {o.release_c:.1f} below within "
+                    f"{_minutes(cfg.release_lead_s)})")
     elif f.prev_mode == MODE_COAST:
         head = (f"Holding (the coast stalled {e:.1f} short)" if e > 0
                 else "Holding (the coast ended)")
     else:
         head = "Holding"
+    if f.full_push:
+        head += ", full push"
     if f.command_c is not None and f.command_c >= cfg.max_target_c - 0.05:
         push = f"at full power (command at the {cfg.max_target_c:.0f} limit)"
     elif f.command_c is not None and f.trv_c is not None:
@@ -349,12 +381,22 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
         why_not.append(f"I decays outside ±{cfg.integral_deadband_c:.1f}")
     elif f.saturated:
         why_not.append("I frozen at the command limit")
-    if cfg.integral_deadband_c <= e < cfg.heatup_enter_c:
+    digits = 1
+    if cfg.integral_deadband_c <= e < cfg.heatup_enter_c and not f.full_push:
         why_not.append(f"full heat only from {cfg.heatup_enter_c:.1f} below")
+        # 0.76 is not "0.8 below" next to "full heat only from 0.8 below".
+        if f"{e:.1f}" == f"{cfg.heatup_enter_c:.1f}":
+            digits = 2
     detail = f"P {_signed(f.p_c, 1)}, I {_signed(f.i_c, 2)}"
     if why_not:
         detail += "; " + "; ".join(why_not)
-    return f"{head}: {_gap(e)}, valve {push} ({detail})"
+    line = f"{head}: {_gap(e, digits)}, valve {push} ({detail})"
+    if f.full_push:
+        # It ends on the heat-up's exit (hold_push_c), and says so.
+        line += "; stops once the leftover heat covers the rest"
+        if f.slope_c_per_h is not None and e > 0:
+            line += f" (stopping now would leave {o.landing_c:.1f})"
+    return line
 
 
 def _tado_note(f: CycleFacts, cfg: RegulationConfig) -> str:
@@ -372,6 +414,10 @@ def _tado_note(f: CycleFacts, cfg: RegulationConfig) -> str:
         return ""
     if f.send.startswith("rate_limited"):
         return f" ({want} waits: rate limit)"
+    if f.send.startswith("settling"):
+        return f" ({want} waits: a change by hand settling)"
+    if f.send == "window_pending":
+        return f" ({want} waits: the window's delay)"
     if f.send == "already_at_target" and not f.command_off and not told_off:
         return f" ({want} wanted: under the {cfg.min_change_threshold_c:.1f} step)"
     return ""
@@ -384,7 +430,8 @@ def decision_key(f: CycleFacts, cfg: RegulationConfig) -> str:
     note_kind = ("failed" if "failed" in note else "waits" if "waits" in note else "")
     missing = ("room" if f.room_c is None else "valve") if f.path == PATH_WAITING else ""
     # An open window or its re-warm wait reads the same whatever the mode.
-    mode = "" if f.window in (WINDOW_OPEN, WINDOW_REWARM) else (f.mode or "")
+    mode = "" if f.window in (WINDOW_OPEN, WINDOW_REWARM) else (
+        (f.mode or "") + ("+push" if f.full_push else ""))
     return "|".join((
         f.path, missing, mode, f.window or "", _num(f.setpoint_c), f.target_label,
         f.tado, note_kind, "held" if f.room_held else "", "gap" if f.room_bridged else "",
@@ -413,7 +460,9 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
     else:
         phrase = _phrase(f, cfg)
         if f.window == WINDOW_PENDING:
-            phrase = "Window just opened (valve off soon): " + phrase
+            phrase = "Window just opened (valve off after its delay): " + phrase
+        elif f.window == WINDOW_IGNORED:
+            phrase = "Window open, not acted on until it next opens: " + phrase
     if f.path == PATH_REGULATED:
         if f.room_held:
             phrase += " (a fast fall ignored this cycle)"

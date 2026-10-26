@@ -148,6 +148,16 @@ class WindowAutomationController:
         """True while the post-close restoration timer is running."""
         return self._close_timer is not None
 
+    @property
+    def open_delay_active(self) -> bool:
+        """True while the window-open delay runs (the frost action is due).
+
+        More heat waits meanwhile (the entity's ``_hold_back``): the window
+        is open and its off is due, and a heat command that an off follows
+        within seconds may be the one a Tado valve keeps (25 Oct 2026, see
+        MANUAL_SETTLE_S)."""
+        return self._open_timer is not None and not self.is_active
+
     def close_delay_elapsed_s(self, now: float) -> float:
         """Seconds since the window closed (0 when no close delay runs)."""
         if self._close_since is None:
@@ -191,9 +201,14 @@ class WindowAutomationController:
             _LOGGER.debug("Window open event ignored – window mode already active")
             return
 
-        # Cancel any previously pending open timer before scheduling a new one
+        # The same open again (an attribute update while "on", or on ->
+        # unavailable -> on): the delay runs from the first.  Restarting it
+        # would put the window's off back by a whole delay on every update,
+        # for as long as the sensor keeps reporting (and more heat waits
+        # meanwhile, see open_delay_active).
         if self._open_timer is not None:
-            self._open_timer()
+            _LOGGER.debug("Window open event ignored – the open delay already runs")
+            return
         _cl = call_later or _get_call_later()
         self._open_timer = _cl(hass, delay_s, on_open_action)
         _LOGGER.debug("Window opened – frost-protection action in %ds", delay_s)
@@ -261,6 +276,12 @@ class WindowAutomationController:
     # ------------------------------------------------------------------
     # State mutations called by the climate entity
     # ------------------------------------------------------------------
+
+    def open_timer_fired(self) -> None:
+        """The open delay has run out (the timer's callback has started):
+        nothing is pending any more, whether the action then activates or
+        is skipped (window mode already on, summer, the sensor shut)."""
+        self._open_timer = None
 
     def activate(self, preset: str, temp: float | None) -> None:
         """Record the pre-open state and mark window automation as active."""
@@ -1160,6 +1181,19 @@ def pending_command(
     return None
 
 
+def off_confirm_after(
+    off_ts: float, heat_ts: float | None, window_s: float
+) -> float | None:
+    """When an off sent at *off_ts* is to be sent once more: *window_s*
+    after it, if a heat command went out less than *window_s* before it
+    (*heat_ts*), else None.  A Tado valve that gets an off seconds after a
+    heat command can keep the heat and drop the off, while its zone shows
+    off at once (25 Oct 2026: 13-15 min at 100 %; OFF_CONFIRM_S)."""
+    if heat_ts is None or not 0.0 <= off_ts - heat_ts < window_s:
+        return None
+    return off_ts + window_s
+
+
 @dataclass(frozen=True)
 class CommandRecord:
     """The last TRV commands, kept across an entry reload or a quick restart.
@@ -1183,6 +1217,8 @@ class CommandRecord:
     heat_c: float | None = None      # a heat command still on its way
     heat_ts: float | None = None
     heat_ok: bool = False
+    heat_sent_ts: float | None = None  # the last heat command tried (off_confirm_after)
+    off_confirm_ts: float | None = None  # when an off is to be sent once more
 
     VERSION = 1
 
@@ -1201,6 +1237,8 @@ class CommandRecord:
             "heat_c": self.heat_c,
             "heat_ts": self.heat_ts,
             "heat_ok": self.heat_ok,
+            "heat_sent_ts": self.heat_sent_ts,
+            "off_confirm_ts": self.off_confirm_ts,
         }
 
     @classmethod
@@ -1227,6 +1265,8 @@ class CommandRecord:
             heat_c=heat_c,
             heat_ts=heat_ts,
             heat_ok=data.get("heat_ok") is True,
+            heat_sent_ts=_as_opt_float(data.get("heat_sent_ts")),
+            off_confirm_ts=_as_opt_float(data.get("off_confirm_ts")),
         )
 
     def usable(self, now: float, max_age_s: float, entity_ids: Iterable[str | None]) -> bool:

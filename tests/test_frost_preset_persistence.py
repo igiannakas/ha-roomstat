@@ -374,7 +374,7 @@ class TestWindowCycleEndToEnd:
         _run(_start(ent))
         _run(_select_preset(ent, "frost_protection"))
         self._open_window(ent)
-        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.OFF))
         assert not ent._window_ctrl.is_active
         assert ent.preset_mode == "frost_protection"
 
@@ -383,8 +383,58 @@ class TestWindowCycleEndToEnd:
         _run(_start(ent))
         self._open_window(ent)
         ent._window_ctrl.update_saved("boost", 23.0)
-        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.OFF))
         assert ent.preset_mode == "comfort"
+
+    def test_heat_while_heating_keeps_the_window(self):
+        """Heat while already heating is no change: the heating scripts send
+        it before every preset.  Until 2.10.4 it ended the window's frost
+        protection and restored the saved preset."""
+        ent = _make_entity()
+        _run(_start(ent))
+        _run(_select_preset(ent, "comfort"))
+        self._open_window(ent)
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        assert ent._window_ctrl.is_active
+        assert ent.preset_mode == "frost_protection"
+        assert ent._window_ctrl.get_saved().preset == "comfort"
+
+    def test_heat_while_heating_keeps_the_close_delay(self):
+        """The same during the re-warm wait after the close: the wait goes on
+        (Off then Heat ends it, as before)."""
+        ent = _make_entity({"window_close_delay_s": 120})
+        _run(_start(ent))
+        _run(_select_preset(ent, "comfort"))
+        self._open_window(ent)
+        ent.hass.set(WINDOW, "off")
+        ent._async_window_changed(_event("off"))
+        assert ent._window_ctrl.close_delay_active
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        assert ent._window_ctrl.close_delay_active
+        assert ent.preset_mode == "frost_protection"
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.OFF))
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        assert not ent._window_ctrl.is_active
+        assert ent.preset_mode == "comfort"
+
+    @pytest.mark.parametrize("preset", ["comfort", "frost_protection"])
+    def test_a_heating_script_with_the_window_open_sends_no_heat(self, preset):
+        """25 Oct 2026: 'Heating - Comfort' / 'Heating - Frost Protection'
+        (set_hvac_mode heat, then the preset) with a window open sent 25 °C
+        (master bedroom 11:09, second bedroom 17:12)."""
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))
+        _run(_select_preset(ent, "comfort"))
+        self._open_window(ent)
+        ent.coordinator.data = dict(ent.coordinator.data, room_temp=16.6)
+        ent.hass.service_calls.clear()
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        _run(_select_preset(ent, preset))
+        heat = [d for dom, svc, d in ent.hass.service_calls
+                if svc == "set_temperature" and d.get("temperature", 0) > 5.05]
+        assert heat == []
+        assert ent._window_ctrl.is_active and ent.preset_mode == "frost_protection"
+        assert ent._window_ctrl.get_saved().preset == preset
 
 
 # --- Restart / reload (Fix C) -----------------------------------------------

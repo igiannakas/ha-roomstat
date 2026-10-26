@@ -68,6 +68,24 @@ class FakeCallLater:
 
 
 # ---------------------------------------------------------------------------
+# An off seconds after a heat command (OFF_CONFIRM_S)
+# ---------------------------------------------------------------------------
+
+class TestOffConfirm:
+
+    def test_an_off_within_the_window_is_confirmed_a_window_later(self):
+        f = _ctrl_mod.off_confirm_after
+        assert f(1000.0, 995.0, 60.0) == 1060.0
+        assert f(1000.0, 940.1, 60.0) == 1060.0
+
+    def test_otherwise_not(self):
+        f = _ctrl_mod.off_confirm_after
+        assert f(1000.0, None, 60.0) is None          # no heat command known
+        assert f(1000.0, 940.0, 60.0) is None         # a minute or more after it
+        assert f(1000.0, 1001.0, 60.0) is None        # "after" the off: clock
+
+
+# ---------------------------------------------------------------------------
 # WindowAutomationController
 # ---------------------------------------------------------------------------
 
@@ -84,6 +102,31 @@ class TestWindowController:
     def test_initial_no_close_delay(self):
         assert not self._ctrl().close_delay_active
 
+    # --- the open delay (more heat waits meanwhile) ---
+
+    def test_open_delay_runs_from_open_to_its_action(self):
+        c, cl = self._ctrl(), FakeCallLater()
+        assert not c.open_delay_active
+        c.handle_window_opened(None, 30, lambda now: None, call_later=cl)
+        assert c.open_delay_active
+        c.open_timer_fired()
+        c.activate("comfort", None)
+        assert not c.open_delay_active
+
+    def test_an_action_that_is_skipped_still_ends_the_open_delay(self):
+        """The action found summer mode on, say, and did nothing: nothing is
+        pending any more, so heat must not wait for it."""
+        c, cl = self._ctrl(), FakeCallLater()
+        c.handle_window_opened(None, 30, lambda now: None, call_later=cl)
+        c.open_timer_fired()
+        assert not c.open_delay_active and not c.is_active
+
+    def test_a_close_within_the_delay_ends_it(self):
+        c, cl = self._ctrl(), FakeCallLater()
+        c.handle_window_opened(None, 30, lambda now: None, call_later=cl)
+        assert c.handle_window_closed(None, 120, lambda now: None, call_later=cl) is False
+        assert not c.open_delay_active
+
     # --- open handling ---
 
     def test_open_schedules_timer(self):
@@ -95,14 +138,18 @@ class TestWindowController:
         assert fake.calls[0]["delay"] == 30
         assert not c.is_active  # not yet active – open delay still pending
 
-    def test_second_open_cancels_first_timer(self):
+    def test_second_open_keeps_the_first_timer(self):
+        """The same open reported again (an attribute update, on ->
+        unavailable -> on): the delay runs from the first report.  Until
+        2.10.4 it restarted, so a sensor that kept reporting kept the window's
+        off away (2.10.4 review)."""
         c = self._ctrl()
         fake = FakeCallLater()
         c.handle_window_opened(None, 30, lambda now: None, call_later=fake)
         c.handle_window_opened(None, 30, lambda now: None, call_later=fake)
-        assert fake.calls[0]["cancelled"]
-        assert not fake.calls[1]["cancelled"]
-        assert fake.active_count == 1
+        assert fake.scheduled_count == 1
+        assert not fake.calls[0]["cancelled"]
+        assert c.open_delay_active
 
     # --- activate / restore ---
 

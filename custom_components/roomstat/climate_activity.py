@@ -24,6 +24,7 @@ from homeassistant.util import dt as dt_util
 from .activity import (
     PATH_REGULATED,
     PATH_SENSOR_LOST,
+    WINDOW_IGNORED,
     WINDOW_OPEN,
     WINDOW_PENDING,
     WINDOW_REWARM,
@@ -87,12 +88,17 @@ class ActivityMixin:
         slope_c_per_s: float | None = None,
         sensor_lost_min: int | None = None,
         td_s: float | None = None,
+        decided_as: tuple[str, str | None] | None = None,
     ) -> None:
-        """Add this cycle's decision line (unchanged decisions add none)."""
+        """Add this cycle's decision line (unchanged decisions add none).
+
+        ``decided_as``: the target's label and the window when the cycle
+        decided (``_activity_decided_as``); None reads them now."""
         try:
             facts = self._activity_facts(
                 path, room_c=room_c, setpoint_c=setpoint_c, prev_mode=prev_mode,
                 slope_c_per_s=slope_c_per_s, sensor_lost_min=sensor_lost_min, td_s=td_s,
+                decided_as=decided_as,
             )
             if self._activity.add_decision(
                 now, describe_cycle(facts, self._config), decision_key(facts, self._config)
@@ -118,16 +124,21 @@ class ActivityMixin:
         slope_c_per_s: float | None,
         sensor_lost_min: int | None,
         td_s: float | None,
+        decided_as: tuple[str, str | None] | None = None,
     ) -> CycleFacts:
         trv = self._active_trv()
         floor = self._config.min_target_c
         if room_c is None and path != PATH_SENSOR_LOST:
             room_c = (self.coordinator.data or {}).get("room_temp")
         tado, tado_c = self._activity_tado(trv, floor)
+        label, window = (
+            decided_as if decided_as is not None
+            else (self._activity_label(), self._activity_window())
+        )
         facts = CycleFacts(
             path=path,
             setpoint_c=setpoint_c if setpoint_c is not None else self._effective_setpoint(),
-            target_label=self._activity_label(),
+            target_label=label,
             room_c=room_c,
             room_last_c=self._last_valid_room_temp,
             trv_c=trv.internal_c,
@@ -136,7 +147,7 @@ class ActivityMixin:
             trv_scheduled=bool(trv.scheduled),
             tado=tado,
             tado_c=tado_c,
-            window=self._activity_window(),
+            window=window,
             send=self._last_reason,
             sensor_lost_min=sensor_lost_min,
             td_s=td_s,
@@ -153,6 +164,7 @@ class ActivityMixin:
                 slope_c_per_s * 3600.0 if slope_c_per_s is not None else None
             )
             facts.room_held = result.room_held
+            facts.full_push = result.full_push
             facts.room_bridged = self._sensor_degraded
             facts.command_c = result.target_for_tado_c
             facts.command_off = is_off_command(result.target_for_tado_c, floor)
@@ -196,8 +208,20 @@ class ActivityMixin:
         if self._window_ctrl.is_active:
             return WINDOW_OPEN
         if self._window_sensor_on() and not self._summer_active:
-            return WINDOW_PENDING
+            return WINDOW_PENDING if self._window_ctrl.open_delay_active else WINDOW_IGNORED
         return None
+
+    def _activity_decided_as(self) -> tuple[str, str | None] | None:
+        """The target's label and the window as the cycle decides: the line
+        names these, not what a change by hand during its send made them.
+        None if they can't be read (the line then reads them when written:
+        the log must never stop the regulation)."""
+        try:
+            return self._activity_label(), self._activity_window()
+        except Exception:  # noqa: BLE001 - the log must never stop the regulation
+            _LOGGER.debug("%s: activity label failed", self._config_entry.title,
+                          exc_info=True)
+            return None
 
     def _activity_tuner(self) -> None:
         """Log what the auto-tuner did since the last look, in order."""

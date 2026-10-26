@@ -85,14 +85,22 @@ class PresetMixin:
             )
         else:  # window closed
             close_delay = self._config_entry.options.get(CONF_WINDOW_CLOSE_DELAY_S, 120)
+            was_pending = self._window_ctrl.open_delay_active
             should_restore = self._window_ctrl.handle_window_closed(
                 self.hass, close_delay, self._async_window_close_action
             )
             if should_restore:
                 self._restore_window_state()
+            elif was_pending:
+                # Shut again within the open delay: heat held back for the
+                # window's off may go now.
+                self.hass.async_create_task(
+                    self._async_regulation_cycle(trigger="window_closed")
+                )
 
     async def _async_window_action(self, _now) -> None:
         """Switch to frost protection preset after window-open delay."""
+        self._window_ctrl.open_timer_fired()
         # Already in window mode: never snapshot again.  The current preset is
         # the window-driven frost protection, so saving it would lose the real
         # pre-open preset.  Summer mode ignores the window entirely.
@@ -110,6 +118,8 @@ class PresetMixin:
                     current.state if current else "unavailable",
                 )
                 self._window_ctrl.cancel_all()
+                # Heat held back for the window's off may go now.
+                await self._async_regulation_cycle(trigger="window_skipped")
                 return
 
         # If boost is active, cancel it and use the pre-boost preset as saved state
@@ -582,6 +592,7 @@ class PresetMixin:
         if preset_mode not in PRESET_LIST:
             self._log(_LOGGER).warning("Unknown preset mode: %s", preset_mode)
             return
+        self.note_change_by_hand()
         # Away while nobody is home is away mode itself, not a manual
         # (sticky) Away: it ends a change by hand, and coming home restores.
         # Once the sensor reads home again (the home delay still running) it

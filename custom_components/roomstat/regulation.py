@@ -34,12 +34,16 @@ Strong commands where they matter, fine ones near the target:
   radiator is predicted to carry the room to the target:
   error - Td * rise_rate <= ``heatup_exit_c``.  Td is the braking time
   (configured, or learned by auto-tune from exactly this coast).
-* ``coast``: after a heat-up, the minimum (valve shut) while the room is
-  below the target and still rising, so the leftover heat lands it.  A
+* ``coast``: after a heat-up (or a full push), the minimum (valve shut)
+  while the room is below the target and still rising, so the leftover
+  heat lands it.  A
   coast that reaches the target becomes a stop; one that stalls short
   hands over to the hold.
 * ``hold``: near the target, the feedforward + PI command above.  A Tado
-  answers small pushes late and partly, so kp is high (4 by default).
+  answers small pushes late and partly, so kp is high (4 by default).  A
+  hold whose push (tado_demand) has reached ``hold_push_c`` drives the
+  valve at or near full output, as a heat-up does: until it leaves the
+  hold it ends on the heat-up's exit and coasts (``full_push``).
 * ``stop``: the minimum, ahead of an overshoot: once the room is predicted
   to be ``stop_over_c`` over the target within the braking time Td (at
   least ``stop_lead_s``), the radiator's coast being the same however the
@@ -103,6 +107,7 @@ class RegulationState:
     integral_c: float = 0.0
     mode: str = MODE_HOLD
     last_room_c: float | None = None   # the previous cycle's raw reading
+    full_push: bool = False            # this hold's push reached hold_push_c
 
 
 @dataclass
@@ -118,6 +123,7 @@ class RegulationResult:
     new_state: RegulationState
     mode: str = MODE_HOLD          # heat / coast / hold (PI) / stop
     room_held: bool = False        # the reading fell fast: the previous one was used
+    full_push: bool = False        # a hold that ends like a heat-up (hold_push_c)
 
 
 def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
@@ -200,29 +206,40 @@ class FeedforwardPiRegulator:
     @staticmethod
     def _next_mode(
         mode: str, error_c: float, room_slope_c_per_s: float | None,
-        config: RegulationConfig,
-    ) -> str:
-        """The mode for this cycle (see the module docstring)."""
+        config: RegulationConfig, *, push_c: float = 0.0, full_push: bool = False,
+    ) -> tuple[str, bool]:
+        """The mode for this cycle, and whether a hold is a full push (see
+        the module docstring).  ``push_c``: this cycle's hold command over
+        the valve's reading; ``full_push``: the previous cycle's flag."""
         o = outlook(error_c, room_slope_c_per_s, config)
         if mode == MODE_HEAT:
-            return MODE_COAST if o.landing_c <= config.heatup_exit_c else MODE_HEAT
+            return (MODE_COAST if o.landing_c <= config.heatup_exit_c else MODE_HEAT), False
         if error_c >= config.heatup_enter_c and o.landing_c > config.heatup_exit_c:
-            return MODE_HEAT
+            return MODE_HEAT, False
         if mode == MODE_COAST and error_c > 0 and o.rising_c_per_s > 0:
-            return MODE_COAST
+            return MODE_COAST, False
         # A coast that has reached the target (or a shut valve resumed after
         # a restart with the room at or above it) stays shut until the room
         # needs heat; falling through to hold would park the command just
         # below the valve's reading, where it trickles.
         if mode == MODE_COAST and error_c <= 0:
-            return MODE_STOP
+            return MODE_STOP, False
         # Near the target: fine adjustments, with a firm stop ahead of an
         # overshoot that lasts until the room needs heat again.
         if o.stop_landing_c <= -config.stop_over_c:
-            return MODE_STOP
+            return MODE_STOP, False
         if mode == MODE_STOP and o.release_c < config.release_below_c:
-            return MODE_STOP
-        return MODE_HOLD
+            return MODE_STOP, False
+        # A hold that has pushed hard has filled the radiator as a heat-up
+        # does: it ends on the heat-up's exit, then coasts.  Until it leaves
+        # the hold (a hold entered afresh starts gentle).
+        full_push = (full_push and mode == MODE_HOLD) or push_c >= config.hold_push_c
+        if (
+            full_push and error_c > 0 and o.rising_c_per_s > 0
+            and o.landing_c <= config.heatup_exit_c
+        ):
+            return MODE_COAST, False
+        return MODE_HOLD, full_push
 
     def compute(
         self,
@@ -303,9 +320,13 @@ class FeedforwardPiRegulator:
         i_correction = state.integral_c
         raw_command = setpoint_c + feedforward_offset + p_correction + i_correction
 
-        # 4. Mode: heat (maximum), coast or stop (minimum), or hold
+        # 4. Mode: heat (maximum), coast or stop (minimum), or hold.  The
+        # hold's push over the valve's reading: (1 + kp) * error + integral.
         prev_mode = state.mode if state.mode in MODES else MODE_HOLD
-        mode = self._next_mode(prev_mode, error, room_slope_c_per_s, self.cfg)
+        mode, full_push = self._next_mode(
+            prev_mode, error, room_slope_c_per_s, self.cfg,
+            push_c=raw_command - tado_internal_c, full_push=state.full_push,
+        )
         if mode == MODE_HEAT:
             command = self.cfg.max_target_c
         elif mode in (MODE_COAST, MODE_STOP):
@@ -344,7 +365,8 @@ class FeedforwardPiRegulator:
                 new_integral *= self.cfg.integral_decay
 
         new_state = RegulationState(
-            integral_c=new_integral, mode=mode, last_room_c=room_temp_c
+            integral_c=new_integral, mode=mode, last_room_c=room_temp_c,
+            full_push=full_push,
         )
 
         return RegulationResult(
@@ -357,4 +379,5 @@ class FeedforwardPiRegulator:
             new_state=new_state,
             mode=mode,
             room_held=room_held,
+            full_push=full_push,
         )

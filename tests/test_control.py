@@ -161,6 +161,83 @@ def test_real_rooms_held_tightly(plant, target):
     assert r["sends"] < 110
 
 
+# The second bedroom, 26 Oct 2026: the room sensor at each cycle (hh:mm:04)
+# from 05:41, Night -> Comfort (20.0) at 06:00 with the room 0.76 below.
+_MORNING_26_OCT = [
+    19.225, 19.23, 19.23, 19.235, 19.235, 19.24, 19.235, 19.24, 19.24, 19.24, 19.24,
+    19.24, 19.235, 19.235, 19.23, 19.23, 19.23, 19.23, 19.235, 19.235, 19.235, 19.235,
+    19.235, 19.24, 19.245, 19.25, 19.255, 19.26, 19.27, 19.275, 19.29, 19.30, 19.32,
+    19.33, 19.34, 19.355, 19.375, 19.385, 19.40, 19.415, 19.425, 19.445, 19.45, 19.475,
+    19.50, 19.525, 19.555, 19.58, 19.61, 19.64, 19.665, 19.685, 19.71, 19.735,
+]
+
+
+def _replay_morning(hold_push_c):
+    """The regulator's mode each minute from 06:00 (the valve's reading
+    rising with the radiator, as recorded: +3.1 over it at 06:00)."""
+    c = P.RegulationConfig()
+    c.tuning.td_s = 25.2 * 60          # the room's learned braking time that day
+    c.hold_push_c = hold_push_c
+    reg, state, est = R.FeedforwardPiRegulator(c), R.RegulationState(integral_c=-0.7), A.SlopeEstimator()
+    modes = {}
+    for k, room in enumerate(_MORNING_26_OCT):
+        t = 5 * 3600 + 41 * 60 + 4 + 60 * k
+        est.add(t, room)
+        if t < 6 * 3600:
+            continue
+        res = reg.compute(setpoint_c=20.0, room_temp_c=room, tado_internal_c=room - 1.0,
+                          time_delta_s=60.0, state=state, room_slope_c_per_s=est.slope_c_per_s())
+        state = res.new_state
+        modes[f"{t // 3600:02d}:{t % 3600 // 60:02d}"] = res.mode
+    return modes
+
+
+def test_the_26_oct_morning_push_stops_like_a_heat_up():
+    """Replayed: the full push coasts at 06:28 on the heat-up's exit; the
+    stop rule alone shut the valve at 06:31, as it did live."""
+    new = _replay_morning(P.RegulationConfig().hold_push_c)
+    old = _replay_morning(float("inf"))
+    assert new["06:00"] == "hold"
+    assert next(k for k, m in new.items() if m != "hold") == "06:28"
+    assert new["06:28"] == "coast"
+    assert next(k for k, m in old.items() if m != "hold") == "06:31"
+    assert old["06:31"] == "stop"
+
+
+def _morning_peak(plant, hold_push_c, *, t_out=8.0, setback=0.7, seed=3, days=8):
+    """Mornings with a deficit just under the heat-up's (Night = target -
+    setback), auto-tune on: the mean 06:00-10:00 peak of the last 3 days,
+    the hold RMS and commands a day (room sensor)."""
+    c = P.RegulationConfig()
+    c.hold_push_c = hold_push_c
+    sim = RoomSim(PlantParams(**dict(plant, t_out_c=t_out)), R, c,
+                  ProxySettings(min_command_interval_s=180, min_change_threshold_c=0.3),
+                  y0=19.0, tuner=_tuner(c), autotune_module=A, seed=seed)
+    tr = sim.run(days * 24, schedule_from([(0, 20.0 - setback), (6, 20.0), (21.5, 20.0 - setback)]))
+    last = range(days - 3, days)
+    peaks = [max(tr.y[i] for i in tr.window(d * DAY + 6 * 3600, d * DAY + 10 * 3600)) - 20.0
+             for d in last]
+    hold = [i for d in last for i in tr.window(d * DAY + 10 * 3600, d * DAY + 21 * 3600)]
+    rms = statistics.mean((tr.y[i] - tr.sp[i]) ** 2 for i in hold) ** 0.5
+    return statistics.mean(peaks), rms, tr.sends / days
+
+
+@pytest.mark.parametrize("plant", [dict(LIVING, **TADO_V3), LIVING_ROOM_FIT])
+def test_a_full_push_lowers_a_long_coast_and_keeps_the_hold(plant):
+    """8 °C outside, 0.7 below at 06:00.  Generic living room (learns a
+    braking time of 15-18 min): the morning peak drops by 0.09 °C (+0.21 ->
+    +0.13); the fitted living room (its sensor warmed by the radiator, Td
+    about 1 min) is unchanged; neither holds worse or sends more."""
+    new_peak, new_rms, new_cmd = _morning_peak(plant, P.RegulationConfig().hold_push_c)
+    old_peak, old_rms, old_cmd = _morning_peak(plant, float("inf"))
+    if plant is LIVING_ROOM_FIT:
+        assert abs(new_peak - old_peak) < 0.02
+    else:
+        assert new_peak < old_peak - 0.06
+    assert new_rms < old_rms + 0.01
+    assert new_cmd < old_cmd * 1.15
+
+
 def test_works_without_auto_tune():
     s = _summary(_sim(LIVING, tune=False)[1])
     assert s["reach"] < 60

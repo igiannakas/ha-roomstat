@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.10.3-blue)
+![Version](https://img.shields.io/badge/version-2.10.4-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -42,6 +42,18 @@ changes.
   its last command, and sends it again only if it doesn't, so you can set
   **Overlay refresh interval** to 0. A valve that keeps not showing a command
   is asked less and less often, down to once every 30 minutes.
+- **Quick changes don't reach the valve.** After a change from the
+  dashboard, a script or a voice assistant (a preset, a temperature, a
+  preset temperature, on/off, resume schedule), more heat waits until
+  nothing has changed for 15 seconds, so pressing Comfort then Frost
+  protection sends nothing. A Tado valve that gets an off seconds after a
+  heat command can heat for a quarter of an hour anyway, so an off sent
+  within a minute of a heat command is sent once more a minute later. More
+  heat also waits while a window's open delay runs. Less heat and off always
+  go at once; the schedule, presence and windows wait only within those 15
+  seconds. **Heat** sent to a room that is already heating no longer ends
+  an open window's frost protection: switch it **Off** and back to **Heat**
+  for that.
 - **Handles failures.** A valve that is off isn't sent temperatures it would
   refuse. A failed command is tried again a few minutes later and logged
   once, not every time; the thermostat's `last_command_error` attribute shows
@@ -78,8 +90,10 @@ changes.
 - **Heat-up braking.** **Heat-up braking time** (10 minutes by default) is
   how far ahead Roomstat predicts where the radiator's leftover heat will
   carry the room, so heating stops before the target rather than after it.
-  Near the target the valve is shut at least 10 minutes ahead. 0 = no
-  anticipation in heat-ups. Auto-tune can learn it.
+  A small deficit that the controller still answers with a strong push
+  (2.5 °C or more over the valve's reading, which a Tado answers at about
+  full power) stops the same way. Near the target the valve is shut at least 10
+  minutes ahead. 0 = no anticipation in heat-ups. Auto-tune can learn it.
 - **After a window closes, the room gets time to re-warm by itself.** The
   walls, furniture and radiator kept their heat; only the air went, and it
   comes back on its own within 15–40 minutes. **Window close delay** is the

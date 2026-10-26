@@ -93,6 +93,28 @@ class TestDecisionLines:
         )
         assert line.endswith("| Tado off")
 
+    def test_a_full_push_says_it_ends_like_a_heat_up(self):
+        """26 Oct 06:00, second bedroom: 0.76 below, +3.1 over the valve."""
+        line = _line(error_c=0.76, slope_c_per_h=0.0, full_push=True, command_c=22.3,
+                     trv_c=19.2, p_c=3.04, i_c=-0.7, tado="22.3", tado_c=22.3)
+        assert line.startswith(
+            "Holding, full push: 0.8 below, valve pushed 3.1 over its reading (P +3.0, "
+            "I -0.70; I decays outside ±0.3); stops once the leftover heat covers the "
+            "rest (stopping now would leave 0.8) |"
+        )
+        assert "full heat only from" not in line
+        ended = _line(mode="coast", prev_mode="hold", error_c=0.42, slope_c_per_h=1.3,
+                      command_c=5.0, command_off=True, tado="off", tado_c=None,
+                      td_s=1500.0)
+        assert ended.startswith(
+            "Full push ended, coasting: valve shut with 0.4 to go; leftover heat "
+            "predicted to land it (1.2 °C/h × 25 min)"
+        )
+
+    def test_a_full_push_is_a_new_decision(self):
+        """It changes how the hold ends, so it is a new line at once."""
+        assert act.decision_key(_facts(full_push=True), CFG) != act.decision_key(_facts(), CFG)
+
     def test_hold_says_why_not_more(self):
         """0.5 short after a coast: why no full heat, why the integral rests."""
         line = _line(prev_mode="coast", error_c=0.48, command_c=21.1, trv_c=19.2,
@@ -112,32 +134,69 @@ class TestDecisionLines:
         line = _line(prev_mode="stop", error_c=0.05, slope_c_per_h=-0.3)
         assert line.startswith("Holding (released: heading 0.1 below within 20 min)")
 
+    def test_hold_released_by_a_target_step_says_how_far_below(self):
+        """26 Oct 06:00, second bedroom: Night → Comfort, 0.76 below at once
+        (it read 'heading 0.8 below within 20 min')."""
+        line = _line(prev_mode="stop", error_c=0.76, slope_c_per_h=0.0)
+        assert line.startswith("Holding (released): 0.76 below, valve pushed")
+        assert "full heat only from 0.8 below" in line
+
     def test_stop_ahead_of_an_overshoot(self):
-        # The study, 25 Oct 06:25: 0.25 below, rising 1.15 °C/h.
+        # The study, 25 Oct 06:25: 0.25 below, rising 1.15 °C/h, braking
+        # time 25 min.
         line = _line(mode="stop", prev_mode="hold", error_c=0.25, slope_c_per_h=1.15,
-                     command_c=5.0, command_off=True, tado="off", tado_c=None)
+                     command_c=5.0, command_off=True, tado="off", tado_c=None, td_s=1500.0)
         assert line.startswith(
             "Valve off ahead of an overshoot: 0.2 below, rising 1.1 °C/h would pass 20.1 "
-            "within 10 min"
+            "within 25 min"
         )
+
+    def test_a_new_stop_just_above_the_target_names_the_overshoot(self):
+        """Entered just above the target, still rising: the overshoot forecast
+        shut it, never "so it stays off" on the cycle that shuts it."""
+        line = _line(mode="stop", prev_mode="hold", error_c=-0.05, slope_c_per_h=0.6,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None, td_s=1500.0)
+        assert line.startswith("Valve off ahead of an overshoot: 0.1 above, rising 0.6 °C/h")
+        assert "stays off" not in line
 
     def test_a_stop_says_when_it_heats_again(self):
         line = _line(mode="stop", prev_mode="stop", error_c=-0.36, slope_c_per_h=0.8,
                      command_c=5.0, command_off=True, tado="off", tado_c=None)
         assert line.startswith(
-            "Valve off: 0.4 above, rising 0.8 °C/h; heats again once heading 0.1 below "
-            "within 20 min (predicted: 0.36 above)"
+            "Valve off: 0.4 above, rising 0.8 °C/h; heats again at 19.9, or 20 min ahead "
+            "of it once falling |"
         )
         falling = _line(mode="stop", prev_mode="stop", error_c=0.02, slope_c_per_h=-0.2,
                         command_c=5.0, command_off=True, tado="off", tado_c=None)
         # 0.02 + 20 min x (0.2 - 0.1) °C/h = 0.05: not yet the 0.1 that releases.
-        assert "falling 0.2 °C/h; heats again once heading 0.1 below within 20 min " \
-            "(predicted: 0.05 below)" in falling
+        assert "falling 0.2 °C/h; heats again 20 min before it reaches 19.9 (forecast for " \
+            "20 min ahead: 0.05 below)" in falling
+
+    def test_a_stop_still_rising_says_the_overshoot_keeps_it_off(self):
+        """26 Oct 06:42, second bedroom: 0.11 below, rising 1.3 °C/h on the
+        radiator's leftover heat.  It read 'heats again once heading 0.1
+        below within 20 min (predicted: 0.11 below)' -- the release rule, met
+        on paper, while the overshoot forecast was what kept it shut."""
+        line = _line(mode="stop", prev_mode="stop", error_c=0.11, slope_c_per_h=1.3,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None, td_s=1512.0)
+        assert line.startswith(
+            "Valve off: 0.1 below, still rising 1.3 °C/h; on that slope it would pass "
+            "20.1 within 25 min, so it stays off |"
+        )
 
     def test_a_stop_entered_above_the_target_is_no_overshoot_warning(self):
         line = _line(mode="stop", prev_mode="hold", error_c=-0.3, slope_c_per_h=0.0,
                      command_c=5.0, command_off=True, tado="off", tado_c=None)
-        assert line.startswith("Valve off: 0.3 above, flat; heats again once")
+        assert line.startswith("Valve off: 0.3 above, flat; heats again at 19.9")
+
+    def test_a_heat_up_ended_by_a_lower_target_is_no_coast(self):
+        """25 Oct 17:12, second bedroom: Frost protection picked during a
+        heat-up; for one cycle it read 'Coasting: valve shut with -11.7 to
+        go; leftover heat predicted to land it'."""
+        line = _line(mode="coast", prev_mode="heat", error_c=-11.65, slope_c_per_h=None,
+                     setpoint_c=5.0, command_c=5.0, command_off=True, tado="off",
+                     tado_c=None)
+        assert line.startswith("Heat-up ended: valve shut, 11.7 above the target |")
 
     def test_the_first_decision_after_a_start_is_no_transition(self):
         """A shut valve resumes as coast and becomes a stop: no coast happened."""
@@ -175,10 +234,13 @@ class TestDecisionLines:
         assert _line(window=act.WINDOW_REWARM).startswith(
             "Window closed: valve off while the room re-warms by itself")
         assert _line(window=act.WINDOW_PENDING).startswith(
-            "Window just opened (valve off soon): Holding")
+            "Window just opened (valve off after its delay): Holding")
+        assert _line(window=act.WINDOW_IGNORED).startswith(
+            "Window open, not acted on until it next opens: Holding")
 
     @pytest.mark.parametrize(("send", "kw", "note"), [
         ("rate_limited(120s)", dict(command_c=21.4), " (21.4 waits: rate limit)"),
+        ("settling(12s)", dict(command_c=25.0), " (25.0 waits: a change by hand settling)"),
         ("send_failed(normal_update)", dict(command_c=21.4), " (21.4 failed)"),
         ("already_at_target", dict(command_c=21.2), " (21.2 wanted: under the 0.3 step)"),
         ("already_at_target", dict(command_c=21.1), ""),
@@ -479,6 +541,7 @@ class TestEntity:
         sensor.async_write_ha_state = lambda: written.append(sensor.native_value)
         _feed(ent, 18.2, 16.0, 5.0, off=True)
         _cycle(ent)
+        clock.tick(120)                 # the window's off is no quick heat -> off
         ent.hass.set(WINDOW, "on")
         ent._async_window_changed(_event("on"))
         _fire_last_timer()
@@ -593,6 +656,30 @@ class TestEntity:
         _feed(ent, 20.0, 19.0, 20.5)
         _cycle(ent)
         assert _texts(ent)[-1].startswith("Switched off: valve kept off")
+
+    def test_an_open_window_is_named_for_what_it_does(self, monkeypatch):
+        """'Valve off' is promised only while the open delay runs.  25 Oct
+        2026: it read 'Window just opened (valve off soon)' for 40 s after the
+        window protection had been dropped, with nothing due."""
+        clock, ent, _ = self._start(monkeypatch)
+        _feed(ent, 20.5, 19.0, 20.5)
+        ent.hass.set(WINDOW, "on")
+        clock.tick()
+        _cycle(ent)
+        assert _texts(ent)[-1].startswith("Window open, not acted on until it next opens:")
+        ent._async_window_changed(_event("on"))       # the open delay runs
+        clock.tick()
+        _cycle(ent)
+        assert _texts(ent)[-1].startswith("Window just opened (valve off after its delay):")
+
+    def test_the_line_names_the_target_it_decided_on(self, monkeypatch):
+        """25 Oct 17:12: 'room 16.6 → 20.0 Frost protection' -- the target of
+        the decision, the preset of a change made while its command went out."""
+        clock, ent, _ = self._start(monkeypatch)
+        ent._preset_mode = "frost_protection"
+        ent._activity_cycle(clock.now, act.PATH_WAITING, room_c=16.6, setpoint_c=20.0,
+                            decided_as=("Comfort", None))
+        assert "| room 16.6 → 20.0 Comfort |" in _texts(ent)[-1]
 
 
 def test_cycle_facts_fields_are_documented_defaults():

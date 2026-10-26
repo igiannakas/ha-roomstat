@@ -214,6 +214,13 @@ class SummerMixin:
         send = False
         if not trv_available:
             reason = "summer_trv_unavailable"
+        elif self._off_confirm_due(now):
+            # An off seconds after a heat command, once more (OFF_CONFIRM_S).
+            sent = await self._async_send_off_confirm(now, trv)
+            self._summer_bypass_rate_limit = False
+            self._last_reason = "sent(off_confirm)" if sent else "send_failed(off_confirm)"
+            self._write_state_with_binary_sensor()
+            return
         elif not needed:
             # Off.  An OFF overlay never ends by itself: nothing to refresh.
             self._note_trv_holds_off()

@@ -23,6 +23,7 @@ from tests.ha_harness import (
     _make_entity,
     _restart_from,
     _run,
+    _settle,
     _start,
     e2e,
     reset_timers,
@@ -407,11 +408,17 @@ class TestBackOnSchedule:
         clock.tick(60)
         _feed(ent, 20.6, 14.7, 25.0)                 # the 25 °C now shows...
         _cycle(ent)
-        assert _temps(ent) == [25.0, "off"]           # ...the off is in flight
+        # ...the off is in flight: no resend for it, only the confirmation an
+        # off 10 s after a heat command gets a minute later (OFF_CONFIRM_S).
+        assert _temps(ent) == [25.0, "off", "off"]
+        assert ent._last_reason == "sent(off_confirm)"
+        clock.tick(60)
+        _cycle(ent)
+        assert _temps(ent) == [25.0, "off", "off"]
         clock.tick(400)
         _feed(ent, 20.6, 14.7, 25.0)                 # still heat after the grace
         _cycle(ent)
-        assert _temps(ent) == [25.0, "off", "off"]
+        assert _temps(ent) == [25.0, "off", "off", "off"]
 
     def test_heat_right_after_a_heat_command_waits_for_the_state(self, monkeypatch):
         """The other side: a heat command just sent, the state still off —
@@ -437,14 +444,18 @@ class TestBackOnSchedule:
     def test_roomstat_off_to_heat_sends_no_mode_change(self, monkeypatch, room, sent):
         """Roomstat switched back on: the regulation takes the valve out of
         off itself (heat, or nothing if the room is warm).  No set_hvac_mode
-        heat, which on a Tado zone heats at the last temperature HA sent."""
-        _Clock(monkeypatch)
+        heat, which on a Tado zone heats at the last temperature HA sent.
+        The heat goes out once the change by hand has settled."""
+        clock = _Clock(monkeypatch)
         ent = _make_entity({"heat_timer_s": 0})
         _run(_start(ent))
         _run(ent.async_set_hvac_mode(HVACMode.OFF))
         _feed(ent, room, 15.0, 5.0, off=True)
         ent.hass.service_calls.clear()
         _run(ent.async_set_hvac_mode(HVACMode.HEAT))
+        assert _temps(ent) == []
+        if sent:
+            _settle(clock)
         assert not [d for dom, svc, d in ent.hass.service_calls if svc == "set_hvac_mode"]
         assert _temps(ent) == sent
 

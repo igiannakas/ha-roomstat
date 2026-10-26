@@ -25,6 +25,7 @@ from tests.ha_harness import (
     _make_entity,
     _restart_from,
     _run,
+    _settle,
     _start,
     e2e,
     reset_timers,
@@ -110,7 +111,13 @@ class TestPending:
         clock.tick(60)
         _feed(ent, 20.6, 14.7, 25.0, heating=True)     # the 25 shows, then...
         _cycle(ent)
-        assert _commands(ent) == ["timer25", "off"]     # ...the off is on its way
+        # ...the off is on its way: only the one confirmation an off 10 s
+        # after a heat command gets a minute later (OFF_CONFIRM_S).
+        assert _commands(ent) == ["timer25", "off", "off"]
+        assert ent._last_reason == "sent(off_confirm)"
+        clock.tick(60)
+        _cycle(ent)
+        assert _commands(ent) == ["timer25", "off", "off"]
 
     def test_a_failed_off_does_not_end_the_heat_before_it(self, monkeypatch):
         """2.8.6 review: 25 °C sent, the off 10 s later fails (not landed),
@@ -167,12 +174,12 @@ class TestPending:
         assert not ent._last_attempt_shown
         clock.tick(30)
         _feed(ent, 20.6, 14.7, 25.0, heating=True)    # the heat catches up
-        _cycle(ent)
+        _cycle(ent)                                    # (the off's confirmation)
         clock.tick(30)
         _feed(ent, 20.6, 14.7, 5.0, off=True)         # then our off
         _cycle(ent)
         assert ent._last_attempt_shown
-        assert _commands(ent) == [25.0, "off"]
+        assert _commands(ent) == [25.0, "off", "off"]
 
     def test_a_failed_heat_command_does_not_hide_a_real_off_for_long(self, monkeypatch):
         """A heat command that really failed: the valve's "off" is believed
@@ -297,7 +304,10 @@ class TestReload:
         clock.tick(60)
         _feed(new, 20.6, 14.7, 25.0, heating=True)    # the timer shows
         _cycle(new)
-        assert _commands(new) == ["off"]               # the off is on its way
+        # The off is on its way; it came seconds after the heat (before the
+        # reload), so it is confirmed once a minute later (OFF_CONFIRM_S).
+        assert _commands(new) == ["off", "off"]
+        assert new._last_reason == "sent(off_confirm)"
 
     def test_a_reload_keeps_the_rate_limit(self, monkeypatch):
         """A hold push right after a reload waits for the interval like any
@@ -493,10 +503,12 @@ class TestRoomstatOff:
         assert _commands(ent) == ["off", "off"]
         assert ent._resend_count == 0                  # a new event, no back-off
 
-    def test_a_heat_up_right_after_off_goes_out_at_once(self, monkeypatch):
+    def test_a_heat_up_right_after_off_goes_out_once_settled(self, monkeypatch):
         """Heat-up at 25 (timer), Roomstat OFF, back to HEAT a minute later
         with the valve off: 2.8.5 held the heat-up back 2 min (the off was
-        not booked as the last command, so the 25 counted as a retry)."""
+        not booked as the last command, so the 25 counted as a retry).  It
+        goes out once the change by hand has settled (MANUAL_SETTLE_S), not
+        at the rate limit."""
         clock = _Clock(monkeypatch)
         ent = _owner()
         _feed(ent, 18.0, 9.0, 5.0, off=True)
@@ -508,6 +520,9 @@ class TestRoomstatOff:
         clock.tick(60)
         _feed(ent, 18.0, 9.0, 5.0, off=True)
         _run(ent.async_set_hvac_mode(HVACMode.HEAT))
+        assert _commands(ent) == ["timer25", "off"]
+        assert ent._last_reason.startswith("settling(")
+        _settle(clock)
         assert _commands(ent) == ["timer25", "off", "timer25"]
         assert ent._last_reason == "sent(strong)"
 

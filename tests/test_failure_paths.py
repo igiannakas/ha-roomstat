@@ -22,6 +22,7 @@ from tests.ha_harness import (
     _climate,
     _make_entity,
     _run,
+    _settle,
     _start,
     e2e,
     reset_timers,
@@ -507,6 +508,7 @@ class TestOff:
         _feed_off(ent, room=19.0)
         _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
         assert ent.hvac_mode == _climate.HVACMode.HEAT
+        _settle(clock)
         assert len(calls) == 1 and calls[0]["hvac_mode"] == _climate.HVACMode.HEAT
 
 

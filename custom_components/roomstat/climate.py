@@ -127,7 +127,9 @@ class _AutomationExtraData(ExtraStoredData):
     (CommandRecord: a reload seconds after a command must not forget it),
     the room slope's recent samples under ``slope`` (a restart in the
     middle of a heat-up must not blind its predicted stop), and the activity
-    log's lines under ``activity`` (a reload must not empty it).
+    log's lines under ``activity`` (a reload must not empty it), and the
+    last change by hand under ``manual_change_ts`` (a preset temperature
+    change reloads the room; it still settles before it adds heat).
     """
 
     def __init__(
@@ -138,6 +140,7 @@ class _AutomationExtraData(ExtraStoredData):
         command: dict[str, Any] | None = None,
         slope: dict[str, Any] | None = None,
         activity: dict[str, Any] | None = None,
+        manual_change_ts: float | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
@@ -145,6 +148,7 @@ class _AutomationExtraData(ExtraStoredData):
         self._command = command
         self._slope = slope
         self._activity = activity
+        self._manual_change_ts = manual_change_ts
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -159,6 +163,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["slope"] = self._slope
         if self._activity is not None:
             data["activity"] = self._activity
+        if self._manual_change_ts:
+            data["manual_change_ts"] = self._manual_change_ts
         return data
 
 
@@ -271,6 +277,10 @@ class RoomstatClimate(
         self._regulation_lock = asyncio.Lock()
         self._last_regulation_ts = 0.0
         self._last_command_sent_ts = 0.0
+        # The last change by hand, and the cycle that sends the heat it asked
+        # for once it has settled (MANUAL_SETTLE_S).
+        self._manual_change_ts = 0.0
+        self._settle_cancel: CALLBACK_TYPE | None = None
         self._last_sent_setpoint: float | None = None
         # The last command tried (the frost level for an off), whether the
         # TRV took it and which entity it went to: what pending_command judges
@@ -288,6 +298,10 @@ class RoomstatClimate(
         self._last_heat_attempt_c: float | None = None
         self._last_heat_attempt_ts: float | None = None
         self._last_heat_attempt_ok: bool = False
+        # The last heat command tried, and when an off sent seconds after
+        # one is to be sent once more (OFF_CONFIRM_S, off_confirm_after).
+        self._last_heat_command_ts: float | None = None
+        self._off_confirm_ts: float | None = None
         # Back-off for a TRV that keeps not showing a command it took: how
         # many times in a row it was sent again (resend_grace_s), and whether
         # the next attempt is such a resend.
@@ -530,6 +544,9 @@ class RoomstatClimate(
                 # reload): its rate limit, and that it may not show in the
                 # TRV's state yet.
                 self._restore_command(extra_dict.get("command"), now)
+                # A change by hand a few seconds ago (a preset temperature
+                # changed: it reloads the room) still settles.
+                self._restore_change_by_hand(extra_dict.get("manual_change_ts"), now)
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
                 if self._slope.restore(extra_dict.get("slope"), now):
@@ -834,6 +851,7 @@ class RoomstatClimate(
             self._command_record().as_dict(),
             self._slope.to_dict(),
             self._activity.as_dict(),
+            self._manual_change_ts,
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -871,6 +889,7 @@ class RoomstatClimate(
         if self._boost_cancel is not None:
             self._boost_cancel()
             self._boost_cancel = None
+        self._cancel_settled_cycle()
         await super().async_will_remove_from_hass()
 
     async def _async_config_entry_updated(self, hass, entry) -> None:
@@ -936,11 +955,17 @@ class RoomstatClimate(
         self._summer_guard("HVAC mode change")
         if hvac_mode not in self._attr_hvac_modes:
             return
-        # Manual HVAC change clears any active window-open state so the user's
-        # intention is respected.  Restore the saved pre-frost preset first –
-        # otherwise the entity stays in FROST_PROTECTION with no automation
-        # left to ever restore it (e.g. window closes while HVAC is OFF).
-        if self._window_ctrl.is_active:
+        self.note_change_by_hand()
+        # Switching on or off by hand clears any active window-open state so
+        # the user's intention is respected.  Restore the saved pre-frost
+        # preset first – otherwise the entity stays in FROST_PROTECTION with
+        # no automation left to ever restore it (e.g. window closes while HVAC
+        # is OFF).  Heat while already heating is no change and leaves the
+        # window alone: the heating scripts send it before every preset, and
+        # until 2.10.4 it ended the window's frost protection, so the preset
+        # after it heated at full power with the window open (25 Oct 2026,
+        # master bedroom 11:09, second bedroom 17:12).
+        if self._window_ctrl.is_active and hvac_mode != self._hvac_mode:
             saved = self._window_ctrl.get_saved()
             self._window_ctrl.cancel_all()
             restore_preset = saved.preset if saved.preset is not None else PRESET_COMFORT
@@ -1024,6 +1049,7 @@ class RoomstatClimate(
         # Clamp to safe range
         temp_f = max(self._config.min_target_c, min(self._config.max_target_c, temp_f))
         self._log(_LOGGER).info("temperature set to %.1f °C", temp_f)
+        self.note_change_by_hand()
 
         # A manual temperature overrides the schedule (see climate_schedule.py)
         self._schedule_note_manual_temperature()

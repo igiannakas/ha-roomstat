@@ -122,6 +122,11 @@ class PresetTemperatureNumber(CoordinatorEntity, NumberEntity):
             return
         # Clamp to configured bounds (service calls bypass frontend validation)
         value = max(self._attr_native_min_value, min(self._attr_native_max_value, value))
+        # A change by hand: more heat from it settles first (it reloads the
+        # room; the thermostat keeps the time in its restore data).
+        climate = getattr(self.coordinator, "climate_entity", None)
+        if climate is not None:
+            climate.note_change_by_hand()
         new_opts = {**self._entry.options, self._desc.conf_key: value}
         self.hass.config_entries.async_update_entry(self._entry, options=new_opts)
         self.async_write_ha_state()
