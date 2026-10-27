@@ -89,7 +89,17 @@ async def async_get_config_entry_diagnostics(
         "proxy_entities": proxy_entities,
         "states": {eid: _state_snapshot(hass, eid) for eid in selected_entities},
         "autotune": _autotune_snapshot(hass, config_entry),
+        "preheat": _preheat_snapshot(hass, config_entry),
     }
+
+
+def _preheat_snapshot(hass: HomeAssistant, config_entry: ConfigEntry) -> dict[str, Any] | None:
+    """Preheat: its settings, the live decision and its saved state."""
+    coordinator = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    climate = getattr(coordinator, "climate_entity", None)
+    if climate is None:
+        return None
+    return climate.preheat_diagnostics()
 
 
 def _autotune_snapshot(hass: HomeAssistant, config_entry: ConfigEntry) -> dict[str, Any] | None:

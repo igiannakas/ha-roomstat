@@ -461,6 +461,89 @@ class RegulationConfig:
 
 
 # ---------------------------------------------------------------------------
+# Preheat on the way home (preheat.py, climate_preheat.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PreheatConfig:
+    """The numbers of the preheat rule (preheat.PreheatController).
+
+    The owner's choices (25 Oct 2026); each is an option under Configure →
+    Preheat timing, explained there.
+
+    lead_s: added to the heat-up time, so a room is at its temperature a
+        little before the expected arrival, not on the dot (an arrival that
+        comes a few minutes early is still warm).
+    rate_factor: the heat-up time uses this share of the room's learned
+        heating rate.  The auto-tuner's rate is the steepest rise of a
+        heat-up; the start (valve opening, radiator warming) and the end are
+        slower.  On 37 recorded heat-ups (18-25 Oct 2026) 0.8 started 34 early
+        enough (typically 24 min early); 1.0 would have started rooms 4-8 min
+        later and made three more late.  Lower starts earlier.
+    slip_s: a heading-home preheat stops when the expected arrival moves more
+        than this much later than when it started and the room is no longer
+        due (the owner: no wasted heat); it starts again when the new arrival
+        is due.  Home ETA's estimate wobbles by a few minutes with traffic.
+    cap_s: a heading-home preheat stops this long after it first started
+        for a trip home, and starts no more on that trip (a backstop: a trip
+        home that never ends).  Slips, restarts and breaks (a window, a
+        change by hand) don't re-arm it; the trip ends when its expected
+        arrival is gone for ``arrival_grace_s`` or someone is home.
+    fall_delay_s: a drop to a cooler level (close → nearby → away) waits
+        this long; a rise applies at once.  A phone hovering at 800 m or at
+        the near-home radius can't make the target flap.
+    arrival_grace_s: an expected arrival that goes unknown (the trip home
+        ended, or Home ETA reloading) ends a heading-home preheat only after
+        this long; nothing new starts meanwhile.
+    recovery_default_c: the 30-minute recovery until the room has learned
+        its own (preheat.RecoveryLearner).
+    fallback_rate_c_per_h / fallback_dead_time_s: the heat-up time's
+        heating rate and dead time until the auto-tuner has learned them
+        (deliberately slow: a room that starts early wastes a little, one
+        that starts late arrives cold).
+    max_arrival_ahead_s: an expected arrival further ahead than this is a
+        fault, not a trip home, and is ignored.
+    """
+
+    lead_s: float = 300.0
+    rate_factor: float = 0.8
+    slip_s: float = 1200.0
+    cap_s: float = 4 * 3600.0
+    fall_delay_s: float = 600.0
+    arrival_grace_s: float = 600.0
+    recovery_default_c: float = 0.5
+    fallback_rate_c_per_h: float = 1.0
+    fallback_dead_time_s: float = 1200.0
+    max_arrival_ahead_s: float = 12 * 3600.0
+
+
+@dataclass
+class RecoveryConfig:
+    """How the 30-minute recovery is learned (preheat.RecoveryLearner).
+
+    An episode is a target rise of ``min_step_c`` or more (the auto-tuner's
+    heat-up step) that leaves the room ``min_deficit_c`` or more below it.
+    One in which the room comes within ``reach_c`` of the target by its 30
+    minutes is dropped: its rise is capped by the deficit, so it would
+    understate the room (a 0.6 °C step reached in 25 min says only "0.6 or
+    more").  ``min_episodes``: as for the auto-tuner's dead time, one
+    heat-up is not enough.  No episode starts within
+    ``window_settle_s`` of a window (the auto-tuner's rule: the room then
+    re-warms on its own), and a gap of more than ``max_gap_s`` between
+    cycles ends one (the auto-tuner's ``max_gap_s``).
+    """
+
+    window_s: float = 1800.0
+    min_step_c: float = 0.5
+    min_deficit_c: float = 0.5
+    reach_c: float = 0.1
+    history_len: int = 10
+    min_episodes: int = 2
+    window_settle_s: float = 1800.0
+    max_gap_s: float = 600.0
+
+
+# ---------------------------------------------------------------------------
 # Out-of-band alarm (binary_sensor.<room>_out_of_band)
 # ---------------------------------------------------------------------------
 

@@ -68,7 +68,7 @@
               "presence_sensor_id": "Binärsensor oder Input-Boolean zur Präsenzerkennung (an = zu Hause, aus = abwesend). Wechselt beim Ausschalten in den Abwesend-Modus.",
               "presence_away_delay_s": "Verzögerung bevor in den Abwesend-Modus gewechselt wird.",
               "presence_home_delay_s": "Verzögerung bevor nach erkannter Präsenz der vorherige Modus zurückkehrt.",
-              "presence_override_max_min": "Eine Temperatur oder ein Modus, die du bei Abwesenheit von Hand einstellst, gilt sofort und bleibt, bis jemand zu Hause ist, höchstens aber so lange; danach kehrt der Raum in den Abwesend-Modus zurück. Abwesend oder Zeitplan fortsetzen beendet sie früher. 0 = bis jemand zu Hause ist."
+              "presence_override_max_min": "Eine Temperatur oder ein Modus, die du bei Abwesenheit von Hand einstellst, gilt sofort und bleibt, bis jemand zu Hause ist, höchstens aber so lange; danach kehrt der Raum in den Abwesend-Modus zurück. Abwesend oder Zeitplan fortsetzen beendet sie früher. Abwesend, bei Abwesenheit von Hand gewählt, hält den Raum so lange kalt (kein Vorheizen auf dem Heimweg), sofern du den Zeitplan nicht fortsetzt oder einen anderen Modus oder eine Temperatur wählst (Aus- und wieder Einschalten zählt nicht). 0 = bis jemand zu Hause ist."
             }
           },
           "schedule": {
@@ -80,6 +80,48 @@
             "data_description": {
               "schedule_entity_id": "Optionaler Input-Select, den dein Zeitplaner setzt. Sein Zustand ist das Preset, dem dieser Raum folgt: comfort, night, away oder frost_protection. Leer lassen, um Presets manuell zu nutzen.",
               "schedule_override_min": "Wie lange eine manuelle Änderung (Preset, Temperatur, Boost) den Zeitplan übersteuert. 0 = bis sich der Zeitplan ändert. Sonst endet die Übersteuerung nach dieser Zeit oder beim nächsten Zeitplanwechsel – je nachdem, was zuerst eintritt."
+            }
+          },
+          "preheat": {
+            "name": "Vorheizen auf dem Heimweg",
+            "description": "Berechnet, während niemand zu Hause ist, aus Home ETA, was dieser Raum ansteuern soll: die Temperatur, die die Heimkehr wiederherstellt, sobald jemand nah an zu Hause ist oder auf dem Heimweg fällig wird, eine etwas niedrigere, solange jemand in der Nähe ist. Diese Version zeigt und protokolliert nur, was es tun würde (Schatten): der Raum bleibt auf Abwesend und es wird keine Wärme gesendet.",
+            "data": {
+              "preheat_mode": "Modus",
+              "preheat_arrival_entity_id": "Erwartete Ankunft",
+              "preheat_close_entity_id": "Jemand nah an zu Hause",
+              "preheat_nearby_entity_id": "Jemand in der Nähe"
+            },
+            "data_description": {
+              "preheat_mode": "Aus: nichts. Schatten: berechnet, was der Raum bei Abwesenheit tun würde, und protokolliert jede geänderte Entscheidung (Aktivitätsprotokoll und der Sensor Vorheizen des Raums), aber der Raum bleibt auf Abwesend und es wird keine Wärme gesendet.",
+              "preheat_arrival_entity_id": "Ein Zeitstempel der ersten erwarteten Ankunft zu Hause, zum Beispiel sensor.home_eta_expected_home von Home ETA (unbekannt, solange niemand auf dem Heimweg ist). Sobald sie innerhalb der Aufheizzeit des Raums plus Vorlauf liegt, würde der Raum auf die Temperatur heizen, die die Heimkehr wiederherstellt.",
+              "preheat_close_entity_id": "An, solange jemand zu Hause oder nah an zu Hause ist, zum Beispiel binary_sensor.home_eta_someone_close_to_home von Home ETA (800 m). Der Raum würde dann auf die Temperatur heizen, die die Heimkehr wiederherstellt, egal wie lange die Person dort bleibt.",
+              "preheat_nearby_entity_id": "An, solange jemand in der Nähe ist, zum Beispiel binary_sensor.home_eta_someone_nearby von Home ETA (der Nahbereich jeder Person). Der Raum würde dann seine 30-Minuten-Temperatur halten: die Temperatur, die die Heimkehr wiederherstellt, abzüglich dessen, was der Raum typischerweise in den ersten 30 Minuten Heizen aufholt (sein Sensor 30-Minuten-Erholung), auf 0,1 °C abgerundet. Er ist dann etwa 30 Minuten nach der Ankunft wieder am Zielwert."
+            }
+          },
+          "preheat_timing": {
+            "name": "Vorheizen: Zeiten",
+            "description": "Die Zahlen der Vorheiz-Regel. Die Aufheizzeit für jemanden auf dem Heimweg ist die Totzeit des Raums plus die fehlenden Grad bei seiner Heizrate (beides lernt die Auto-Abstimmung) plus der Vorlauf. Die Standardwerte sind die an aufgezeichneten Aufheizvorgängen geprüften.",
+            "data": {
+              "preheat_lead_min": "Vorlauf",
+              "preheat_rate_factor": "Faktor Heizrate",
+              "preheat_slip_min": "Verschiebung der Ankunft",
+              "preheat_max_min": "Längstes Vorheizen",
+              "preheat_drop_delay_min": "Verzögerung beim Absenken",
+              "preheat_arrival_grace_min": "Nachlauf ohne Ankunft",
+              "preheat_recovery_default_c": "Standard-30-Minuten-Erholung",
+              "preheat_fallback_rate_c_per_h": "Standard-Heizrate",
+              "preheat_fallback_dead_min": "Standard-Anlaufzeit"
+            },
+            "data_description": {
+              "preheat_lead_min": "Wird zur Aufheizzeit addiert, damit der Raum etwas vor der erwarteten Ankunft auf Temperatur ist statt genau dann. Erhöhen, wenn Ankünfte oft früher kommen als erwartet.",
+              "preheat_rate_factor": "Die Aufheizzeit nutzt diesen Anteil der gelernten Heizrate des Raums: die gelernte Rate ist sein steilster Anstieg, ein ganzes Aufheizen ist im Mittel langsamer. Kleiner startet früher. Mit 0,8 wären 34 von 37 aufgezeichneten Aufheizvorgängen früh genug gestartet. Nur ändern, wenn ein Raum regelmäßig zu spät ist (verkleinern) oder viel zu früh (vergrößern).",
+              "preheat_slip_min": "Verschiebt sich die erwartete Ankunft um mehr als diese Zeit gegenüber dem Start des Raums, und ist der Raum für die neue Zeit noch nicht fällig, hört er auf zu heizen; er startet wieder, wenn die neue Ankunft fällig ist. Erhöhen, wenn Verkehr ihn zu oft stoppt.",
+              "preheat_max_min": "Ein Vorheizen für jemanden auf dem Heimweg stoppt so lange nach seinem ersten Start für diesen Heimweg und startet auf ihm nicht erneut. Verschiebungen, Neustarts und Unterbrechungen (ein Fenster, eine Änderung von Hand) setzen das nicht zurück. Eine Absicherung für einen Heimweg, der nie endet.",
+              "preheat_drop_delay_min": "Ein Wechsel auf eine kühlere Stufe (nah an zu Hause, dann in der Nähe, dann Abwesend) wartet so lange; ein Anstieg gilt sofort. Verhindert, dass der Zielwert hin und her springt, solange ein Telefon um 800 m oder um den Nahbereich pendelt. Erhöhen, wenn er trotzdem springt.",
+              "preheat_arrival_grace_min": "Wird die erwartete Ankunft unbekannt (der Heimweg ist vorbei, oder Home ETA lädt neu), heizt ein Raum, der dafür schon heizt, noch so lange weiter, bevor er stoppt. Neues startet in der Zeit nicht.",
+              "preheat_recovery_default_c": "Bis der Raum gelernt hat, wie viel er in den ersten 30 Minuten Heizen aufholt (zwei Aufheizvorgänge), ist die Temperatur bei „in der Nähe“ die, die die Heimkehr wiederherstellt, abzüglich dieses Werts.",
+              "preheat_fallback_rate_c_per_h": "Die Heizrate für die Aufheizzeit, bis die Auto-Abstimmung die des Raums gelernt hat (oder solange sie aus ist). Absichtlich langsam: zu früh starten verschwendet etwas, zu spät starten heißt kalt ankommen.",
+              "preheat_fallback_dead_min": "Die Totzeit (wie lange, bis der Raum zu steigen beginnt) für die Aufheizzeit, bis die Auto-Abstimmung die des Raums gelernt hat."
             }
           },
           "pi_controller": {
@@ -169,6 +211,14 @@
       "trv_in_use": "Dieses Thermostat wird bereits von einem anderen Roomstat-Raum verwendet."
     }
   },
+  "selector": {
+    "preheat_mode": {
+      "options": {
+        "off": "Aus",
+        "shadow": "Schatten: nur protokollieren, der Raum bleibt auf Abwesend"
+      }
+    }
+  },
   "entity": {
     "climate": {
       "roomstat": {
@@ -246,8 +296,7 @@
       },
       "autotune_last_overshoot": {
         "name": "Letztes Überschwingen"
-      }
-,
+      },
       "regulation_command": {
         "name": "Befehl an das Ventil"
       },
@@ -257,11 +306,29 @@
       "regulation_mode": {
         "name": "Regelmodus",
         "state": {
-          "heat": "Aufheizen", "coast": "Ausrollen", "hold": "Halten", "stop": "Stopp"
+          "heat": "Aufheizen",
+          "coast": "Ausrollen",
+          "hold": "Halten",
+          "stop": "Stopp"
         }
       },
       "activity": {
         "name": "Aktivität"
+      },
+      "preheat": {
+        "name": "Vorheizen",
+        "state": {
+          "off": "Aus",
+          "inactive": "Nicht zuständig",
+          "held_cold": "Kalt gehalten (Abwesend von Hand)",
+          "waiting": "Abwesend",
+          "nearby": "Jemand in der Nähe",
+          "close": "Jemand nah",
+          "due": "Auf dem Heimweg"
+        }
+      },
+      "preheat_recovery": {
+        "name": "30-Minuten-Erholung"
       }
     },
     "button": {
@@ -304,7 +371,10 @@
               "window_sensor_id": "Fenstersensor",
               "presence_sensor_id": "Präsenzsensor",
               "summer_mode_entity_id": "Sommermodus-Schalter",
-              "schedule_entity_id": "Zeitplan-Helfer"
+              "schedule_entity_id": "Zeitplan-Helfer",
+              "preheat_arrival_entity_id": "Erwartete Ankunft (Vorheizen)",
+              "preheat_close_entity_id": "Jemand nah an zu Hause (Vorheizen)",
+              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)"
             }
           }
         },
@@ -327,7 +397,10 @@
               "window_sensor_id": "Fenstersensor",
               "presence_sensor_id": "Präsenzsensor",
               "summer_mode_entity_id": "Sommermodus-Schalter",
-              "schedule_entity_id": "Zeitplan-Helfer"
+              "schedule_entity_id": "Zeitplan-Helfer",
+              "preheat_arrival_entity_id": "Erwartete Ankunft (Vorheizen)",
+              "preheat_close_entity_id": "Jemand nah an zu Hause (Vorheizen)",
+              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)"
             }
           }
         },

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.10.4-blue)
+![Version](https://img.shields.io/badge/version-2.11.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -133,6 +133,12 @@ changes.
   Anything that sets a mode or temperature counts, an automation too, so
   keep schedules in the schedule helper. The original only saved the change
   for when you got back.
+- **Preheat on the way home, in shadow for now.** While nobody is home,
+  Roomstat works out from [Home ETA](https://github.com/igiannakas/ha-home-eta)
+  what each room should aim for: the temperature coming home restores once
+  someone is close to home or heading home in time, a little lower while
+  someone is nearby. This version only logs what it would do; the room stays
+  at Away. See [Preheat on the way home](#preheat-on-the-way-home).
 - **Fixes:**
   - the chosen mode survives restarts, reloads and window open/close;
   - a running Boost carries on after a restart;
@@ -224,6 +230,118 @@ content: >-
   - {{ line }}
   {% endfor %}
 ```
+
+## Preheat on the way home
+
+Shadow only in this version: Roomstat works out what each room would do and
+logs it, and the room stays at Away. Nothing is sent to the valve. The
+point is a week of decisions to check against real arrivals before it is
+switched on.
+
+**Set up**, per room, under **Configure → Preheat on the way home**:
+
+- **Mode:** **Off**, or **Shadow** (log only).
+- **Expected arrival:** a timestamp of the first expected arrival home,
+  such as Home ETA's `sensor.home_eta_expected_home`.
+- **Someone close to home:** on while someone is home or within 800 m, such
+  as `binary_sensor.home_eta_someone_close_to_home`.
+- **Someone nearby:** on while someone is within their near-home radius,
+  such as `binary_sensor.home_eta_someone_nearby`.
+
+The room needs a presence sensor and at least one of the three entities:
+preheat only works while away mode is in charge (nobody home, no change by
+hand, no window open, heating on, not summer mode). The Preheat sensor says
+**Not in charge** otherwise, with the reason in its attributes.
+
+**What each room would aim for**, the warmest that applies:
+
+- **Someone close to home:** the temperature coming home restores (the
+  schedule's, for example Comfort 20 °C), however long they stay.
+- **Someone nearby:** the **30-minute temperature**: the temperature coming
+  home restores, less what this room typically recovers in its first 30
+  minutes of heating, rounded down to 0.1 °C. The room is then back at its
+  target about 30 minutes after someone walks in, up to about 45 on a slow
+  day.
+- **Someone heading home:** the temperature coming home restores, from the
+  room's heat-up time before the expected arrival. The heat-up time is the
+  room's dead time, plus the degrees to go at its heating rate (both learned
+  by auto-tune), plus a lead. It stops when the trip home is over, when the
+  arrival slips later and the room isn't due any more (it starts again when
+  the new arrival is due), or after the longest preheat.
+- **Otherwise** Away.
+
+If coming home would heat no more than Away (the schedule says Away or
+Frost protection), there is nothing to preheat.
+
+**Manual control wins.** Pick **Away** while nobody is home and the room
+stays at Away with no preheat at all until someone is home, you pick
+**Resume schedule**, you pick another mode or a temperature (switching the
+room off and on again doesn't count), or the room's **Change while away
+lasts** limit has passed since you picked it (240 minutes by default;
+0 = until someone is home). An Away picked while someone is home isn't
+carried into the absence: when the house empties it becomes away mode and
+preheat applies as usual. Any other mode or temperature picked while nobody
+is home takes effect at once (see "A change by hand while nobody is home"
+above), and preheat stands aside until it ends.
+
+**The settings**, under **Configure → Preheat timing** (each is explained
+there too):
+
+- **Lead** (5 minutes): added to the heat-up time, so the room is at its
+  temperature a little before the expected arrival, not on the dot. Raise
+  it if arrivals often come earlier than expected.
+- **Heating rate factor** (0.8): the heat-up time uses this share of the
+  room's learned heating rate. Auto-tune's rate is the steepest rise of a
+  heat-up; the whole heat-up averages slower. Lower starts earlier. With
+  0.8, 34 of 37 recorded heat-ups would have started early enough, typically
+  24 minutes early; with 1.0, rooms start only 4–8 minutes later and three
+  more would have been late.
+- **Arrival slip** (20 minutes): if the expected arrival moves more than
+  this much later than when the room started, and the room isn't due yet for
+  the new time, it stops heating rather than waste it. It starts again when
+  the new arrival is due. Raise it if traffic stops it too often.
+- **Longest preheat** (240 minutes): a preheat for someone heading home
+  stops this long after it first started for that trip home, and doesn't
+  start again on it. Slips, restarts and breaks (a window, a change by hand)
+  don't reset it. A backstop for a trip home that never ends.
+- **Level drop delay** (10 minutes): a drop to a cooler level (close to
+  home, then nearby, then Away) waits this long; a rise applies at once. A
+  phone hovering at 800 m or at the near-home radius can't make the target
+  flap.
+- **Arrival lost grace** (10 minutes): if the expected arrival goes unknown
+  (the trip home is over, or Home ETA is reloading), a room already heating
+  for it carries on this long before it stops. Nothing new starts meanwhile.
+- **Default 30-minute recovery** (0.5 °C): used for the nearby temperature
+  until the room has learned its own from two heat-ups.
+- **Default heating rate** (1.0 °C/h) and **default start-up delay** (20
+  minutes): used for the heat-up time until auto-tune has learned the room's
+  own, or while auto-tune is off. Slow on purpose: starting early wastes a
+  little, starting late arrives cold.
+
+The 800 m and the near-home radius are Home ETA's.
+
+**What it shows**, per room:
+
+- **Preheat** sensor: the decision (Off, Not in charge, Held cold, Away,
+  Someone nearby, Someone close, Heading home). Its attributes are what the
+  decision was made with (the target, the room's temperature, the heat-up
+  time, when it was due, the expected arrival, the learned values it used),
+  fixed until the next decision, so its history is a list of decisions.
+- **30-minute recovery** sensor: how much the room typically rises in its
+  first 30 minutes after its target rises by 0.5 °C or more, with the room
+  0.5 °C or more below it (the median of the last 10). Not counted: Boost,
+  the half hour after a window, a heat-up interrupted (a window, the room
+  switched off, the target changed), and one that reaches its target within
+  the 30 minutes (it shows only that the room can do at least that much). It
+  learns whatever the mode, so a room has its own value by the time preheat
+  is switched on.
+- The thermostat's `preheat_*` attributes: the live numbers, updated every
+  minute (not recorded: the Preheat sensor's history has the decisions).
+- The activity log: one line per change of decision, for example
+  `Preheat (shadow): heading home: it would heat to 20.0 °C now for the
+  expected arrival at 18:42: from 17.4 °C it needs 106 min (start-up 22 min,
+  2.6 °C at 0.8 × 2.5 °C/h, lead 5 min)`, and one per learned 30-minute
+  recovery.
 
 ## Schedule
 

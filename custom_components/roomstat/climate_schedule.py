@@ -160,6 +160,9 @@ class ScheduleMixin:
         self.note_change_by_hand()
         self._schedule_ctrl.clear_override()
         self._log(_LOGGER).info("schedule resumed")
+        if self._presence_ctrl.nobody_home:
+            # Preheat: back to automatic after an Away picked by hand.
+            self._preheat_release_cold("Resume schedule")
         if self._presence_ctrl.end_override():
             # The room takes the schedule's preset quietly, then away mode
             # saves it for the return (one regulation cycle, no heat call
@@ -171,6 +174,10 @@ class ScheduleMixin:
             await self._async_reenter_away(trigger="resume_schedule")
             return
         await self._async_follow_schedule(trigger="resume_schedule")
+        # Nobody home and already away: no regulation cycle follows, so
+        # preheat decides again now, on the preset just saved for the return.
+        if self._presence_ctrl.is_active:
+            self._preheat_evaluate(time.time(), write=True)
 
     async def _async_follow_schedule(self, trigger: str) -> None:
         """Apply the schedule's preset (routed via window/presence if active)."""

@@ -1012,6 +1012,13 @@ class Autotuner:
         return {"theta_s": theta, "rate_c_per_h": rate, "coast_s": coast,
                 "coast_is_lower_bound": not complete and bool(bounds), "tau_c_s": tau_c}
 
+    def heatup_model(self) -> tuple[float | None, float | None]:
+        """The learned heating rate (°C/h) and dead time (s) of a heat-up,
+        each None while unknown (the dead time needs ``simc_min_episodes``
+        heat-ups): what the preheat's heat-up time is worked out from."""
+        m = self._model()
+        return m["rate_c_per_h"], m["theta_s"]
+
     def _simc_ki(self) -> float | None:
         """SIMC integral gain for the identified dead time (before trims)."""
         m = self._model()

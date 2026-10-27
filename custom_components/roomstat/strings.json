@@ -68,7 +68,7 @@
               "presence_sensor_id": "Binary sensor or input boolean for presence detection (on = home, off = away). Switches to away mode when it turns off.",
               "presence_away_delay_s": "Delay before switching to away mode after presence is lost.",
               "presence_home_delay_s": "Delay before the previous mode comes back after presence is detected.",
-              "presence_override_max_min": "A temperature or mode you set by hand while nobody is home takes effect at once and lasts until someone is home, or this long at most; then the room goes back to away. Picking Away or Resume schedule ends it sooner. 0 = until someone is home."
+              "presence_override_max_min": "A temperature or mode you set by hand while nobody is home takes effect at once and lasts until someone is home, or this long at most; then the room goes back to away. Picking Away or Resume schedule ends it sooner. An Away picked while nobody is home holds the room cold (no preheat on the way home) for as long, unless you resume the schedule or pick another mode or a temperature (switching the room off and on again doesn't count). 0 = until someone is home."
             }
           },
           "schedule": {
@@ -80,6 +80,48 @@
             "data_description": {
               "schedule_entity_id": "Optional input select set by your scheduler. Its state is the preset this room should follow: comfort, night, away or frost_protection. Leave empty to use presets manually.",
               "schedule_override_min": "How long a manual change (preset, temperature, boost) overrides the schedule. 0 = until the schedule changes. Otherwise the override ends after this time or at the next schedule change, whichever comes first."
+            }
+          },
+          "preheat": {
+            "name": "Preheat on the way home",
+            "description": "While nobody is home, works out from Home ETA what this room should aim for: the temperature coming home restores once someone is close to home or heading home and due, a slightly lower one while someone is nearby. This version only shows and logs what it would do (Shadow): the room stays at Away and no heat is sent.",
+            "data": {
+              "preheat_mode": "Mode",
+              "preheat_arrival_entity_id": "Expected arrival",
+              "preheat_close_entity_id": "Someone close to home",
+              "preheat_nearby_entity_id": "Someone nearby"
+            },
+            "data_description": {
+              "preheat_mode": "Off: nothing. Shadow: works out what the room would do while nobody is home and logs every change of decision (the activity log and the room's Preheat sensor), but the room stays at Away and no heat is sent.",
+              "preheat_arrival_entity_id": "A timestamp of the first expected arrival home, for example Home ETA's sensor.home_eta_expected_home (unknown while nobody is heading home). Once it is within the room's heat-up time plus the lead, the room would heat to the temperature coming home restores.",
+              "preheat_close_entity_id": "On while someone is home or close to home, for example Home ETA's binary_sensor.home_eta_someone_close_to_home (800 m). The room would then heat to the temperature coming home restores, however long they stay.",
+              "preheat_nearby_entity_id": "On while someone is nearby, for example Home ETA's binary_sensor.home_eta_someone_nearby (each person's near-home radius). The room would then hold its 30-minute temperature: the temperature coming home restores, less what the room typically recovers in its first 30 minutes of heating (its 30-minute recovery sensor), rounded down to 0.1 °C. It is then back at its target about 30 minutes after someone walks in."
+            }
+          },
+          "preheat_timing": {
+            "name": "Preheat timing",
+            "description": "The numbers of the preheat rule. The heat-up time for someone heading home is the room's dead time plus the degrees to go at its heating rate (both learned by auto-tune) plus the lead. The defaults are the ones checked against recorded heat-ups.",
+            "data": {
+              "preheat_lead_min": "Lead",
+              "preheat_rate_factor": "Heating rate factor",
+              "preheat_slip_min": "Arrival slip",
+              "preheat_max_min": "Longest preheat",
+              "preheat_drop_delay_min": "Level drop delay",
+              "preheat_arrival_grace_min": "Arrival lost grace",
+              "preheat_recovery_default_c": "Default 30-minute recovery",
+              "preheat_fallback_rate_c_per_h": "Default heating rate",
+              "preheat_fallback_dead_min": "Default start-up delay"
+            },
+            "data_description": {
+              "preheat_lead_min": "Added to the heat-up time, so the room is at its temperature a little before the expected arrival rather than on the dot. Raise it if arrivals often come earlier than expected.",
+              "preheat_rate_factor": "The heat-up time uses this share of the room's learned heating rate: the learned rate is its steepest rise, and a whole heat-up averages slower. Lower starts earlier. With 0.8, 34 of 37 recorded heat-ups would have started early enough. Change it only if a room is regularly late (lower it) or far too early (raise it).",
+              "preheat_slip_min": "If the expected arrival moves more than this much later than when the room started, and the room isn't due yet for the new time, it stops heating; it starts again when the new arrival is due. Raise it if traffic stops it too often.",
+              "preheat_max_min": "A preheat for someone heading home stops this long after it first started for that trip home, and doesn't start again on it. Slips, restarts and breaks (a window, a change by hand) don't reset it. A backstop for a trip home that never ends.",
+              "preheat_drop_delay_min": "A drop to a cooler level (close to home, then nearby, then Away) waits this long; a rise applies at once. It keeps the target from flapping while a phone hovers at 800 m or at the near-home radius. Raise it if the target still flaps.",
+              "preheat_arrival_grace_min": "If the expected arrival goes unknown (the trip home is over, or Home ETA is reloading), a room already heating for it carries on this long before it stops. Nothing new starts meanwhile.",
+              "preheat_recovery_default_c": "Until the room has learned how much it recovers in its first 30 minutes of heating (two heat-ups), the nearby temperature is the temperature coming home restores, less this.",
+              "preheat_fallback_rate_c_per_h": "The heating rate used for the heat-up time until auto-tune has learned the room's own (or while auto-tune is off). Slow on purpose: starting early wastes a little, starting late arrives cold.",
+              "preheat_fallback_dead_min": "The dead time (how long before the room starts to rise) used for the heat-up time until auto-tune has learned the room's own."
             }
           },
           "pi_controller": {
@@ -169,6 +211,14 @@
       "trv_in_use": "That thermostat is already used by another Roomstat room."
     }
   },
+  "selector": {
+    "preheat_mode": {
+      "options": {
+        "off": "Off",
+        "shadow": "Shadow: log only, the room stays at Away"
+      }
+    }
+  },
   "entity": {
     "climate": {
       "roomstat": {
@@ -246,8 +296,7 @@
       },
       "autotune_last_overshoot": {
         "name": "Last heat-up overshoot"
-      }
-,
+      },
       "regulation_command": {
         "name": "Command to valve"
       },
@@ -257,11 +306,29 @@
       "regulation_mode": {
         "name": "Regulation mode",
         "state": {
-          "heat": "Heat-up", "coast": "Coast", "hold": "Hold", "stop": "Stop"
+          "heat": "Heat-up",
+          "coast": "Coast",
+          "hold": "Hold",
+          "stop": "Stop"
         }
       },
       "activity": {
         "name": "Activity"
+      },
+      "preheat": {
+        "name": "Preheat",
+        "state": {
+          "off": "Off",
+          "inactive": "Not in charge",
+          "held_cold": "Held cold (Away by hand)",
+          "waiting": "Away",
+          "nearby": "Someone nearby",
+          "close": "Someone close",
+          "due": "Heading home"
+        }
+      },
+      "preheat_recovery": {
+        "name": "30-minute recovery"
       }
     },
     "button": {
@@ -304,7 +371,10 @@
               "window_sensor_id": "Window sensor",
               "presence_sensor_id": "Presence sensor",
               "summer_mode_entity_id": "Summer mode switch",
-              "schedule_entity_id": "Schedule helper"
+              "schedule_entity_id": "Schedule helper",
+              "preheat_arrival_entity_id": "Expected arrival (preheat)",
+              "preheat_close_entity_id": "Someone close to home (preheat)",
+              "preheat_nearby_entity_id": "Someone nearby (preheat)"
             }
           }
         },
@@ -327,7 +397,10 @@
               "window_sensor_id": "Window sensor",
               "presence_sensor_id": "Presence sensor",
               "summer_mode_entity_id": "Summer mode switch",
-              "schedule_entity_id": "Schedule helper"
+              "schedule_entity_id": "Schedule helper",
+              "preheat_arrival_entity_id": "Expected arrival (preheat)",
+              "preheat_close_entity_id": "Someone close to home (preheat)",
+              "preheat_nearby_entity_id": "Someone nearby (preheat)"
             }
           }
         },

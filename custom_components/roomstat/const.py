@@ -40,6 +40,14 @@ CONF_PRESENCE_HOME_DELAY_S = "presence_home_delay_s"
 CONF_PRESENCE_OVERRIDE_MAX_MIN = "presence_override_max_min"
 DEFAULT_PRESENCE_OVERRIDE_MAX_MIN = 240
 
+# Preheat on the way home (preheat.py, climate_preheat.py): the mode (off /
+# shadow) and the three Home ETA entities it reads.  The timing settings are
+# preheat.TIMING_OPTIONS.
+CONF_PREHEAT_MODE = "preheat_mode"
+CONF_PREHEAT_ARRIVAL_ENTITY_ID = "preheat_arrival_entity_id"
+CONF_PREHEAT_CLOSE_ENTITY_ID = "preheat_close_entity_id"
+CONF_PREHEAT_NEARBY_ENTITY_ID = "preheat_nearby_entity_id"
+
 # Summer mode (input_boolean / binary_sensor) – optional global lock
 CONF_SUMMER_MODE_ENTITY_ID = "summer_mode_entity_id"
 

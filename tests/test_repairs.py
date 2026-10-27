@@ -256,6 +256,22 @@ class TestCheck:
         _check(hass, entry, watch, 1360)
         assert hass.issues == {}
 
+    def test_preheat_entities_are_watched_only_while_preheat_is_on(self):
+        opts = {"preheat_arrival_entity_id": "sensor.home_eta_expected_home"}
+        hass, entry, watch = _setup(opts)
+        _check(hass, entry, watch, 1000)
+        _check(hass, entry, watch, 1300)
+        assert hass.issues == {}                  # preheat off: not looked at
+        entry.options = {**opts, "preheat_mode": "shadow"}
+        _check(hass, entry, watch, 1360)
+        _check(hass, entry, watch, 1700)
+        issue = _issue(hass, "preheat_arrival_entity_id")
+        assert issue["severity"] == "warning" and issue["is_fixable"] is True
+        # Off again: the repair goes.
+        entry.options = {**opts, "preheat_mode": "off"}
+        _check(hass, entry, watch, 1760)
+        assert hass.issues == {}
+
     def test_delete_all(self):
         hass, entry, watch = _setup()
         hass.remove(TRV)

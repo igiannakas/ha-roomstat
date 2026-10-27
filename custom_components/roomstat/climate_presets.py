@@ -367,6 +367,10 @@ class PresetMixin:
 
         ``notify=False``: see :meth:`_restore_window_state`.
         """
+        # An Away held cold ends with the absence, at once: the window branch
+        # below runs no cycle, and someone may leave again before the next
+        # one (the next preheat decision line says it).
+        self._preheat_release_cold(None)
         if self._presence_ctrl.override_active:
             self._presence_ctrl.restore()  # ends the override
             self._log(_LOGGER).info(
@@ -441,6 +445,8 @@ class PresetMixin:
         ctrl = self._presence_ctrl
         if not ctrl.nobody_home:
             return
+        # The change replaces an Away picked by hand (no longer held cold).
+        self._preheat_release_cold("a change by hand replaces the Away picked by hand")
         saved = ctrl.get_saved() if ctrl.is_active else None
         limit_s = self._presence_override_limit_s()
         ctrl.start_override(
@@ -528,8 +534,13 @@ class PresetMixin:
         schedule's preset, else what away mode had saved before the change.
         """
         ctrl = self._presence_ctrl
+        # Preheat: an Away picked while out holds the room cold (no preheat)
+        # until someone is home, Resume schedule, a change by hand or the
+        # "change while away lasts" limit from now.
+        self._preheat_hold_cold(time.time())
         if not ctrl.override_active:
             self._log(_LOGGER).info("Away picked while nobody is home, already away")
+            self._preheat_evaluate(time.time())
             self._write_state_with_binary_sensor()
             return
         before = ctrl.get_before_override()

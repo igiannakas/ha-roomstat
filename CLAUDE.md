@@ -37,14 +37,15 @@ parameters.py → regulation.py       climate.py (entity, mixin composition)
 parameters.py → autotune.py         ├─ climate_regulation.py (RegulationMixin)
 climate_controllers.py              ├─ climate_presets.py (PresetMixin)
 regulation.py → activity.py         ├─ climate_schedule.py (ScheduleMixin)
-                                    ├─ climate_summer.py (SummerMixin)
+parameters.py → preheat.py          ├─ climate_summer.py (SummerMixin)
                                     ├─ climate_activity.py (ActivityMixin)
+                                    ├─ climate_preheat.py (PreheatMixin)
                                     └─ __init__.py (coordinator), config_flow.py
 ```
 
 Build new logic in the HA-free modules first (`parameters.py`,
-`regulation.py`, `autotune.py`, `climate_controllers.py`, `activity.py`),
-then wire it into the HA modules.
+`regulation.py`, `autotune.py`, `climate_controllers.py`, `activity.py`,
+`preheat.py`), then wire it into the HA modules.
 
 ### Key files
 
@@ -84,6 +85,16 @@ then wire it into the HA modules.
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
   manual overrides that expire.
 - `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
+- `preheat.py`: preheat on the way home, HA-free (see "Preheat on the way
+  home" below): `PreheatController` (the decision per evaluation, the
+  heading-home latch, persistence), `RecoveryLearner` (the 30-minute
+  recovery), `describe` (the log line for a change of decision),
+  `TIMING_OPTIONS` / `config_from_options` (the settings), and the Home
+  ETA parsers. `PreheatConfig` / `RecoveryConfig` are in `parameters.py`.
+- `climate_preheat.py`: preheat on the entity (`PreheatMixin`): the inputs
+  (`_preheat_inputs`, `_preheat_scheduled_c`), the evaluation at the start
+  of every cycle and on a Home ETA change, the Away held cold, the learner's
+  feed, persistence (`preheat`), the attributes and sensors' values.
 - `climate_activity.py`: the room's activity log on the entity: a decision
   line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
   verdicts, the sensor's state and attributes, persistence (`activity`).
@@ -91,7 +102,8 @@ then wire it into the HA modules.
   override remaining, auto-tune sensors, and the regulation trace (command to
   the valve, room error as measurement sensors — long-term statistics outlive
   the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
-  an enum), and the activity log (`RoomstatActivitySensor`).
+  an enum), the activity log (`RoomstatActivitySensor`), and preheat's
+  decision (`preheat`, an enum) and 30-minute recovery (`preheat_recovery`).
   `button.py`: resume schedule, reset auto-tune.
   `binary_sensor.py`: sensor degraded, out of band.
 - `config_flow.py`: setup and the options flow (sections).
@@ -719,7 +731,9 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   started too, and coming home restores the schedule's preset (else the
   pre-away state). **Resume schedule** while nobody is home does the same.
   Both apply the base quietly (`_apply_quietly`) before the away action, so
-  no heat call is sent and taken back. Once the sensor reads home again (home
+  no heat call is sent and taken back. For preheat (2.11.0) the two differ:
+  Away holds the room cold, Resume schedule is back to automatic (see
+  "Preheat on the way home"). Once the sensor reads home again (home
   delay running), Away is an ordinary Away picked by someone at home. Not
   changes by hand: the schedule, Off → Heat (it resumes the schedule), Heat
   when already heating (the heating scripts send it before the preset; it
@@ -761,6 +775,154 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   (`presence_override_active`, `presence_override_until`); while nobody is
   home the Schedule button is not shown as active (pressing it goes back to
   Away). `tests/test_card_status.py` runs the card's `roomState` in Node.
+
+## Preheat on the way home
+
+Read this before changing `preheat.py`, `climate_preheat.py` or the presence
+paths that call it.  The plan, its evidence and the owner's decisions:
+project doc `claude/roomstat-preheat-wiring-plan-2026-10-24.md`.
+
+- **Shadow only (2.11.0, owner's decision, 27 Oct 2026: gather data first,
+  never action the heating requests).** Modes `off` / `shadow`
+  (`preheat_mode`, default off). The decision is worked out, shown and
+  logged; nothing in `climate_preheat.py` touches `_effective_setpoint`, the
+  setpoint or a command, and `tests/test_preheat_entity.py` proves shadow
+  sends exactly what off sends over a whole outing. Switching it on later
+  means: the effective setpoint while away mode is in charge is the
+  decision's `target_c` (evaluated before step 3 of the cycle, which it
+  already is), a new mode `on`, and the card's status line; nothing else
+  in the rule changes.
+- **Inputs** (`_preheat_inputs`), from Home ETA (igiannakas/ha-home-eta 2.3.0):
+  the first expected arrival (`sensor.home_eta_expected_home`, a timestamp;
+  unknown while nobody is heading home), someone close to home
+  (`binary_sensor.home_eta_someone_close_to_home`: home or within 800 m) and
+  someone nearby (`binary_sensor.home_eta_someone_nearby`: within each
+  person's near-home radius, 3 km here). Home ETA's group sensors are
+  unknown while a member could change the answer; unknown and anything but
+  on / off count as no (`parse_on_off`), an arrival without a UTC offset as
+  none (`parse_arrival`). From the room: away mode in charge
+  (`_preheat_inactive_reason`: summer, off, no presence sensor, a change by
+  hand, someone home, a window open — `_window_open`, the sensor too),
+  the target coming home would restore (`_preheat_scheduled_c`, mirroring
+  `_restore_presence_state` and `_effective_setpoint`: the saved preset,
+  Boost replaced by the schedule's, Comfort at its option; a test checks it
+  against the restore), the room reading, the auto-tuner's heating rate and
+  dead time (`Autotuner.heatup_model`, only while auto-tune is on), the
+  learned 30-minute recovery.
+- **The rule** (`PreheatController.evaluate`, every regulation cycle at its
+  start — so the cycle's own state write carries it — and on every change
+  of a Home ETA entity):
+  - not in charge → `inactive`. Someone home, no presence sensor or none of
+    the three entities set (`no_home_eta`) end the trip home too (everything
+    reset, `_ENDS_THE_TRIP`); any other reason — a window, a change by hand,
+    switched off, summer, nothing warmer than Away to restore (a schedule at
+    Away or Frost protection) — and an Away held cold (`held_cold`, Away)
+    only stand preheat aside (`_stand_aside`: no latch, no level) and keep
+    the trip's start, its cap and its arrival's missing time, so a short
+    break can't re-arm the cap (review finding: a window opened and shut
+    after the cap gave 4 more hours of "due"). The decision's key includes
+    the reason, so the sensor shows it; the thermostat's
+    `preheat_inactive_reason` is live;
+  - close → the restore target (`close`); nearby → the **30-minute
+    temperature** `floor_tenth(restore − recovery)`, never below Away
+    (`nearby`; the owner, 25 Oct 2026: aim for 30 min, not aggressively, up
+    to 45 is fine, hence the median and the rounding down: the study 19.4,
+    not 19.9); otherwise Away (`waiting`). The level is the warmest wanted
+    at any time in the last `fall_delay_s` (`_level_now`, the wanted levels
+    with their times): a rise at once, a drop only once nothing warmer was
+    wanted for the whole delay — on the level, not the temperature, so a
+    schedule change while away applies at once (review finding: counting
+    from the first drop let close → none → nearby within seconds read
+    close, waiting, nearby);
+  - heading home: due once `now >= arrival − needed`, `needed = dead time
+    + max(0, restore − room) / (rate_factor × rate) + lead` (`due`, the
+    restore target). An arrival in the past counts as now; one more than 12 h
+    ahead is ignored (and counts as missing). It ends when the arrival has
+    been missing for `arrival_grace_s` (the trip is over: `arrival_lost`;
+    counted through breaks too), `cap_s` after the trip's first start (`cap`;
+    slips, restarts and breaks can't stretch it; no new start until that
+    trip is over, `capped`), or when
+    the arrival is more than `slip_s` later than the one it started for and
+    the room is not due for the new one (`slipped`: no waste, owner's
+    decision; due again later starts it again). "Not due" alone never ends
+    it: a room that warmed up needs less time and would stop ahead of
+    schedule. With no room reading nothing new starts; a started one
+    carries on (a slip still ends it);
+  - the target is the restore target while due, else the level's.
+- **Evidence for the heat-up time** (Step 1, 25 Oct 2026, 37 heat-ups
+  18–25 Oct, four rooms, today's learned rates 2.52 / 1.75 / 1.80 / 2.41
+  °C/h and dead times 22.3 / 12.7 / 10.2 / 27.9 min): with 0.8 and 5 min,
+  34 (92 %) would have started early enough (to within 0.3 °C), typically
+  24 min early (−24 … +69). The three late: the living room on 24 and 25
+  Oct at 06:00 (within 0.4 °C at 51–53 min of the 81–84 allowed, then heat
+  → coast at 19.2–19.4 and a crawl to 19.7: a regulation question), and
+  the master bedroom right after airing to 15.8 °C. 1.0 starts rooms 4–8 min
+  later (median) and makes three more late. The study starts about 30 min
+  early whatever the deficit: its learned dead time alone is most of it
+  (watch in the shadow week).
+- **The 30-minute recovery** (`RecoveryLearner`, fed by every regulated
+  cycle after the regulator, whatever the mode; every other cycle — off,
+  summer, no data, the room sensor lost, an error — feeds it an unusable
+  one from `_async_regulation_cycle`'s `finally`, `_recovery_fed`): an
+  episode starts on a target rise ≥ 0.5 °C that leaves the room ≥ 0.5 °C
+  below, not within 30 min of a window; it is dropped when the target
+  changes, a window opens, a cycle is unusable (no fresh reading — a bridged
+  one counts as none —, Boost, off, summer), cycles stop for more than 10
+  min, or the room comes within `reach_c` (0.1 °C) of the target by its 30
+  min (review finding: its rise is capped by the deficit, so it would
+  understate the room and make the nearby target too warm); at 30 min
+  (interpolated) the rise is kept, the median of the last 10 is used once
+  there are 2 (as the auto-tuner's dead time).
+  Heat or hold alike: from a 30-minute temperature a room is 0.4–0.8 °C
+  short, either side of `heatup_enter_c`. Measured 18–25 Oct: living room
+  0.60–0.95 (median 0.77), master 0.30–0.57 (0.43), second 0.50–0.56 (0.54),
+  study 0.43–0.65 (0.58); `tests/test_preheat.py` replays four mornings.
+- **Away picked by hand while nobody is home holds the room cold**
+  (`_preheat_hold_cold`, from `_async_presence_back_to_away`: owner,
+  25 Oct 2026, "an explicit Away must not be second-guessed"): no preheat of
+  any kind until someone is home (released quietly in
+  `_restore_presence_state`, whose window branch runs no cycle, and by the
+  invariant in `_preheat_expire_cold`: held cold only exists while
+  `nobody_home`),
+  Resume schedule (`async_resume_schedule`; it decides again after the
+  schedule's preset is saved for the return), a change by hand
+  (`_presence_takeover`, the 2.9.0 takeover; Off and Heat by hand are not
+  one), or `presence_override_max_min`
+  after the pick (each pick restarts it; 0 = until home; checked at each
+  evaluation, so one that ran out while HA was down ends at the first).
+  Unlike the 2.9.0 limit, its end is always back to automatic. An Away
+  picked at home is not carried: the away action turns it into away mode,
+  as before (owner's choice (c), 25 Oct 2026).
+- **Shown and logged:** a line per change of decision (`decision.key`: the
+  state and the target to 0.1 °C) through `self._log(_LOGGER)` with the
+  prefix `preheat (shadow)`, worded by `describe` (what it would heat to,
+  why, the heat-up time's parts, why a heading-home start ended); off to
+  inactive and inactive to inactive say nothing. The Preheat sensor's state
+  and attributes are the decision last logged (`LoggedDecision`, fixed until
+  the next, one recorder row per decision); the live numbers are the
+  thermostat's `preheat_*` attributes, unrecorded
+  (`PREHEAT_LIVE_ATTRIBUTES`: the climate entity writes a row every cycle,
+  and ten more attributes on it were about 2 MB a day for four rooms). A
+  learned recovery is an event line too.
+- **Never stops the regulation:** the evaluation, the learner (with their
+  log lines and state writes) and the restore catch everything (logged once
+  per distinct error, with the traceback; a save that can't be taken back
+  starts preheat afresh).
+- **Persistence** (`preheat` in the restore-state extra data): the
+  controller (latch, the arrival it started for, the trip's start and cap,
+  the level and its pending drop, the arrival's missing time), the learner,
+  the Away held cold and the decision last logged (a reload, which every
+  preset temperature change causes, writes no second line). Times from the
+  future count as now.
+- **Settings** (`TIMING_OPTIONS`, section "Preheat timing"; each one's help
+  text is in `strings.json`, the README explains them too): lead 5 min,
+  heating rate factor 0.8, arrival slip 20 min, longest preheat 240 min,
+  level drop delay 10 min, arrival lost grace 10 min, default 30-minute
+  recovery 0.5 °C, default heating rate 1.0 °C/h and start-up delay 20 min
+  (until auto-tune has learned them; slow on purpose). Out-of-range or
+  non-numeric values keep the default (`config_from_options`). The three
+  entities join the entity-gone repairs (warnings) while preheat is not off
+  (`PREHEAT_ROLES`).
 
 ## Auto-tune
 
@@ -886,6 +1048,9 @@ ruff check .
   `test_summer_mode.py`, `test_schedule.py`, `test_autotune_climate.py`,
   `test_fail_cold_entity.py`) and the binary sensors. It needs Python ≥ 3.11
   (`asyncio.timeout`); CI uses 3.12.
+- `tests/test_preheat.py` (the rule, the learner, the log lines, HA-free)
+  and `tests/test_preheat_entity.py` (through the entity: shadow sends what
+  off sends, an outing line by line, the Away held cold, restarts).
 - `tests/plant_sim.py` models timer overlays (`ProxySettings.heat_timer_s`,
   `PlantParams.tado_schedule_c`: 5 °C, or None for Off) and
   `RoomSim.kill()` (the proxy stops, the room and valve carry on); the

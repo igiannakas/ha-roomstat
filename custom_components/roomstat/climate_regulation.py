@@ -319,7 +319,15 @@ class RegulationMixin:
     async def _async_regulation_cycle(self, trigger: str) -> None:
         """Execute one control cycle."""
         async with self._regulation_lock:
-            await self._async_regulation_cycle_locked(trigger)
+            self._recovery_fed = False
+            try:
+                await self._async_regulation_cycle_locked(trigger)
+            finally:
+                # A cycle that did not regulate (off, summer, no data, the
+                # room sensor lost, an error) is no part of a heat-up: the
+                # 30-minute recovery being measured is dropped.
+                if not self._recovery_fed:
+                    self._preheat_learn(time.time(), None, None)
 
     async def _async_regulation_cycle_locked(self, trigger: str) -> None:
         """Inner regulation cycle body, protected by _regulation_lock."""
@@ -344,6 +352,11 @@ class RegulationMixin:
             self._last_heat_command_ts = None
         if self._off_confirm_ts is not None and self._off_confirm_ts - OFF_CONFIRM_S > now:
             self._off_confirm_ts = now
+
+        # Preheat on the way home: what the room would aim for while nobody
+        # is home (shadow: only shown and logged, never sent; it never
+        # raises).  First, so this cycle's state write carries it.
+        self._preheat_evaluate(now)
 
         # Summer mode: no regulation, hold the TRV off.  The lock
         # is this cycle's decision (the watchdog counts it as completed).
@@ -507,6 +520,10 @@ class RegulationMixin:
         )
         self._reg_state = result.new_state
         self._last_result = result
+
+        # 4b. The 30-minute recovery preheat uses (learned whatever its mode;
+        # it never raises).
+        self._preheat_learn(now, setpoint, room_temp)
 
         # 5-6. Send decision and command
         await self._async_decide_and_send(

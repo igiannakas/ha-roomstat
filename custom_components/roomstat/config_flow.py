@@ -27,6 +27,10 @@ from .const import (
     CONF_NAME,
     CONF_OVERLAY_REFRESH_S,
     CONF_PREFER_FALLBACK,
+    CONF_PREHEAT_ARRIVAL_ENTITY_ID,
+    CONF_PREHEAT_CLOSE_ENTITY_ID,
+    CONF_PREHEAT_MODE,
+    CONF_PREHEAT_NEARBY_ENTITY_ID,
     CONF_PRESENCE_AWAY_DELAY_S,
     CONF_PRESENCE_HOME_DELAY_S,
     CONF_PRESENCE_OVERRIDE_MAX_MIN,
@@ -49,6 +53,7 @@ from .parameters import (
     OutOfBandConfig,
     RegulationConfig,
 )
+from .preheat import MODE_OFF, MODES, TIMING_OPTIONS
 
 
 class RoomstatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -128,6 +133,9 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 CONF_SUMMER_MODE_ENTITY_ID,
                 CONF_SCHEDULE_ENTITY_ID,
                 CONF_FALLBACK_ENTITY_ID,
+                CONF_PREHEAT_ARRIVAL_ENTITY_ID,
+                CONF_PREHEAT_CLOSE_ENTITY_ID,
+                CONF_PREHEAT_NEARBY_ENTITY_ID,
             ):
                 if key not in cleaned:
                     merged.pop(key, None)
@@ -280,6 +288,61 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 schedule_section_schema, {CONF_SCHEDULE_ENTITY_ID: schedule_entity}
             )
 
+        # --- Build preheat sections ---
+        # Preheat on the way home (preheat.py): the mode and the three Home
+        # ETA entities it reads, then every number of its rule.
+        preheat_mode = opts.get(CONF_PREHEAT_MODE, MODE_OFF)
+        preheat_section_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_PREHEAT_MODE,
+                    default=preheat_mode if preheat_mode in MODES else MODE_OFF,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(MODES),
+                        translation_key=CONF_PREHEAT_MODE,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_PREHEAT_ARRIVAL_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", device_class="timestamp")
+                ),
+                vol.Optional(CONF_PREHEAT_CLOSE_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor")
+                ),
+                vol.Optional(CONF_PREHEAT_NEARBY_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor")
+                ),
+            }
+        )
+        preheat_suggested = {
+            key: opts[key]
+            for key in (
+                CONF_PREHEAT_ARRIVAL_ENTITY_ID,
+                CONF_PREHEAT_CLOSE_ENTITY_ID,
+                CONF_PREHEAT_NEARBY_ENTITY_ID,
+            )
+            if opts.get(key)
+        }
+        if preheat_suggested:
+            preheat_section_schema = self.add_suggested_values_to_schema(
+                preheat_section_schema, preheat_suggested
+            )
+        preheat_timing_schema = vol.Schema(
+            {
+                vol.Required(
+                    spec.key, default=opts.get(spec.key, spec.default)
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=spec.minimum, max=spec.maximum, step=spec.step,
+                        mode=selector.NumberSelectorMode.BOX,
+                        **({"unit_of_measurement": spec.unit} if spec.unit else {}),
+                    )
+                )
+                for spec in TIMING_OPTIONS
+            }
+        )
+
         # --- Build TRV communication section schema ---
         source_entity = data.get(CONF_SOURCE_ENTITY_ID)
         trv_section_schema = vol.Schema(
@@ -401,6 +464,18 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 # Section: Schedule
                 vol.Required("schedule"): section(
                     schedule_section_schema,
+                    {"collapsed": True},
+                ),
+
+                # Section: Preheat on the way home
+                vol.Required("preheat"): section(
+                    preheat_section_schema,
+                    {"collapsed": True},
+                ),
+
+                # Section: Preheat timing (every number of its rule)
+                vol.Required("preheat_timing"): section(
+                    preheat_timing_schema,
                     {"collapsed": True},
                 ),
 

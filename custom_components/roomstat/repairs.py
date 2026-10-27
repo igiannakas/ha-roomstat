@@ -38,6 +38,10 @@ from .climate_controllers import (
 from .const import (
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
+    CONF_PREHEAT_ARRIVAL_ENTITY_ID,
+    CONF_PREHEAT_CLOSE_ENTITY_ID,
+    CONF_PREHEAT_MODE,
+    CONF_PREHEAT_NEARBY_ENTITY_ID,
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SOURCE_ENTITY_ID,
@@ -70,14 +74,26 @@ ROLES: tuple[EntityRole, ...] = (
     EntityRole(CONF_PRESENCE_SENSOR_ID, ("binary_sensor", "input_boolean")),
     EntityRole(CONF_SUMMER_MODE_ENTITY_ID, ("input_boolean", "binary_sensor")),
     EntityRole(CONF_SCHEDULE_ENTITY_ID, ("input_select", "select")),
+    # Preheat's Home ETA entities: the first expected arrival, someone close
+    # to home, someone nearby.
+    EntityRole(CONF_PREHEAT_ARRIVAL_ENTITY_ID, ("sensor",), device_class="timestamp"),
+    EntityRole(CONF_PREHEAT_CLOSE_ENTITY_ID, ("binary_sensor",)),
+    EntityRole(CONF_PREHEAT_NEARBY_ENTITY_ID, ("binary_sensor",)),
 )
 ROLE_BY_KEY = {role.key: role for role in ROLES}
+# Read only while preheat is on (shadow): not watched while it is off.
+PREHEAT_ROLES = frozenset({
+    CONF_PREHEAT_ARRIVAL_ENTITY_ID, CONF_PREHEAT_CLOSE_ENTITY_ID, CONF_PREHEAT_NEARBY_ENTITY_ID,
+})
 
 
 def configured_entities(entry: ConfigEntry) -> dict[str, str]:
     """Setting key -> entity id, for every entity setting in use."""
     out: dict[str, str] = {}
+    preheat_off = entry.options.get(CONF_PREHEAT_MODE, "off") == "off"
     for role in ROLES:
+        if preheat_off and role.key in PREHEAT_ROLES:
+            continue
         if role.in_data:
             entity_id = entry.data.get(role.key)
         else:

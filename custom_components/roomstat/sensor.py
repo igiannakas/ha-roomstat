@@ -9,7 +9,10 @@
   so their 5-minute statistics outlive the recorder's purge and a season of
   behaviour can be analysed after the fact; the mode is an enum;
 * the activity log: what the room is doing and why, in plain lines
-  (activity.py, climate_activity.py).
+  (activity.py, climate_activity.py);
+* preheat on the way home (climate_preheat.py): the decision last made
+  (state and what it was made with, one recorder row per decision) and the
+  room's learned 30-minute recovery.
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .autotune import STATUSES
 from .const import DOMAIN
+from .preheat import STATES as PREHEAT_STATES
 from .regulation import MODES
 
 
@@ -176,6 +180,28 @@ TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_regulation("mode"),
     ),
+    # Preheat on the way home: the decision last made.  Its attributes are
+    # what it was made with, fixed until the next decision.
+    TuningSensorDescription(
+        key="preheat",
+        translation_key="preheat",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(PREHEAT_STATES),
+        value_fn=lambda c: c.preheat_sensor_state,
+        attrs_fn=lambda c: c.preheat_sensor_attributes(),
+    ),
+    # How much the room recovers in the first 30 min of heating (learned
+    # whatever preheat's mode; unknown until two heat-ups are seen).
+    TuningSensorDescription(
+        key="preheat_recovery",
+        translation_key="preheat_recovery",
+        native_unit_of_measurement="°C",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: c.preheat_recovery_c,
+        attrs_fn=lambda c: c.preheat_recovery_attributes(),
+    ),
     TuningSensorDescription(
         key="autotune_last_overshoot",
         translation_key="autotune_last_overshoot",
@@ -205,6 +231,10 @@ async def async_setup_entry(
     tuning = [RoomstatTuningSensor(coordinator, entry, d) for d in TUNING_SENSORS]
     # Written by the regulation cycle so a tuning change shows immediately.
     coordinator.tuning_entities = tuning
+    # Written at once when preheat's decision changes.
+    coordinator.preheat_entity = next(
+        t for t in tuning if t.entity_description.key == "preheat"
+    )
     activity = RoomstatActivitySensor(coordinator, entry)
     # Written by every cycle and every event (climate_activity.py).
     coordinator.activity_entity = activity

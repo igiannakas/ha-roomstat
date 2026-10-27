@@ -60,6 +60,7 @@ from .climate_controllers import (
     resolve_boost_restore,
     window_startup_action,
 )
+from .climate_preheat import PREHEAT_LIVE_ATTRIBUTES, PreheatMixin
 from .climate_presets import PresetMixin
 from .climate_regulation import RegulationMixin
 from .climate_schedule import ScheduleMixin
@@ -127,9 +128,11 @@ class _AutomationExtraData(ExtraStoredData):
     (CommandRecord: a reload seconds after a command must not forget it),
     the room slope's recent samples under ``slope`` (a restart in the
     middle of a heat-up must not blind its predicted stop), and the activity
-    log's lines under ``activity`` (a reload must not empty it), and the
+    log's lines under ``activity`` (a reload must not empty it), the
     last change by hand under ``manual_change_ts`` (a preset temperature
-    change reloads the room; it still settles before it adds heat).
+    change reloads the room; it still settles before it adds heat), and
+    preheat's state under ``preheat`` (a heading-home start, an Away held
+    cold, the learned 30-minute recovery, the decision last logged).
     """
 
     def __init__(
@@ -141,6 +144,7 @@ class _AutomationExtraData(ExtraStoredData):
         slope: dict[str, Any] | None = None,
         activity: dict[str, Any] | None = None,
         manual_change_ts: float | None = None,
+        preheat: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
@@ -149,6 +153,7 @@ class _AutomationExtraData(ExtraStoredData):
         self._slope = slope
         self._activity = activity
         self._manual_change_ts = manual_change_ts
+        self._preheat = preheat
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -165,6 +170,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["activity"] = self._activity
         if self._manual_change_ts:
             data["manual_change_ts"] = self._manual_change_ts
+        if self._preheat is not None:
+            data["preheat"] = self._preheat
         return data
 
 
@@ -186,6 +193,7 @@ async def async_setup_entry(
 
 class RoomstatClimate(
     ActivityMixin,
+    PreheatMixin,
     RegulationMixin,
     PresetMixin,
     ScheduleMixin,
@@ -198,8 +206,9 @@ class RoomstatClimate(
 
     _attr_has_entity_name = True
     # The live activity line changes every cycle; the activity sensor's
-    # history already keeps the lines.
-    _unrecorded_attributes = frozenset({"activity"})
+    # history already keeps the lines.  Likewise preheat's live numbers:
+    # the Preheat sensor records each decision with what it was made with.
+    _unrecorded_attributes = frozenset({"activity", *PREHEAT_LIVE_ATTRIBUTES})
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_TENTHS
     _attr_supported_features = (
@@ -258,6 +267,8 @@ class RoomstatClimate(
         self._slope = SlopeEstimator()
         # The activity log (climate_activity.py): set up before anything logs.
         self._activity_setup()
+        # Preheat on the way home (climate_preheat.py, shadow only).
+        self._preheat_setup()
         # Set if the tuner ever raises: it is then ignored until restart.
         self._autotune_failed = False
         self._apply_active_tuning()
@@ -547,6 +558,9 @@ class RoomstatClimate(
                 # A change by hand a few seconds ago (a preset temperature
                 # changed: it reloads the room) still settles.
                 self._restore_change_by_hand(extra_dict.get("manual_change_ts"), now)
+                # Preheat: a heading-home start, an Away held cold, the
+                # 30-minute recovery and the decision last logged.
+                self._preheat_restore(extra_dict.get("preheat"), now)
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
                 if self._slope.restore(extra_dict.get("slope"), now):
@@ -707,6 +721,16 @@ class RoomstatClimate(
                     self._async_schedule_changed,
                 )
             )
+        # Preheat's Home ETA entities (none while preheat is off).
+        preheat_entities = self._preheat_entity_ids()
+        if preheat_entities:
+            self.async_on_remove(
+                async_track_state_change_event(
+                    self.hass,
+                    preheat_entities,
+                    self._async_preheat_input_changed,
+                )
+            )
 
         # Reconcile presence first: if it restores while window mode is still
         # active, it updates the window's saved state (see
@@ -852,6 +876,7 @@ class RoomstatClimate(
             self._slope.to_dict(),
             self._activity.as_dict(),
             self._manual_change_ts,
+            self._preheat_as_dict(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -1210,6 +1235,8 @@ class RoomstatClimate(
             "boost_duration_min": self._config.presets.boost_duration_min,
             "source_entity_id": self._config_entry.data.get("source_entity_id"),
             **self._schedule_attributes(),
+            # Preheat on the way home (shadow: what it would do).
+            **self._preheat_attributes(),
         }
 
         # Sensor resilience diagnostics
