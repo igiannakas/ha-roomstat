@@ -52,6 +52,11 @@ _CASES = [
     ({"preset_mode": "boost", "presence_override_active": True,
       "presence_override_until": None},
      "Nobody home · Boost · until home", "mdi:hand-back-right", False),
+    # An Off picked by hand while out, or on when everyone left (2.12.0).
+    ({"preset_mode": "frost_protection", "presence_override_active": True,
+      "presence_override_until": None, "schedule_preset": "comfort",
+      "schedule_override_active": True},
+     "Nobody home · Off · until home", "mdi:hand-back-right", False),
     # Just past its end: the integration is about to take it back.
     ({"preset_mode": "comfort", "presence_override_active": True,
       "presence_override_until": -30},

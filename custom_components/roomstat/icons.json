@@ -94,7 +94,6 @@
           "due": "mdi:home-import-outline",
           "close": "mdi:home-circle-outline",
           "nearby": "mdi:map-marker-radius-outline",
-          "held_cold": "mdi:snowflake-thermometer",
           "waiting": "mdi:home-export-outline",
           "inactive": "mdi:home-thermometer-outline",
           "off": "mdi:power"

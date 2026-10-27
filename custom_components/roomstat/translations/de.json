@@ -68,7 +68,7 @@
               "presence_sensor_id": "Binärsensor oder Input-Boolean zur Präsenzerkennung (an = zu Hause, aus = abwesend). Wechselt beim Ausschalten in den Abwesend-Modus.",
               "presence_away_delay_s": "Verzögerung bevor in den Abwesend-Modus gewechselt wird.",
               "presence_home_delay_s": "Verzögerung bevor nach erkannter Präsenz der vorherige Modus zurückkehrt.",
-              "presence_override_max_min": "Eine Temperatur oder ein Modus, die du bei Abwesenheit von Hand einstellst, gilt sofort und bleibt, bis jemand zu Hause ist, höchstens aber so lange; danach kehrt der Raum in den Abwesend-Modus zurück. Abwesend oder Zeitplan fortsetzen beendet sie früher. Abwesend, bei Abwesenheit von Hand gewählt, hält den Raum so lange kalt (kein Vorheizen auf dem Heimweg), sofern du den Zeitplan nicht fortsetzt oder einen anderen Modus oder eine Temperatur wählst (Aus- und wieder Einschalten zählt nicht). 0 = bis jemand zu Hause ist."
+              "presence_override_max_min": "Eine Temperatur oder ein Modus, die du bei Abwesenheit von Hand einstellst, gilt sofort und bleibt, bis jemand zu Hause ist, höchstens aber so lange; danach kehrt der Raum in den Abwesend-Modus zurück. Aus (Frostschutz) ist die Ausnahme: bei Abwesenheit gewählt oder beim Verlassen eingestellt, gilt es ohne Begrenzung und endet, wenn jemand nach Hause kommt; dann gilt wieder der Zeitplan. Abwesend oder Zeitplan fortsetzen bei Abwesenheit kehrt sofort zur Automatik zurück: Abwesend, Vorheizen auf dem Heimweg und der Zeitplan bei der Rückkehr. 0 = bis jemand zu Hause ist."
             }
           },
           "schedule": {
@@ -320,7 +320,6 @@
         "state": {
           "off": "Aus",
           "inactive": "Nicht zuständig",
-          "held_cold": "Kalt gehalten (Abwesend von Hand)",
           "waiting": "Abwesend",
           "nearby": "Jemand in der Nähe",
           "close": "Jemand nah",

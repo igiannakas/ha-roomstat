@@ -4,13 +4,12 @@ Shadow only (2.11.0): the decision is worked out, shown and logged, and the
 room stays at Away.  Under test:
 - shadow sends exactly the commands preheat off sends;
 - an outing: close, nearby, Away, heading home, home, each one log line;
-- Away picked by hand while nobody is home holds the room cold until someone
-  is home, Resume schedule, a change by hand or the "change while away
-  lasts" limit after the pick; an Away picked at home is not carried into
-  the absence;
+- Away or Resume schedule while nobody is home is back to automatic; an Off
+  picked by hand while out, or on when everyone left, stands preheat aside
+  until someone is home (2.12.0; until 2.11.0 an Away held the room cold);
 - the target coming home would restore follows the schedule, as the restore
   itself does;
-- a restart or reload keeps the heading-home start, the held-cold Away, the
+- a restart or reload keeps the heading-home start, an Off until home, the
   30-minute recovery and the decision last logged;
 - the 30-minute recovery is learned from everyday heat-ups;
 - a failure in preheat never stops the regulation.
@@ -406,126 +405,103 @@ class TestScheduled:
 
 
 # ===========================================================================
-# Away picked by hand while nobody is home
+# Changes by hand while nobody is home (2.12.0, owner, 27 Oct 2026): Away and
+# Resume schedule are back to automatic; an Off holds the room until someone
+# is home
 # ===========================================================================
 
-class TestHeldCold:
-    def _held(self, monkeypatch, **opts):
+class TestByHandWhileOut:
+    def _out(self, monkeypatch, **opts):
         clock = _Clock(monkeypatch)
         ent = _entity(**opts)
         _leave(ent)
         _cycle(ent)
         assert _state(ent) == "close"
         clock.tick(MIN)
-        _preset(ent, "away")
-        assert _state(ent) == "held_cold"
         return ent, clock
 
-    def test_holds_cold_against_everything(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
-        until = clock.now + 240 * MIN
-        assert ent.extra_state_attributes["preheat_held_cold_until"] == _iso(until)
-        assert _lines(ent)[-1] == (
-            "Preheat (shadow): Away picked by hand: the room stays at Away 16.0 °C "
-            f"with no preheat until someone is home, Resume schedule or "
-            f"{_climate_hhmm(until, clock.now)}"
-        )
-        _set(ent, ARRIVAL, _iso(clock.now + 5 * MIN))
+    @pytest.mark.parametrize("back", ["away", "schedule"])
+    def test_away_or_resume_while_out_is_automatic(self, monkeypatch, back):
+        ent, clock = self._out(monkeypatch)
+        _preset(ent, "comfort")                    # a change by hand
+        assert _state(ent) == "inactive"
+        assert _lines(ent)[-1] == "Preheat (shadow): stands aside: a change by hand is in charge"
         clock.tick(MIN)
-        _cycle(ent)
-        assert _state(ent) == "held_cold"
-        assert ent.extra_state_attributes["preheat_target_c"] == 16.0
-
-    def test_the_limit_counts_from_the_pick(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
-        clock.tick(240 * MIN - 1)
-        _cycle(ent)
-        assert _state(ent) == "held_cold"
-        clock.tick(1)
-        _cycle(ent)
+        _preset(ent, back)
+        assert ent.preset_mode == "away" and ent._presence_ctrl.is_active
+        assert not ent._presence_ctrl.override_active
         assert _state(ent) == "close"
-        assert _lines(ent)[-2] == (
-            "Preheat (shadow): back to automatic, the Away picked by hand has lasted "
-            "its 240 min"
+        # Nothing holds it: an arrival due now is preheated at once.
+        _set(ent, CLOSE, "off")
+        _set(ent, NEARBY, "off")
+        _feed(ent, 18.0)
+        clock.tick(11 * MIN)
+        _set(ent, ARRIVAL, _iso(clock.now + 20 * MIN))
+        assert _state(ent) == "due"
+
+    @pytest.mark.parametrize("back", ["away", "schedule"])
+    def test_already_in_away_mode_it_stays_automatic(self, monkeypatch, back):
+        ent, clock = self._out(monkeypatch)
+        _preset(ent, back)
+        assert ent.preset_mode == "away" and _state(ent) == "close"
+        assert ent._presence_ctrl.get_saved().preset == "comfort"
+        assert "held_cold" not in ent.extra_state_attributes.get("preheat_state", "")
+
+    def test_an_off_while_out_stands_it_aside_until_home(self, monkeypatch):
+        ent, clock = self._out(monkeypatch)
+        _preset(ent, "frost_protection")
+        assert ent._presence_ctrl.off_until_home
+        assert _state(ent) == "inactive"
+        assert ent.extra_state_attributes["preheat_inactive_reason"] == "off_by_hand"
+        assert _lines(ent)[-1] == (
+            "Preheat (shadow): stands aside: an Off picked by hand holds the room "
+            "until someone is home"
         )
-        assert ent.extra_state_attributes["preheat_held_cold"] is False
-
-    def test_picking_away_again_restarts_the_limit(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
-        clock.tick(200 * MIN)
-        _preset(ent, "away")
-        clock.tick(100 * MIN)
-        _cycle(ent)
-        assert _state(ent) == "held_cold"
-
-    def test_zero_limit_lasts_until_home(self, monkeypatch):
-        ent, clock = self._held(monkeypatch, options={"presence_override_max_min": 0})
-        assert ent.extra_state_attributes["preheat_held_cold_until"] is None
-        assert _lines(ent)[-1].endswith("until someone is home or Resume schedule")
+        # Home ETA can say what it likes, and no limit ends it.
+        _set(ent, ARRIVAL, _iso(clock.now + 5 * MIN))
         clock.tick(24 * 3600)
         _cycle(ent)
-        assert _state(ent) == "held_cold"
+        assert _state(ent) == "inactive" and ent.preset_mode == "frost_protection"
+        # Away is back to automatic: due at once.
+        _set(ent, ARRIVAL, _iso(clock.now + 5 * MIN))
+        _preset(ent, "away")
+        assert _state(ent) == "due"
 
-    def test_resume_schedule_is_back_to_automatic(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
+    def test_an_off_on_when_everyone_left_stands_it_aside(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        _preset(ent, "frost_protection")           # 08:48, at home
         clock.tick(MIN)
+        ent.hass.set(PRESENCE, "off")
+        ent._async_presence_changed(_event("off"))
+        _fire(ent, "_async_presence_away_action")  # everyone left
+        assert ent.preset_mode == "frost_protection"
+        _cycle(ent)
+        assert ent.extra_state_attributes["preheat_inactive_reason"] == "off_by_hand"
+        # Resume schedule from the card: automatic.
         _preset(ent, "schedule")
-        assert _state(ent) == "close"
-        assert _lines(ent)[-2:] == [
-            "Preheat (shadow): back to automatic, Resume schedule",
-            "Preheat (shadow): someone is close to home: it would heat to 20.5 °C, "
-            "the temperature coming home restores",
-        ]
-        assert ent.preset_mode == "away" and ent._presence_ctrl.is_active
-
-    def test_a_change_by_hand_replaces_it(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
-        clock.tick(MIN)
-        _preset(ent, "comfort")
-        assert ent._presence_ctrl.override_active
-        assert _state(ent) == "inactive"
-        assert _lines(ent)[-2:] == [
-            "Preheat (shadow): back to automatic, a change by hand replaces the Away "
-            "picked by hand",
-            "Preheat (shadow): stands aside: a change by hand is in charge",
-        ]
-        # The change's own limit ends it: back to away mode, automatic.
-        _fire(ent, "_async_presence_override_expired")
-        assert _state(ent) == "close"
-
-    def test_coming_home_ends_it_quietly(self, monkeypatch):
-        ent, clock = self._held(monkeypatch)
-        clock.tick(MIN)
-        _arrive(ent)
-        clock.tick(MIN)
-        _cycle(ent)
-        assert _state(ent) == "inactive"
-        assert not ent._preheat_held_cold
-        assert _lines(ent)[-1] == "Preheat (shadow): stands aside: someone is home"
-        # Leaving again: automatic.
-        _leave(ent)
-        _cycle(ent)
-        assert _state(ent) == "close"
+        assert ent.preset_mode == "away" and _state(ent) == "close"
 
     def test_an_away_picked_at_home_is_not_carried_into_the_absence(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity()
         _preset(ent, "away")
-        assert not ent._preheat_held_cold
         clock.tick(MIN)
         _leave(ent)
         _cycle(ent)
         assert _state(ent) == "close"
 
-    def test_away_during_the_home_delay_is_an_ordinary_away(self, monkeypatch):
+    def test_an_off_during_the_home_delay_is_an_ordinary_off(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity()
         _leave(ent)
         ent.hass.set(PRESENCE, "on")
         ent._async_presence_changed(_event("on"))
         clock.tick(10)
-        _preset(ent, "away")
-        assert not ent._preheat_held_cold
+        _preset(ent, "frost_protection")
+        assert not ent._presence_ctrl.off_until_home
+        _fire(ent, "_async_presence_home_action")
+        assert ent.preset_mode == "frost_protection"   # picked by someone home
 
 
 # ===========================================================================
@@ -565,24 +541,31 @@ class TestRestart:
         assert len(_lines(new)) == lines
         assert _sensor_of(new).native_value == "due"
 
-    def test_a_held_cold_away_carries_on_and_its_limit_too(self, monkeypatch):
+    def test_an_off_until_home_carries_on(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity()
         _leave(ent)
         _cycle(ent)
-        _preset(ent, "away")
-        picked = clock.now
+        _preset(ent, "frost_protection")
         clock.tick(MIN)
         new = self._again(ent)
         _cycle(new)
-        assert _state(new) == "held_cold"
-        assert new._preheat_cold_until == picked + 240 * MIN
-        # Ran out while Home Assistant was down: ends at the first decision.
-        clock.tick(300 * MIN)
-        newer = self._again(new)
-        _cycle(newer)
-        assert _state(newer) == "close"
-        assert not newer._preheat_held_cold
+        assert new.preset_mode == "frost_protection"
+        assert new._presence_ctrl.off_until_home
+        assert new.extra_state_attributes["preheat_inactive_reason"] == "off_by_hand"
+
+    def test_a_2_11_held_cold_save_is_ignored(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        _leave(ent)
+        _cycle(ent)
+        saved = ent._preheat_as_dict()
+        saved["held_cold"] = {"since": clock.now, "until": clock.now + 240 * MIN}
+        saved["logged"]["state"] = "held_cold"
+        ent._preheat_restore(saved, clock.now)
+        assert ent._preheat_logged is None         # not a state any more
+        _cycle(ent)
+        assert _state(ent) == "close"
 
     def test_the_recovery_carries_on(self, monkeypatch):
         clock = _Clock(monkeypatch)
@@ -799,31 +782,6 @@ class TestReviewFindings:
         _preset(ent, "schedule")
         assert ent.extra_state_attributes["preheat_target_c"] == 20.5
         assert ent.state_writes > writes
-
-    def test_a_held_cold_away_ends_with_the_absence_at_once(self, monkeypatch):
-        """Review finding: home and out again before the next decision kept it."""
-        clock = _Clock(monkeypatch)
-        ent = _entity()
-        _leave(ent)
-        _preset(ent, "away")
-        assert ent._preheat_held_cold
-        ent._restore_presence_state(notify=False)     # e.g. its window branch: no cycle
-        assert not ent._preheat_held_cold
-        clock.tick(MIN)
-        _leave(ent)
-        _cycle(ent)
-        assert _state(ent) == "close"
-
-    def test_away_picked_during_a_change_by_hand_holds_cold(self, monkeypatch):
-        clock = _Clock(monkeypatch)
-        ent = _entity()
-        _leave(ent)
-        _preset(ent, "comfort")
-        assert ent._presence_ctrl.override_active
-        clock.tick(MIN)
-        _preset(ent, "away")
-        assert ent._presence_ctrl.is_active
-        assert _state(ent) == "held_cold"
 
     def test_a_home_eta_change_writes_the_thermostat(self, monkeypatch):
         _Clock(monkeypatch)

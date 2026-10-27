@@ -26,9 +26,11 @@ hand, no window, heating on):
   home (slips, restarts and short breaks for a window or a change by hand
   don't re-arm it).
 - **Otherwise** Away.
-- **Away picked by hand while nobody is home** holds the room cold: no
-  preheat of any kind (the HA layer keeps it for the "change while away
-  lasts" limit).
+- **A change by hand while nobody is home** stands preheat aside: an Off
+  until someone is home (``off_by_hand``), any other change until its limit
+  or until someone is home (``change_by_hand``).  Away or Resume schedule
+  while out is back to automatic, which is where preheat works (the HA layer
+  decides which applies; 2.12.0).
 
 A rise applies at once; a drop to a cooler level only once nothing warmer
 has been wanted for ``fall_delay_s``, so a phone hovering at a boundary
@@ -61,14 +63,12 @@ MODES = (MODE_OFF, MODE_SHADOW)
 # Decisions (the preheat sensor's states).
 STATE_OFF = "off"               # preheat switched off for this room
 STATE_INACTIVE = "inactive"     # away mode is not in charge (someone home, ...)
-STATE_HELD_COLD = "held_cold"   # Away picked by hand while nobody is home
 STATE_WAITING = "waiting"       # nobody close or nearby, nobody due: Away
 STATE_NEARBY = "nearby"         # the 30-minute temperature
 STATE_CLOSE = "close"           # the schedule's temperature
 STATE_DUE = "due"               # heading home, within the heat-up time
 STATES = (
-    STATE_OFF, STATE_INACTIVE, STATE_HELD_COLD, STATE_WAITING,
-    STATE_NEARBY, STATE_CLOSE, STATE_DUE,
+    STATE_OFF, STATE_INACTIVE, STATE_WAITING, STATE_NEARBY, STATE_CLOSE, STATE_DUE,
 )
 
 # Why away mode is not in charge (``PreheatInputs.inactive_reason``).
@@ -77,6 +77,7 @@ INACTIVE_OFF = "switched_off"
 INACTIVE_NO_PRESENCE = "no_presence_sensor"
 INACTIVE_HOME = "someone_home"
 INACTIVE_CHANGE_BY_HAND = "change_by_hand"
+INACTIVE_OFF_BY_HAND = "off_by_hand"          # an Off picked by hand, until home
 INACTIVE_WINDOW = "window"
 INACTIVE_NOTHING_WARMER = "nothing_warmer"   # the schedule's target <= Away
 INACTIVE_NO_INPUTS = "no_home_eta"            # none of the three entities set
@@ -86,6 +87,7 @@ INACTIVE_REASONS = {
     INACTIVE_NO_PRESENCE: "no presence sensor is set",
     INACTIVE_HOME: "someone is home",
     INACTIVE_CHANGE_BY_HAND: "a change by hand is in charge",
+    INACTIVE_OFF_BY_HAND: "an Off picked by hand holds the room until someone is home",
     INACTIVE_WINDOW: "a window is open",
     INACTIVE_NOTHING_WARMER: "coming home would heat no more than Away",
     INACTIVE_NO_INPUTS: "no Home ETA entity is set",
@@ -458,8 +460,6 @@ class PreheatInputs:
     arrival_ts: float | None
     close: bool | None
     nearby: bool | None
-    # Away picked by hand while nobody is home, within its limit.
-    held_cold: bool = False
     # The auto-tuner's learned heating rate and dead time, None if unknown.
     rate_c_per_h: float | None = None
     dead_time_s: float | None = None
@@ -516,10 +516,10 @@ class PreheatDecision:
 
 
 # Not in charge for these reasons ends the trip home too: someone is home,
-# or preheat has nothing to go on.  Any other (a window, a change by hand, the
-# room switched off, summer, an Away held cold) only stands preheat aside:
-# the trip's start and its cap carry on, so a short break can't re-arm the
-# cap.
+# or preheat has nothing to go on.  Any other (a window, a change by hand, an
+# Off picked by hand, the room switched off, summer) only stands preheat
+# aside: the trip's start and its cap carry on, so a short break can't re-arm
+# the cap.
 _ENDS_THE_TRIP = frozenset({INACTIVE_HOME, INACTIVE_NO_PRESENCE, INACTIVE_NO_INPUTS})
 
 
@@ -628,12 +628,6 @@ class PreheatController:
             self._stand_aside()
             return PreheatDecision(
                 STATE_INACTIVE, inactive_reason=reason, scheduled_c=scheduled, away_c=away,
-            )
-        if inp.held_cold:
-            self._stand_aside()
-            return PreheatDecision(
-                STATE_HELD_COLD, target_c=away, scheduled_c=scheduled,
-                away_c=away, room_c=room,
             )
 
         # The heat-up time from the room's temperature now.
@@ -782,8 +776,6 @@ def describe(
     previous: PreheatDecision | None,
     cfg: PreheatConfig,
     hhmm: Callable[[float], str],
-    *,
-    held_cold_until: float | None = None,
 ) -> str | None:
     """The log line for a change of decision (None: nothing worth a line).
 
@@ -824,16 +816,7 @@ def describe(
         )
 
     target = d.target_c if d.target_c is not None else 0.0
-    if state == STATE_HELD_COLD:
-        until = (
-            f", Resume schedule or {hhmm(held_cold_until)}"
-            if held_cold_until is not None else " or Resume schedule"
-        )
-        parts.append(
-            f"Away picked by hand: the room stays at Away {target:.1f} °C with "
-            f"no preheat until someone is home{until}"
-        )
-    elif state == STATE_DUE:
+    if state == STATE_DUE:
         parts.append(_due_text(d, cfg, hhmm))
     elif state == STATE_CLOSE:
         parts.append(

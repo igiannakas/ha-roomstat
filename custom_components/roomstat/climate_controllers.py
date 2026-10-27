@@ -351,6 +351,11 @@ class PresenceAutomationController:
     (0 = no limit), when the room goes back to away.  23 Oct 2026: on the way
     home the owner pressed Comfort ~30 times over 2 min and every press was
     only saved for the return; the rooms got heat when he walked in.
+
+    An Off picked by hand (frost protection) while nobody is home, or one
+    the room was in when everyone left, is an override with no limit that
+    ends when someone is home (``off_until_home``): the room then goes back
+    to the schedule instead of keeping the Off (owner, 27 Oct 2026).
     """
 
     def __init__(self) -> None:
@@ -366,6 +371,9 @@ class PresenceAutomationController:
         # What away mode had saved before the change by hand: the room goes
         # back to it when the change is cancelled (Away picked by hand).
         self._before_override: SavedState = SavedState()
+        # The change is an Off picked by hand: it lasts until someone is
+        # home, and coming home brings back the schedule.
+        self.off_until_home: bool = False
 
     @property
     def nobody_home(self) -> bool:
@@ -453,6 +461,10 @@ class PresenceAutomationController:
         """Return a copy of the currently saved preset/temperature."""
         return SavedState(preset=self._saved.preset, temp=self._saved.temp)
 
+    def away_timer_fired(self) -> None:
+        """The away-delay timer has fired (its action is running)."""
+        self._away_timer = None
+
     def activate(self, preset: str, temp: float | None) -> None:
         """Record the pre-away state and mark presence automation as active."""
         self._away_timer = None
@@ -486,6 +498,7 @@ class PresenceAutomationController:
         limit_s: float,
         on_expire: Callable,
         *,
+        off_until_home: bool = False,
         call_later: _CallLaterFn | None = None,
     ) -> None:
         """A change by hand while nobody is home: hold away off.
@@ -495,6 +508,8 @@ class PresenceAutomationController:
         pending home-delay timer is kept: its restore ends the override.
         The pre-away state is no longer restored on coming home (the change
         replaces it) but kept for a cancel (:meth:`get_before_override`).
+        ``off_until_home``: the change is an Off that ends with the absence
+        (each change sets or clears it).
         """
         if self._away_timer is not None:
             self._away_timer()
@@ -505,6 +520,7 @@ class PresenceAutomationController:
         self.is_active = False
         self._saved = SavedState()
         self.override_active = True
+        self.off_until_home = off_until_home
         if limit_s > 0:
             self.override_until = now + limit_s
             _cl = call_later or _get_call_later()
@@ -522,6 +538,7 @@ class PresenceAutomationController:
         self.override_active = False
         self.override_until = None
         self._before_override = SavedState()
+        self.off_until_home = False
         return was
 
     def override_timer_fired(self) -> None:
@@ -530,6 +547,7 @@ class PresenceAutomationController:
         self.override_active = False
         self.override_until = None
         self._before_override = SavedState()
+        self.off_until_home = False
 
     def extend_override(
         self,
@@ -567,13 +585,20 @@ class PresenceAutomationController:
             return None
         return max(0.0, self.override_until - now)
 
-    def load_override(self, until: float | None, before: SavedState | None = None) -> None:
+    def load_override(
+        self,
+        until: float | None,
+        before: SavedState | None = None,
+        *,
+        off_until_home: bool = False,
+    ) -> None:
         """Take back a persisted override (startup); no timer yet, see rearm."""
         self._cancel_override_timer()
         self.is_active = False
         self.override_active = True
-        self.override_until = until
+        self.override_until = None if off_until_home else until
         self._before_override = before or SavedState()
+        self.off_until_home = off_until_home
 
     def rearm_override(
         self,
@@ -645,6 +670,10 @@ def _as_opt_float(value: Any) -> float | None:
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
+def _as_opt_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 @dataclass
 class PersistedAutomationState:
     """Automation state that must survive an HA restart or entry reload.
@@ -662,6 +691,9 @@ class PersistedAutomationState:
     presence_override_active: bool = False
     presence_override_until: float | None = None
     presence_override_before: SavedState = field(default_factory=SavedState)
+    # The change by hand is an Off that lasts until someone is home (2.12.0;
+    # None: a snapshot from before, read with the 2.12.0 rules at startup).
+    presence_override_off_until_home: bool | None = None
     # Wall-clock end of a running boost (0.0 = no boost running).
     boost_end_ts: float = 0.0
     # Preset/temperature to return to when the boost ends.
@@ -691,6 +723,7 @@ class PersistedAutomationState:
             "presence_override_until": self.presence_override_until,
             "presence_override_before_preset": self.presence_override_before.preset,
             "presence_override_before_temp": self.presence_override_before.temp,
+            "presence_override_off_until_home": self.presence_override_off_until_home,
             "boost_end_ts": self.boost_end_ts,
             "boost_saved_preset": self.boost_saved.preset,
             "boost_saved_temp": self.boost_saved.temp,
@@ -722,6 +755,9 @@ class PersistedAutomationState:
             presence_override_before=SavedState(
                 preset=_as_opt_str(data.get("presence_override_before_preset")),
                 temp=_as_opt_float(data.get("presence_override_before_temp")),
+            ),
+            presence_override_off_until_home=_as_opt_bool(
+                data.get("presence_override_off_until_home")
             ),
             boost_end_ts=_as_opt_float(data.get("boost_end_ts")) or 0.0,
             boost_saved=SavedState(
@@ -1720,8 +1756,9 @@ class ScheduleController:
     - A manual change starts an override.  It ends at the next change of the
       schedule preset, or after ``duration_min`` minutes when that is > 0 –
       whichever comes first.
-    - A *sticky* override (manual Away) ignores schedule changes and has no
-      timer; it only ends when the user changes the preset or resumes.
+    - A *sticky* override (Away or Off picked by hand) ignores schedule
+      changes and has no timer; it ends when the user changes the preset or
+      resumes, or with the home status (see climate_schedule.py).
     """
 
     def __init__(self) -> None:

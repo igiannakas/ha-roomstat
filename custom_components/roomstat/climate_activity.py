@@ -197,7 +197,11 @@ class ActivityMixin:
         if self._presence_ctrl.is_active:
             label += ", nobody home"
         elif self._presence_ctrl.override_active:
-            label += ", nobody home (change by hand kept)"
+            label += (
+                ", until someone is home"
+                if self._presence_ctrl.off_until_home
+                else ", nobody home (change by hand kept)"
+            )
         elif self.schedule_configured and self._schedule_ctrl.override_active:
             label += ", schedule overridden"
         return label

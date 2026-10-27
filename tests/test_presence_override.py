@@ -525,7 +525,8 @@ class TestReviewFindings:
         assert _timers("_async_window_close_action") == []
         assert ent.preset_mode == "none" and ent.target_temperature == 21.5
 
-    @pytest.mark.parametrize("change", ["frost_protection", 15.0, 16.0])
+    # An Off has no limit at all (2.12.0, tests/test_off_and_automatic_while_away.py).
+    @pytest.mark.parametrize("change", [15.0, 16.0])
     def test_a_change_heating_no_more_than_away_outlasts_the_limit(self, change):
         ent = _entity(None, limit_min=90)
         _leave(ent)
@@ -645,12 +646,12 @@ class TestAwayAndResumeWhileNobodyHome:
 
     def test_away_without_a_schedule_brings_back_the_pre_away_preset(self):
         ent = _entity(None)
-        _preset(ent, "frost_protection")
+        _preset(ent, "eco")
         _leave(ent)
         _preset(ent, "comfort")
         _preset(ent, "away")
         _arrive(ent)
-        assert ent.preset_mode == "frost_protection"
+        assert ent.preset_mode == "eco"
 
     def test_away_with_the_window_open_cancels_into_the_window_target(self):
         ent = _entity("night", window=True)
@@ -692,15 +693,6 @@ class TestAwayAndResumeWhileNobodyHome:
         assert ent.extra_state_attributes["schedule_override_active"] is False
         _schedule(ent, "night")
         assert ent.preset_mode == "eco"
-
-    def test_manual_off_before_leaving_stays_sticky(self):
-        ent = _entity("comfort")
-        _preset(ent, "frost_protection")
-        _leave(ent)
-        _arrive(ent)
-        assert ent.preset_mode == "frost_protection"
-        _schedule(ent, "night")
-        assert ent.preset_mode == "frost_protection"
 
     def test_resume_schedule_while_held_goes_back_to_away(self):
         ent = _entity("night")
@@ -766,7 +758,7 @@ class TestRestart:
 
     def test_cancel_after_a_restart_still_knows_the_pre_away_preset(self):
         old = _entity(None)
-        _preset(old, "frost_protection")
+        _preset(old, "eco")
         _leave(old)
         _preset(old, "comfort")
         _run(old.async_will_remove_from_hass())
@@ -774,7 +766,7 @@ class TestRestart:
         _restart_from(old, new)
         _preset(new, "away")
         _arrive(new)
-        assert new.preset_mode == "frost_protection"
+        assert new.preset_mode == "eco"
 
     def test_limit_ran_out_while_down_goes_back_to_away_at_once(self):
         old = self._held_entity()

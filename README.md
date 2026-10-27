@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.11.0-blue)
+![Version](https://img.shields.io/badge/version-2.12.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -122,17 +122,26 @@ changes.
 - **Summer mode.** One switch turns every valve off and keeps it off. See
   [Summer mode](#summer-mode).
 - **Away and Off stay** until you change them, also when the schedule moves on.
+  An Off ends when someone comes home after everyone was out (below).
 - **Eco is called Night.**
 - **Presence** can be an `input_boolean` as well as a binary sensor.
 - **A change by hand while nobody is home takes effect.** Pick a mode or a
   temperature on your way home and the room heats straight away. The change
   lasts until someone is home, or at most **Configure → Presence sensor →
   Change while away lasts** (240 minutes by default, 0 = until someone is
-  home); then the room goes back to Away. A change that heats less than Away
-  (Off, a low temperature) stays. Picking Away or Resume schedule cancels it.
-  Anything that sets a mode or temperature counts, an automation too, so
-  keep schedules in the schedule helper. The original only saved the change
-  for when you got back.
+  home); then the room goes back to Away. A temperature that heats less than
+  Away stays. Anything that sets a mode or temperature counts, an automation
+  too, so keep schedules in the schedule helper. The original only saved the
+  change for when you got back.
+- **Off lasts while nobody is home.** Pick **Off** (Frost protection) while
+  out, or leave with a room on Off, and it stays Off, not Away, with no
+  limit. When someone comes home the schedule comes back (Comfort without a
+  schedule). An Off picked while you stay home lasts until you change it.
+- **Away or Resume schedule while nobody is home is back to automatic.** Any
+  change by hand, an Off included, ends: the room goes to Away (with preheat
+  on the way home), and coming home brings back the schedule. It is the easy
+  way to undo whatever was set while out, from the cards' Away or Schedule
+  buttons or a script. Switching the room off and on again does the same.
 - **Preheat on the way home, in shadow for now.** While nobody is home,
   Roomstat works out from [Home ETA](https://github.com/igiannakas/ha-home-eta)
   what each room should aim for: the temperature coming home restores once
@@ -273,16 +282,14 @@ hand, no window open, heating on, not summer mode). The Preheat sensor says
 If coming home would heat no more than Away (the schedule says Away or
 Frost protection), there is nothing to preheat.
 
-**Manual control wins.** Pick **Away** while nobody is home and the room
-stays at Away with no preheat at all until someone is home, you pick
-**Resume schedule**, you pick another mode or a temperature (switching the
-room off and on again doesn't count), or the room's **Change while away
-lasts** limit has passed since you picked it (240 minutes by default;
-0 = until someone is home). An Away picked while someone is home isn't
-carried into the absence: when the house empties it becomes away mode and
-preheat applies as usual. Any other mode or temperature picked while nobody
-is home takes effect at once (see "A change by hand while nobody is home"
-above), and preheat stands aside until it ends.
+**Manual control wins.** While nobody is home, **Off** keeps the room off
+with no preheat until someone is home (then the schedule comes back), and
+any other mode or temperature takes effect at once (see "A change by hand
+while nobody is home" above); preheat stands aside until either ends.
+**Away** or **Resume schedule** puts the room back to automatic: Away, with
+preheat. An Away picked while someone is home isn't carried into the
+absence: when the house empties it becomes away mode and preheat applies as
+usual.
 
 **The settings**, under **Configure → Preheat timing** (each is explained
 there too):
@@ -322,8 +329,8 @@ The 800 m and the near-home radius are Home ETA's.
 
 **What it shows**, per room:
 
-- **Preheat** sensor: the decision (Off, Not in charge, Held cold, Away,
-  Someone nearby, Someone close, Heading home). Its attributes are what the
+- **Preheat** sensor: the decision (Off, Not in charge, Away, Someone
+  nearby, Someone close, Heading home). Its attributes are what the
   decision was made with (the target, the room's temperature, the heat-up
   time, when it was due, the expected arrival, the learned values it used),
   fixed until the next decision, so its history is a list of decisions.

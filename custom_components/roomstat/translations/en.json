@@ -68,7 +68,7 @@
               "presence_sensor_id": "Binary sensor or input boolean for presence detection (on = home, off = away). Switches to away mode when it turns off.",
               "presence_away_delay_s": "Delay before switching to away mode after presence is lost.",
               "presence_home_delay_s": "Delay before the previous mode comes back after presence is detected.",
-              "presence_override_max_min": "A temperature or mode you set by hand while nobody is home takes effect at once and lasts until someone is home, or this long at most; then the room goes back to away. Picking Away or Resume schedule ends it sooner. An Away picked while nobody is home holds the room cold (no preheat on the way home) for as long, unless you resume the schedule or pick another mode or a temperature (switching the room off and on again doesn't count). 0 = until someone is home."
+              "presence_override_max_min": "A temperature or mode you set by hand while nobody is home takes effect at once and lasts until someone is home, or this long at most; then the room goes back to away. Off (Frost protection) is the exception: picked while nobody is home, or on when everyone left, it has no limit and ends when someone comes home, when the schedule comes back. Picking Away or Resume schedule while nobody is home goes back to automatic at once: away, preheat on the way home, and the schedule when you are back. 0 = until someone is home."
             }
           },
           "schedule": {
@@ -320,7 +320,6 @@
         "state": {
           "off": "Off",
           "inactive": "Not in charge",
-          "held_cold": "Held cold (Away by hand)",
           "waiting": "Away",
           "nearby": "Someone nearby",
           "close": "Someone close",

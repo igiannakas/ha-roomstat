@@ -12,7 +12,10 @@ A manual change (preset, temperature, boost) starts an *override*.  It ends at t
 of the schedule preset, or after the configured override duration –
 whichever comes first.  Duration 0 means "until the schedule changes".
 Selecting Away or Off (frost protection) by hand is sticky: it stays until
-the user changes it.
+the user changes it, or the home status changes: an Away picked at home
+becomes away mode when everyone leaves, and an Off ends when someone comes
+home after nobody was (2.12.0).  While nobody is home, Away and Resume
+schedule are back to automatic.
 Selecting the preset the schedule currently asks for, the ``schedule``
 pseudo-preset or the "Resume schedule" button ends the override.
 """
@@ -27,7 +30,7 @@ from homeassistant.components.climate import PRESET_AWAY, PRESET_COMFORT
 from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 
-from .climate_controllers import SavedState, parse_schedule_preset
+from .climate_controllers import parse_schedule_preset
 from .const import (
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SCHEDULE_OVERRIDE_MIN,
@@ -87,9 +90,10 @@ class ScheduleMixin:
         if not self.schedule_configured:
             return
         ctrl = self._schedule_ctrl
-        # Manual Away and Off (frost protection) are sticky: they stay until
-        # the user picks something else or resumes the schedule – neither a
-        # schedule change nor the override timer ends them.
+        # Manual Away and Off (frost protection) are sticky: neither a
+        # schedule change nor the override timer ends them.  They end when
+        # the user picks something else or resumes the schedule, or with the
+        # home status (see the module docstring).
         if preset_mode in (PRESET_AWAY, PRESET_FROST_PROTECTION):
             self._schedule_start_override(sticky=True)
         elif preset_mode == ctrl.schedule_preset:
@@ -147,8 +151,11 @@ class ScheduleMixin:
     async def async_resume_schedule(self) -> None:
         """End any override and return to the schedule's current preset.
 
-        While nobody is home it also ends a change by hand made meanwhile:
-        back to the automatic state, which is away mode.
+        While nobody is home it is back to automatic, as Away picked then is
+        (:meth:`_async_back_to_automatic`): a change by hand made meanwhile,
+        an Off included, ends, the room is in away mode, and coming home
+        restores the schedule's preset.  The room takes it quietly before
+        away mode saves it (no heat call sent and taken back).
         """
         self._summer_guard("resume schedule")
         if not self.schedule_configured:
@@ -161,23 +168,11 @@ class ScheduleMixin:
         self._schedule_ctrl.clear_override()
         self._log(_LOGGER).info("schedule resumed")
         if self._presence_ctrl.nobody_home:
-            # Preheat: back to automatic after an Away picked by hand.
-            self._preheat_release_cold("Resume schedule")
-        if self._presence_ctrl.end_override():
-            # The room takes the schedule's preset quietly, then away mode
-            # saves it for the return (one regulation cycle, no heat call
-            # sent and taken back).
-            preset = self._schedule_ctrl.schedule_preset
-            if preset is not None:
-                self._apply_quietly(SavedState(preset, self._get_preset_target(preset)))
-            self._log(_LOGGER).info("nobody is home, back to away")
-            await self._async_reenter_away(trigger="resume_schedule")
+            await self._async_back_to_automatic(
+                "Resume schedule", trigger="resume_schedule"
+            )
             return
         await self._async_follow_schedule(trigger="resume_schedule")
-        # Nobody home and already away: no regulation cycle follows, so
-        # preheat decides again now, on the preset just saved for the return.
-        if self._presence_ctrl.is_active:
-            self._preheat_evaluate(time.time(), write=True)
 
     async def _async_follow_schedule(self, trigger: str) -> None:
         """Apply the schedule's preset (routed via window/presence if active)."""
@@ -218,15 +213,17 @@ class ScheduleMixin:
     # Startup
     # ------------------------------------------------------------------
 
-    def _startup_schedule(self, persisted, summer_on: bool) -> None:
-        """Restore override state and align with the helper at startup."""
+    def _startup_schedule_state(self, persisted) -> None:
+        """Take back the schedule's preset and override, aligned with the
+        helper, before presence and window are taken back (they restore
+        presets as at any other time: the schedule's preset, a sticky
+        override made stale)."""
         ctrl = self._schedule_ctrl
         entity_id = self._schedule_entity_id
         if entity_id is None:
             ctrl.clear_override()
             ctrl.schedule_preset = None
             return
-
         ctrl.load(persisted)
         st = self.hass.states.get(entity_id)
         current = parse_schedule_preset(st.state if st is not None else None)
@@ -235,8 +232,15 @@ class ScheduleMixin:
             ctrl.schedule_preset = current
             if ctrl.override_active and not ctrl.override_sticky:
                 ctrl.clear_override()
-        # The presence / window restore above ran before the override was
-        # loaded, so it could not drop a sticky one it made stale.
+
+    def _startup_schedule(self, summer_on: bool) -> None:
+        """Re-arm the override and follow the helper at startup (its state
+        was taken back by _startup_schedule_state)."""
+        ctrl = self._schedule_ctrl
+        if self._schedule_entity_id is None:
+            return
+        # A sticky override left behind by an older version (the room is no
+        # longer in the Away or Off it belongs to).
         self._drop_stale_sticky_override()
 
         if summer_on:

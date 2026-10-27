@@ -10,7 +10,8 @@ The owner's decisions (25 Oct 2026) under test:
   the room is no longer due, start again when the new arrival is due; stop
   when the trip home is over (no arrival for 10 min); at most 4 h per trip;
 - a drop to a cooler level after 10 min, a rise at once;
-- Away picked by hand while nobody is home: no preheat at all.
+- a change by hand while nobody is home, an Off included (27 Oct 2026),
+  stands preheat aside without ending the trip home.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ MIN = 60.0
 def inputs(now, **kw):
     base = dict(
         now=now, enabled=True, inactive_reason=None, scheduled_c=20.0, away_c=16.0,
-        room_c=16.5, arrival_ts=None, close=False, nearby=False, held_cold=False,
+        room_c=16.5, arrival_ts=None, close=False, nearby=False,
         rate_c_per_h=2.5, dead_time_s=20 * MIN, recovery_c=0.58,
     )
     base.update(kw)
@@ -102,16 +103,24 @@ class TestApplies:
         d = P.PreheatController().evaluate(inputs(T0, scheduled_c=18.0, close=True))
         assert d.state == P.STATE_CLOSE and d.target_c == 18.0
 
-    def test_held_cold_ignores_everything(self):
+    def test_an_off_by_hand_stands_it_aside_whatever_home_eta_says(self):
         c = P.PreheatController()
         c.evaluate(inputs(T0, arrival_ts=T0 + 10 * MIN))
         assert c.heating_since == T0
-        d = c.evaluate(inputs(T0 + MIN, held_cold=True, close=True, arrival_ts=T0 + 9 * MIN))
-        assert d.state == P.STATE_HELD_COLD and d.target_c == 16.0
+        d = c.evaluate(inputs(T0 + MIN, inactive_reason=P.INACTIVE_OFF_BY_HAND,
+                              close=True, arrival_ts=T0 + 9 * MIN))
+        assert d.state == P.STATE_INACTIVE and d.target_c is None
+        assert d.inactive_reason == P.INACTIVE_OFF_BY_HAND
         assert c.heating_since is None
-        # Released: the levels and the trip start afresh, a rise at once.
+        # Back to automatic (Away or Resume schedule while out): a rise at once.
         d = c.evaluate(inputs(T0 + 2 * MIN, close=True))
         assert d.state == P.STATE_CLOSE
+
+    def test_the_held_cold_state_is_gone(self):
+        """2.11.0's Away held cold went in 2.12.0 (an Off does it now)."""
+        assert "held_cold" not in P.STATES
+        assert not hasattr(P, "STATE_HELD_COLD")
+        assert "held_cold" not in P.PreheatInputs.__dataclass_fields__
 
 
 # ===========================================================================
@@ -327,12 +336,10 @@ class TestHeadingHome:
         d = c.evaluate(inputs(t, arrival_ts=t + 10 * MIN, **kw))
         assert d.ended == P.ENDED_CAP and d.capped
         for reason in (P.INACTIVE_WINDOW, P.INACTIVE_CHANGE_BY_HAND, P.INACTIVE_OFF,
-                       P.INACTIVE_SUMMER, P.INACTIVE_NOTHING_WARMER, "held_cold"):
+                       P.INACTIVE_SUMMER, P.INACTIVE_NOTHING_WARMER,
+                       P.INACTIVE_OFF_BY_HAND):
             t += MIN
-            if reason == "held_cold":
-                c.evaluate(inputs(t, held_cold=True, arrival_ts=t + 10 * MIN, **kw))
-            else:
-                c.evaluate(inputs(t, inactive_reason=reason, arrival_ts=t + 10 * MIN, **kw))
+            c.evaluate(inputs(t, inactive_reason=reason, arrival_ts=t + 10 * MIN, **kw))
             t += MIN
             d = c.evaluate(inputs(t, arrival_ts=t + 10 * MIN, **kw))
             assert d.state == P.STATE_WAITING, reason
@@ -554,13 +561,13 @@ class TestDescribe:
             d = c.evaluate(inputs(T0 + minute * MIN))
         assert self._line(d, prev) == "nobody is nearby any more: back to Away 16.0 °C"
 
-    def test_held_cold(self):
-        d = P.PreheatController().evaluate(inputs(T0, held_cold=True))
-        assert self._line(d, held_cold_until=T0 + 240 * MIN) == (
-            "Away picked by hand: the room stays at Away 16.0 °C with no preheat "
-            "until someone is home, Resume schedule or T+240"
+    def test_off_by_hand(self):
+        inactive = P.PreheatDecision(
+            P.STATE_INACTIVE, inactive_reason=P.INACTIVE_OFF_BY_HAND)
+        waiting = P.PreheatDecision(P.STATE_WAITING, target_c=16.0)
+        assert self._line(inactive, waiting) == (
+            "stands aside: an Off picked by hand holds the room until someone is home"
         )
-        assert self._line(d).endswith("until someone is home or Resume schedule")
 
     def test_inactive_and_off(self):
         inactive = P.PreheatDecision(P.STATE_INACTIVE, inactive_reason=P.INACTIVE_HOME)

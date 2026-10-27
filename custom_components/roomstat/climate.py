@@ -36,6 +36,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import ExtraStoredData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .activity import preset_name
 from .autotune import (
     STATUS_DISABLED,
     Autotuner,
@@ -540,11 +541,17 @@ class RoomstatClimate(
         # Automation snapshot (window / presence / boost).  None on the first
         # start after upgrading from a version that did not persist it.
         persisted: PersistedAutomationState | None = None
+        # A 2.11.0 save's Away held cold (preheat), for its conversion below.
+        legacy_held_cold = False
         extra = await self.async_get_last_extra_data()
         if extra is not None:
             extra_dict = extra.as_dict()
             persisted = PersistedAutomationState.from_dict(extra_dict)
             if isinstance(extra_dict, dict):
+                saved_preheat = extra_dict.get("preheat")
+                legacy_held_cold = isinstance(saved_preheat, dict) and isinstance(
+                    saved_preheat.get("held_cold"), dict
+                )
                 self._autotuner.restore(extra_dict.get("autotune"))
                 self._apply_active_tuning()
                 # What the tuner last did is in its restored state, not new.
@@ -558,8 +565,8 @@ class RoomstatClimate(
                 # A change by hand a few seconds ago (a preset temperature
                 # changed: it reloads the room) still settles.
                 self._restore_change_by_hand(extra_dict.get("manual_change_ts"), now)
-                # Preheat: a heading-home start, an Away held cold, the
-                # 30-minute recovery and the decision last logged.
+                # Preheat: a heading-home start, the 30-minute recovery and
+                # the decision last logged.
                 self._preheat_restore(extra_dict.get("preheat"), now)
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
@@ -608,25 +615,21 @@ class RoomstatClimate(
                     ),
                 )
 
+        # The schedule's state first: the presence and window restores below
+        # (and at startup) need its preset and its override, as at any other
+        # time.  Following it comes last (_startup_schedule).
+        self._startup_schedule_state(persisted)
+
         # Re-arm the automation controllers from the persisted snapshot so a
         # restart or reload does not lose the pre-automation preset.
+        legacy_note = None
         if persisted is not None:
             if persisted.window_active:
                 self._window_ctrl.activate(
                     persisted.window_saved.preset or PRESET_COMFORT,
                     persisted.window_saved.temp,
                 )
-            if persisted.presence_active:
-                self._presence_ctrl.activate(
-                    persisted.presence_saved.preset or PRESET_COMFORT,
-                    persisted.presence_saved.temp,
-                )
-            elif persisted.presence_override_active:
-                # A change by hand while nobody was home; its timer is
-                # re-armed (or found run out) in _startup_reconcile_presence.
-                self._presence_ctrl.load_override(
-                    persisted.presence_override_until, persisted.presence_override_before
-                )
+            legacy_note = self._load_presence_snapshot(persisted, legacy_held_cold)
 
         # Resume a running boost, or fall back if it ended while HA was down.
         if self._preset_mode == PRESET_BOOST:
@@ -659,6 +662,8 @@ class RoomstatClimate(
         summer_on = self._startup_summer(
             persisted.summer_active if persisted is not None else False
         )
+        if legacy_note and not summer_on:
+            self._log(_LOGGER).info("startup: %s", legacy_note)
 
         # Config entry update listener (from number entities)
         self.async_on_remove(
@@ -740,7 +745,7 @@ class RoomstatClimate(
             self._startup_reconcile_presence(presence_sensor, persisted)
             self._startup_reconcile_window(window_sensor)
         # Schedule last: it routes into window/presence saved state if active.
-        self._startup_schedule(persisted, summer_on)
+        self._startup_schedule(summer_on)
 
         # Start periodic regulation
         self.async_on_remove(
@@ -772,11 +777,19 @@ class RoomstatClimate(
 
         if self._presence_ctrl.override_active:
             # A change by hand while nobody was home.  Someone home now (or
-            # no sensor any more): it simply stays.  Still nobody (or not
+            # no sensor any more): it simply stays, but an Off picked by hand
+            # ends and the schedule comes back.  Still nobody (or not
             # reported yet): re-arm the rest of its limit; one that ran out
             # while HA was down is handled at once, as at any other time.
             action = presence_startup_action(True, bool(presence_sensor), state)
             if action == STARTUP_RESTORE:
+                if self._presence_ctrl.off_until_home:
+                    self._log(_LOGGER).info(
+                        "startup, presence sensor is %s",
+                        state if presence_sensor else "not configured",
+                    )
+                    self._restore_presence_state(notify=False)
+                    return
                 self._log(_LOGGER).info(
                     "startup, presence sensor is %s, the change made while "
                     "nobody was home stays",
@@ -855,6 +868,76 @@ class RoomstatClimate(
             )
             self._log(_LOGGER).info("Startup: window sensor is open, action in %ds", delay)
 
+    def _load_presence_snapshot(
+        self, persisted: PersistedAutomationState, legacy_held_cold: bool
+    ) -> str | None:
+        """Take back away mode or a change by hand while nobody was home.
+
+        A snapshot from before 2.12.0 (``presence_override_off_until_home``
+        None) is read with the 2.12.0 rules (owner, 27 Oct 2026), and the
+        line that says so is returned (logged unless summer mode is on):
+
+        - away mode entered from an Off picked by hand, the Off saved for the
+          return: the Off until someone is home;
+        - the same after an Away picked while out (2.11.0 held the room
+          cold): back to automatic, the schedule saved for the return;
+        - an Off picked while out, kept as a change by hand with a limit:
+          the Off until someone is home.
+        """
+        legacy = persisted.presence_override_off_until_home is None
+        if persisted.presence_active:
+            if legacy and self._saved_off_by_hand(persisted):
+                if legacy_held_cold:
+                    preset = self._fallback_preset()
+                    self._schedule_ctrl.clear_override()
+                    self._presence_ctrl.activate(preset, self._get_preset_target(preset))
+                    return (
+                        "the Away picked while nobody was home is back to automatic; "
+                        f"{preset_name(preset)} comes back with you"
+                    )
+                self._presence_ctrl.load_override(None, off_until_home=True)
+                frost = self._get_preset_target(PRESET_FROST_PROTECTION)
+                if persisted.window_active:
+                    self._window_ctrl.update_saved(PRESET_FROST_PROTECTION, frost)
+                else:
+                    self._preset_mode = PRESET_FROST_PROTECTION
+                    self._target_temp = frost
+                return "the Off picked by hand before everyone left stays until someone is home"
+            self._presence_ctrl.activate(
+                persisted.presence_saved.preset or PRESET_COMFORT,
+                persisted.presence_saved.temp,
+            )
+            return None
+        if not persisted.presence_override_active:
+            return None
+        # A change by hand while nobody was home; its timer is re-armed (or
+        # found run out) in _startup_reconcile_presence.
+        held = (
+            persisted.window_saved.preset if persisted.window_active else self._preset_mode
+        )
+        off = (
+            held == PRESET_FROST_PROTECTION
+            if legacy
+            else bool(persisted.presence_override_off_until_home)
+        )
+        self._presence_ctrl.load_override(
+            persisted.presence_override_until,
+            persisted.presence_override_before,
+            off_until_home=off,
+        )
+        if legacy and off:
+            return "the Off picked while nobody was home stays until someone is home"
+        return None
+
+    def _saved_off_by_hand(self, persisted: PersistedAutomationState) -> bool:
+        """Away mode with an Off picked by hand saved for the return (see
+        ``_off_picked_by_hand``; the schedule's own Off is not one)."""
+        if persisted.presence_saved.preset != PRESET_FROST_PROTECTION:
+            return False
+        if not self.schedule_configured:
+            return True
+        return persisted.schedule_override_active and persisted.schedule_override_sticky
+
     def _apply_saved_preset(self, saved: SavedState) -> None:
         """Switch to a saved preset/temperature without side effects."""
         if saved.preset is None:
@@ -890,6 +973,7 @@ class RoomstatClimate(
             presence_override_active=self._presence_ctrl.override_active,
             presence_override_until=self._presence_ctrl.override_until,
             presence_override_before=self._presence_ctrl.get_before_override(),
+            presence_override_off_until_home=self._presence_ctrl.off_until_home,
             boost_end_ts=self._boost_end_ts if boost_running else 0.0,
             boost_saved=SavedState(
                 preset=self._boost_saved_preset, temp=self._boost_saved_temp
@@ -1024,9 +1108,20 @@ class RoomstatClimate(
             # Returning from OFF → reset timestamp so the first HEAT cycle uses
             # dt=0 and avoids an integral spike from the long OFF period.
             self._last_regulation_ts = 0
-            # With a schedule, turning back on resumes it (OFF is not an
-            # override, so any old override is dropped too).
-            if self.schedule_configured and self._schedule_ctrl.schedule_preset:
+            # Turning back on resumes the schedule (OFF is not an override, so
+            # any old override is dropped too).  While nobody is home that is
+            # back to automatic, as Resume schedule is: a change by hand held
+            # meanwhile (an Off until someone is home included) ends, rather
+            # than the schedule's preset heating the empty house with the
+            # change's limit, or none (2.12.0 review).
+            back_to_automatic = (
+                self._presence_ctrl.nobody_home and not self._presence_reads_home()
+            )
+            if (
+                not back_to_automatic
+                and self.schedule_configured
+                and self._schedule_ctrl.schedule_preset
+            ):
                 self._schedule_ctrl.clear_override()
                 self._route_preset(self._schedule_ctrl.schedule_preset)
             # Re-evaluate window sensor: if the window is still open after
@@ -1043,6 +1138,11 @@ class RoomstatClimate(
                         "HVAC OFF→HEAT: window still open, frost action in %ds",
                         delay,
                     )
+            if back_to_automatic:
+                await self._async_back_to_automatic(
+                    "Switched on", trigger="hvac_mode_change", regulate=True
+                )
+                return
             # The regulation brings the TRV out of off itself: one
             # set_temperature with hvac_mode heat, or nothing if the room
             # needs no heat (2.8.4).  No set_hvac_mode heat first: a Tado

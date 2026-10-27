@@ -277,8 +277,9 @@ class PresetMixin:
         (unavailable, unknown, gone) keeps the last thing it said, nobody
         home; otherwise the room would heat on the change with no limit
         until the sensor next reads off.
-        Returns True when away mode was entered (the room is regulated, or
-        frost protection stays for an open window), False when skipped.
+        Returns True when it acted: away mode entered (the room is
+        regulated, or frost protection stays for an open window), or an Off
+        picked by hand held until someone is home; False when skipped.
         """
         if self._summer_active:
             return False
@@ -302,6 +303,25 @@ class PresetMixin:
                 )
                 self._presence_ctrl.cancel_timer()
                 return False
+
+        # An Off picked by hand stays Off while nobody is home, until someone
+        # is (owner, 27 Oct 2026): away mode (Away 16 °C, preheat) must not
+        # heat a room switched off on purpose.  It is held as a change by hand
+        # with no limit: Away or Resume schedule while out goes back to
+        # automatic, and coming home brings back the schedule.
+        if self._off_picked_by_hand():
+            self._presence_ctrl.away_timer_fired()
+            self._presence_ctrl.start_override(
+                self.hass, time.time(), 0, self._async_presence_override_expired,
+                off_until_home=True,
+            )
+            self._log(_LOGGER).info(
+                "nobody home: the Off picked by hand stays until someone is home "
+                "(%s goes back to automatic)", self._back_to_automatic_words(),
+            )
+            self._write_state_with_binary_sensor()
+            await self._async_regulation_cycle(trigger="presence_away")
+            return True
 
         # If window automation is active, don't override frost protection.
         # Save current state for when presence returns, but keep frost mode.
@@ -363,16 +383,19 @@ class PresetMixin:
         """Restore preset after presence returns.
 
         After a change by hand while nobody was home (an override) nothing is
-        restored: that change is the room's state, and it simply stays.
+        restored: that change is the room's state, and it simply stays.  An
+        Off picked by hand while nobody was home, or the one the room was in
+        when everyone left, is the exception: it ends, and the schedule comes
+        back (:meth:`_end_off_until_home`).
 
         ``notify=False``: see :meth:`_restore_window_state`.
         """
-        # An Away held cold ends with the absence, at once: the window branch
-        # below runs no cycle, and someone may leave again before the next
-        # one (the next preheat decision line says it).
-        self._preheat_release_cold(None)
         if self._presence_ctrl.override_active:
+            off_until_home = self._presence_ctrl.off_until_home
             self._presence_ctrl.restore()  # ends the override
+            if off_until_home:
+                self._end_off_until_home(notify)
+                return
             self._log(_LOGGER).info(
                 "someone is home, the change made while nobody was home stays",
             )
@@ -416,6 +439,66 @@ class PresetMixin:
         )
         self.async_write_ha_state()
 
+    def _end_off_until_home(self, notify: bool) -> None:
+        """Someone is home: the Off picked by hand ends (owner, 27 Oct 2026).
+
+        The schedule comes back: its preset (Comfort without one), and the
+        sticky schedule override the Off had started goes, so the schedule's
+        next change applies too.  With a window open it is what the close
+        restores.  ``notify=False``: at startup (the schedule's state is
+        taken back before, ``_startup_schedule_state``).
+        """
+        preset = self._fallback_preset()
+        base = SavedState(preset, self._get_preset_target(preset))
+        if self.schedule_configured:
+            self._schedule_ctrl.clear_override()
+        what = preset_name(preset) if notify or not self.schedule_configured else "the schedule"
+        if self._window_ctrl.is_active:
+            self._window_ctrl.update_saved(base.preset, base.temp)
+            self._log(_LOGGER).info(
+                "someone is home, the Off picked by hand ends: %s saved for the "
+                "window's close", what,
+            )
+            if notify:
+                self._write_state_with_binary_sensor()
+            return
+        self._apply_saved_preset(base)
+        self._log(_LOGGER).info(
+            "someone is home, the Off picked by hand ends: back to %s", what,
+        )
+        if not notify:
+            return
+        self.hass.async_create_task(
+            self._async_regulation_cycle(trigger="presence_home")
+        )
+        self.async_write_ha_state()
+
+    def _back_to_automatic_words(self) -> str:
+        """What puts the room back to automatic while nobody is home."""
+        return "Away or Resume schedule" if self.schedule_configured else "Away"
+
+    def _off_picked_by_hand(self) -> bool:
+        """The room is in an Off (frost protection) picked by hand.
+
+        With a schedule, an Off picked by hand is a sticky schedule override
+        (the schedule's own Off is not); without one, frost protection can
+        only have been picked by hand.  With a window open it is the preset
+        the window will restore.  A Boost started from it is not an Off.
+        """
+        if self._boost_cancel is not None:
+            return False
+        preset = (
+            self._window_ctrl.get_saved().preset
+            if self._window_ctrl.is_active
+            else self._preset_mode
+        )
+        if preset != PRESET_FROST_PROTECTION:
+            return False
+        if not self.schedule_configured:
+            return True
+        sched = self._schedule_ctrl
+        return sched.override_active and sched.override_sticky
+
     # ------------------------------------------------------------------
     # A change by hand while nobody is home
     # ------------------------------------------------------------------
@@ -431,26 +514,33 @@ class PresetMixin:
             minutes = DEFAULT_PRESENCE_OVERRIDE_MAX_MIN
         return minutes * 60.0
 
-    def _presence_takeover(self) -> None:
+    def _presence_takeover(self, preset_mode: str | None = None) -> None:
         """Let a change by hand while nobody is home take effect.
 
-        Called before a temperature or preset (not Away) picked by the user
-        is applied.  Away mode steps aside: the room is regulated as if
-        someone were home until someone is, or until the configured limit
-        after the change (then back to away).  Leaving away mode, the room
-        first takes back the preset it had before (as coming home would), so
-        a Boost started now returns to that, not to Away.  An open window
-        still wins: the change is saved for its close as usual.
+        Called before a temperature (``preset_mode`` None) or preset (not
+        Away) picked by the user is applied.  Away mode steps aside: the room
+        is regulated as if someone were home until someone is, or until the
+        configured limit after the change (then back to away).  Leaving away
+        mode, the room first takes back the preset it had before (as coming
+        home would), so a Boost started now returns to that, not to Away.  An
+        open window still wins: the change is saved for its close as usual.
+
+        An Off (frost protection) has no limit and ends when someone is home,
+        when the schedule comes back (owner, 27 Oct 2026).  One picked once
+        the presence sensor reads home again (the home delay running) is an
+        Off picked by someone at home, and stays like any other change.
         """
         ctrl = self._presence_ctrl
         if not ctrl.nobody_home:
             return
-        # The change replaces an Away picked by hand (no longer held cold).
-        self._preheat_release_cold("a change by hand replaces the Away picked by hand")
+        off_until_home = (
+            preset_mode == PRESET_FROST_PROTECTION and not self._presence_reads_home()
+        )
         saved = ctrl.get_saved() if ctrl.is_active else None
-        limit_s = self._presence_override_limit_s()
+        limit_s = 0.0 if off_until_home else self._presence_override_limit_s()
         ctrl.start_override(
-            self.hass, time.time(), limit_s, self._async_presence_override_expired
+            self.hass, time.time(), limit_s, self._async_presence_override_expired,
+            off_until_home=off_until_home,
         )
         if saved is not None and self._preset_mode == PRESET_AWAY:
             base = saved.preset
@@ -458,6 +548,14 @@ class PresetMixin:
                 base = self._fallback_preset()
                 saved = SavedState(base, self._get_preset_target(base))
             self._apply_saved_preset(SavedState(base, saved.temp))
+        if off_until_home:
+            self._log(_LOGGER).info(
+                "Off picked while nobody is home: it stays until someone is home, "
+                "then %s comes back (%s goes back to automatic)",
+                "the schedule" if self.schedule_configured else preset_name(PRESET_COMFORT),
+                self._back_to_automatic_words(),
+            )
+            return
         self._log(_LOGGER).info(
             "changed by hand while nobody is home, away is held off until "
             "someone is home%s",
@@ -525,42 +623,63 @@ class PresetMixin:
         st = self.hass.states.get(sensor)
         return st is not None and st.state not in ("off", "unavailable", "unknown")
 
-    async def _async_presence_back_to_away(self) -> None:
-        """Away picked by hand while nobody is home: cancel a change by hand.
+    def _automatic_return(self) -> SavedState:
+        """What coming home restores once the room is back to automatic.
 
-        Not a manual (sticky) Away: away mode is what nobody-home means.  A
-        change made meanwhile is undone – the schedule override it started
-        too – so coming home restores what it would have without it: the
-        schedule's preset, else what away mode had saved before the change.
+        The schedule's preset; without a schedule (or before it has a value)
+        what away mode had saved before any change by hand, but never an Off,
+        Away or Boost (Comfort then): automatic never comes back to an Off.
+        """
+        if self.schedule_configured and self._schedule_ctrl.schedule_preset is not None:
+            preset = self._schedule_ctrl.schedule_preset
+            return SavedState(preset, self._get_preset_target(preset))
+        ctrl = self._presence_ctrl
+        held = ctrl.get_before_override() if ctrl.override_active else ctrl.get_saved()
+        if held.preset not in (None, PRESET_AWAY, PRESET_BOOST, PRESET_FROST_PROTECTION):
+            return held
+        return SavedState(PRESET_COMFORT, self._comfort_target())
+
+    async def _async_back_to_automatic(
+        self, by: str, *, trigger: str, regulate: bool = False
+    ) -> None:
+        """Away or Resume schedule picked while nobody is home (or the room
+        switched back on then).
+
+        Back to what the absence does on its own (owner, 27 Oct 2026: an easy
+        way to reset the heating to automatic): a change made meanwhile, an
+        Off included, is cancelled, and with it any schedule override, so the
+        room is in away mode (Away, and preheat on the way home), and coming
+        home restores the schedule's preset (:meth:`_automatic_return`).
+        Not a manual (sticky) Away: away mode is what nobody-home means.
+        ``regulate``: run a cycle when the room was in away mode already (it
+        was just switched on).
         """
         ctrl = self._presence_ctrl
-        # Preheat: an Away picked while out holds the room cold (no preheat)
-        # until someone is home, Resume schedule, a change by hand or the
-        # "change while away lasts" limit from now.
-        self._preheat_hold_cold(time.time())
-        if not ctrl.override_active:
-            self._log(_LOGGER).info("Away picked while nobody is home, already away")
-            self._preheat_evaluate(time.time())
-            self._write_state_with_binary_sensor()
-            return
-        before = ctrl.get_before_override()
-        ctrl.end_override()
-        schedule_preset = (
-            self._schedule_ctrl.schedule_preset if self.schedule_configured else None
-        )
-        if schedule_preset is not None:
+        base = self._automatic_return()
+        if self.schedule_configured:
             self._schedule_ctrl.clear_override()
-            base = SavedState(schedule_preset, self._get_preset_target(schedule_preset))
-        elif before.preset not in (None, PRESET_AWAY, PRESET_BOOST):
-            base = before
-        else:
-            base = SavedState(PRESET_COMFORT, self._comfort_target())
-        self._apply_quietly(base)
+        what = preset_name(base.preset)
+        if ctrl.end_override():
+            self._apply_quietly(base)
+            self._log(_LOGGER).info(
+                "%s while nobody is home: the change by hand is cancelled, back "
+                "to automatic; %s comes back with you", by, what,
+            )
+            await self._async_reenter_away(trigger=trigger)
+            return
+        ctrl.update_saved(base.preset, base.temp)
         self._log(_LOGGER).info(
-            "Away picked while nobody is home, the change is cancelled and %s "
-            "comes back with you", base.preset,
+            "%s while nobody is home: back to automatic; %s comes back with you",
+            by, what,
         )
-        await self._async_reenter_away(trigger="preset_change")
+        if regulate:
+            self._write_state_with_binary_sensor()
+            await self._async_regulation_cycle(trigger=trigger)
+            return
+        # No regulation cycle follows: preheat decides again now, on the
+        # preset just saved for the return.
+        self._preheat_evaluate(time.time())
+        self._write_state_with_binary_sensor()
 
     def _apply_quietly(self, saved: SavedState) -> None:
         """Make *saved* the room's preset without regulating.
@@ -604,16 +723,17 @@ class PresetMixin:
             self._log(_LOGGER).warning("Unknown preset mode: %s", preset_mode)
             return
         self.note_change_by_hand()
-        # Away while nobody is home is away mode itself, not a manual
-        # (sticky) Away: it ends a change by hand, and coming home restores.
-        # Once the sensor reads home again (the home delay still running) it
-        # is an ordinary Away picked by someone who is home.
+        # Away while nobody is home is back to automatic, not a manual
+        # (sticky) Away: it ends a change by hand (an Off too), and coming
+        # home restores the schedule.  Once the sensor reads home again (the
+        # home delay still running) it is an ordinary Away picked by someone
+        # who is home.
         if (
             preset_mode == PRESET_AWAY
             and self._presence_ctrl.nobody_home
             and not self._presence_reads_home()
         ):
-            await self._async_presence_back_to_away()
+            await self._async_back_to_automatic("Away picked", trigger="preset_change")
             return
         # A manual preset change overrides the schedule (see climate_schedule.py)
         self._schedule_note_manual_preset(preset_mode)
@@ -647,7 +767,7 @@ class PresetMixin:
         if self._presence_ctrl.is_active and preset_mode != PRESET_AWAY:
             if manual:
                 # Picked by hand while nobody is home: it takes effect.
-                self._presence_takeover()
+                self._presence_takeover(preset_mode)
             else:
                 # The schedule or a boost ending while away: update what
                 # coming home restores, and keep away mode.
@@ -660,7 +780,7 @@ class PresetMixin:
                 return False
         elif manual and self._presence_ctrl.override_active:
             # A further change by hand restarts the limit.
-            self._presence_takeover()
+            self._presence_takeover(preset_mode)
 
         # If window automation is active (frost protection due to open window),
         # update the saved state so the new preset is restored when the window
@@ -727,6 +847,18 @@ class PresetMixin:
 
         restore_preset = self._boost_saved_preset
         self._log(_LOGGER).info("boost over, back to %s", restore_preset)
+        if (
+            restore_preset == PRESET_FROST_PROTECTION
+            and self._presence_ctrl.override_active
+            and not self._presence_reads_home()
+        ):
+            # Back on an Off picked by hand while nobody is home: it lasts until
+            # someone is, as if picked again (no limit), so coming home brings
+            # back Comfort rather than keeping the Off (2.12.0 review).
+            self._presence_ctrl.start_override(
+                self.hass, time.time(), 0, self._async_presence_override_expired,
+                off_until_home=True,
+            )
 
         # PRESET_NONE (manual mode) is not in PRESET_LIST and would be rejected
         # by async_set_preset_mode, so handle it directly.

@@ -13,12 +13,13 @@ thermostat's ``preheat_*`` attributes, the room's Preheat sensor) and logged
 room stays at Away: nothing here touches the setpoint or a command.  The
 owner gathers a week of decisions first (25 Oct 2026).
 
-**Away picked by hand while nobody is home** holds the room cold: no
-preheat of any kind until someone is home, Resume schedule, a change by hand
-(the 2.9.0 takeover), or the room's "change while away lasts" limit
-(``presence_override_max_min``) after the pick, whichever comes first.  An
-Away picked while someone is home is not carried into the absence: the away
-action turns it into plain away mode, as before.
+**Changes by hand while nobody is home** (2.12.0, owner, 27 Oct 2026):
+Away or Resume schedule is back to automatic, which is where preheat works;
+an Off picked by hand, or the one the room was in when everyone left, holds
+the room off until someone is home (``off_by_hand``); any other change by
+hand is in charge until its limit or until someone is home
+(``change_by_hand``).  Until 2.11.0 an Away picked while out held the room
+cold; that went, Off does it now.
 
 The 30-minute recovery is learned whatever the mode (preheat.RecoveryLearner,
 fed by every regulated cycle), so a room has its own value by the time
@@ -56,6 +57,7 @@ from .preheat import (
     INACTIVE_NO_INPUTS,
     INACTIVE_NO_PRESENCE,
     INACTIVE_OFF,
+    INACTIVE_OFF_BY_HAND,
     INACTIVE_SUMMER,
     INACTIVE_WINDOW,
     MODE_OFF,
@@ -87,8 +89,7 @@ PREHEAT_ENTITY_KEYS = (
 PREHEAT_LIVE_ATTRIBUTES = frozenset({
     "preheat_mode", "preheat_state", "preheat_inactive_reason", "preheat_target_c",
     "preheat_recovery_temp_c", "preheat_needed_min", "preheat_due_at",
-    "preheat_arrival_at", "preheat_since", "preheat_held_cold",
-    "preheat_held_cold_until",
+    "preheat_arrival_at", "preheat_since",
 })
 
 
@@ -124,11 +125,6 @@ class PreheatMixin:
         # new decision (one recorder row each).
         self._preheat_decision: PreheatDecision | None = None
         self._preheat_logged: LoggedDecision | None = None
-        # Away picked by hand while nobody is home (held cold), and until
-        # when (None: until someone is home).
-        self._preheat_held_cold: bool = False
-        self._preheat_cold_since: float | None = None
-        self._preheat_cold_until: float | None = None
         # Failures are logged once each, with their traceback; the regulation
         # carries on whatever happens here.
         self._preheat_failure: str | None = None
@@ -165,7 +161,7 @@ class PreheatMixin:
             return INACTIVE_NO_INPUTS
         ctrl = self._presence_ctrl
         if ctrl.override_active:
-            return INACTIVE_CHANGE_BY_HAND
+            return INACTIVE_OFF_BY_HAND if ctrl.off_until_home else INACTIVE_CHANGE_BY_HAND
         if not ctrl.is_active:
             return INACTIVE_HOME
         if self._window_open():
@@ -220,7 +216,6 @@ class PreheatMixin:
             arrival_ts=parse_arrival(self._preheat_state_of(CONF_PREHEAT_ARRIVAL_ENTITY_ID)),
             close=parse_on_off(self._preheat_state_of(CONF_PREHEAT_CLOSE_ENTITY_ID)),
             nearby=parse_on_off(self._preheat_state_of(CONF_PREHEAT_NEARBY_ENTITY_ID)),
-            held_cold=self._preheat_held_cold,
             rate_c_per_h=rate,
             dead_time_s=dead,
             recovery_c=self._recovery.recovery_c,
@@ -234,7 +229,6 @@ class PreheatMixin:
         write the thermostat's state (an input changed between cycles).
         """
         try:
-            self._preheat_expire_cold(now)
             decision = self._preheat.evaluate(self._preheat_inputs(now))
             self._preheat_decision = decision
             logged = self._preheat_logged
@@ -246,7 +240,6 @@ class PreheatMixin:
                 logged.decision if logged is not None else None,
                 self._preheat_cfg,
                 lambda ts: local_hhmm(ts, now),
-                held_cold_until=self._preheat_cold_until,
             )
             self._preheat_logged = LoggedDecision(
                 decision, now, decision_attributes(decision, _iso)
@@ -269,41 +262,6 @@ class PreheatMixin:
     def _async_preheat_input_changed(self, event) -> None:
         """A Home ETA entity changed: decide again now, not at the next cycle."""
         self._preheat_evaluate(time.time(), write=True)
-
-    # -- Away picked by hand while nobody is home ---------------------------
-    def _preheat_hold_cold(self, now: float) -> None:
-        """Away picked by hand while nobody is home: no preheat of any kind
-        until someone is home, Resume schedule, a change by hand, or the
-        "change while away lasts" limit after this pick (each pick restarts
-        it; 0 = until someone is home)."""
-        if self._preheat_mode == MODE_OFF:
-            return
-        limit_s = self._presence_override_limit_s()
-        self._preheat_held_cold = True
-        self._preheat_cold_since = now
-        self._preheat_cold_until = now + limit_s if limit_s > 0 else None
-
-    def _preheat_release_cold(self, why: str | None) -> None:
-        """Back to automatic preheat, logged with *why* (None: quietly, when
-        the next decision line says it, as "someone is home" does)."""
-        if not self._preheat_held_cold:
-            return
-        self._preheat_held_cold = False
-        self._preheat_cold_since = None
-        self._preheat_cold_until = None
-        if why:
-            self._log(_LOGGER).info("%s: back to automatic, %s", self._preheat_prefix(), why)
-
-    def _preheat_expire_cold(self, now: float) -> None:
-        if not self._preheat_held_cold:
-            return
-        if not self._presence_ctrl.nobody_home:
-            self._preheat_release_cold(None)
-        elif self._preheat_cold_until is not None and now >= self._preheat_cold_until:
-            minutes = round((self._preheat_cold_until - (self._preheat_cold_since or now)) / 60)
-            self._preheat_release_cold(
-                f"the Away picked by hand has lasted its {minutes} min"
-            )
 
     # -- the 30-minute recovery -------------------------------------------
     def _preheat_learn(
@@ -350,29 +308,22 @@ class PreheatMixin:
         return {
             "controller": self._preheat.as_dict(),
             "recovery": self._recovery.as_dict(),
-            "held_cold": (
-                {"since": self._preheat_cold_since, "until": self._preheat_cold_until}
-                if self._preheat_held_cold else None
-            ),
             "logged": self._preheat_logged.as_dict() if self._preheat_logged else None,
         }
 
     def _preheat_restore(self, data: Any, now: float) -> None:
-        """Take back what a restart or reload saved.  A held-cold Away is
-        checked at the first evaluation: someone home, or its limit run out
-        while Home Assistant was down, ends it."""
+        """Take back what a restart or reload saved.
+
+        A 2.11.0 save may hold an Away held cold (``held_cold``): that hold
+        is gone in 2.12.0, so it is ignored, and a decision last logged as
+        held cold is not taken back (the next evaluation logs afresh).
+        """
         if not isinstance(data, dict):
             return
         try:
             self._recovery.restore(data.get("recovery"), now)
             if self._preheat_mode != MODE_OFF:
                 self._preheat.restore(data.get("controller"), now)
-                cold = data.get("held_cold")
-                if isinstance(cold, dict):
-                    since = _opt_float(cold.get("since"))
-                    self._preheat_held_cold = True
-                    self._preheat_cold_since = min(since, now) if since is not None else now
-                    self._preheat_cold_until = _opt_float(cold.get("until"))
             self._preheat_logged = LoggedDecision.from_dict(data.get("logged"))
         except Exception:  # noqa: BLE001 - a bad save must never stop the room starting
             _LOGGER.exception(
@@ -381,8 +332,6 @@ class PreheatMixin:
             )
             self._recovery = RecoveryLearner()
             self._preheat = PreheatController(self._preheat_cfg)
-            self._preheat_held_cold = False
-            self._preheat_cold_since = self._preheat_cold_until = None
             self._preheat_logged = None
 
     # -- what is shown -------------------------------------------------------
@@ -439,8 +388,6 @@ class PreheatMixin:
             "preheat_due_at": _iso(d.due_ts) if d is not None else None,
             "preheat_arrival_at": _iso(d.arrival_ts) if d is not None else None,
             "preheat_since": _iso(d.since_ts) if d is not None else None,
-            "preheat_held_cold": self._preheat_held_cold,
-            "preheat_held_cold_until": _iso(self._preheat_cold_until),
         }
 
     def preheat_diagnostics(self) -> dict[str, Any]:

@@ -93,7 +93,7 @@ Build new logic in the HA-free modules first (`parameters.py`,
   ETA parsers. `PreheatConfig` / `RecoveryConfig` are in `parameters.py`.
 - `climate_preheat.py`: preheat on the entity (`PreheatMixin`): the inputs
   (`_preheat_inputs`, `_preheat_scheduled_c`), the evaluation at the start
-  of every cycle and on a Home ETA change, the Away held cold, the learner's
+  of every cycle and on a Home ETA change, the learner's
   feed, persistence (`preheat`), the attributes and sensors' values.
 - `climate_activity.py`: the room's activity log on the entity: a decision
   line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
@@ -726,15 +726,21 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   away mode had saved (as coming home would), so a Boost started then ends on
   it, never on Away. That pre-away state is kept (`_before_override`,
   persisted) for a cancel.
-- **Away picked while nobody is home** is away mode itself, never a manual
-  (sticky) Away: it cancels an override, the schedule override the change
-  started too, and coming home restores the schedule's preset (else the
-  pre-away state). **Resume schedule** while nobody is home does the same.
-  Both apply the base quietly (`_apply_quietly`) before the away action, so
-  no heat call is sent and taken back. For preheat (2.11.0) the two differ:
-  Away holds the room cold, Resume schedule is back to automatic (see
-  "Preheat on the way home"). Once the sensor reads home again (home
-  delay running), Away is an ordinary Away picked by someone at home. Not
+- **Away or Resume schedule picked while nobody is home is back to
+  automatic** (2.12.0, `_async_back_to_automatic`; owner, 27 Oct 2026: "an
+  easy way to reset the heating status to be automatic"), never a manual
+  (sticky) Away: it cancels an override (an Off too) and any schedule
+  override, and coming home restores `_automatic_return`: the schedule's
+  preset, without one the pre-change state, never an Off, Away or Boost
+  (Comfort then). With an override the base is applied quietly
+  (`_apply_quietly`) before the away action, so no heat call is sent and
+  taken back; already in away mode only what comes back with you changes
+  (until 2.11.0 Away then left an Off picked before leaving saved for the
+  return, and preheat held the room cold). Once the sensor reads home again
+  (home delay running), Away is an ordinary Away picked by someone at home.
+  Switching the room back on (Off → Heat) while nobody is home is back to
+  automatic too (2.12.0 review: it routed the schedule's Comfort into an Off
+  until home, heating the empty house with no limit). Not
   changes by hand: the schedule, Off → Heat (it resumes the schedule), Heat
   when already heating (the heating scripts send it before the preset; it
   leaves an open window alone too, see "Windows"). Every user call still
@@ -742,9 +748,36 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   Every other service call counts, an automation's or a voice assistant's
   too: a pre-heat from an automation should work the same (deliberate; the
   owner has no automation setting presets, schedules go through the helper).
+- **Off picked by hand lasts until someone is home (2.12.0, owner, 27 Oct
+  2026).** Frost protection picked while nobody is home, or the one the room
+  is in when everyone leaves (`_off_picked_by_hand`: with a schedule a sticky
+  schedule override, the schedule's own Off is ordinary away mode; without
+  one any Off; with a window open what it will restore), is an override with
+  no limit (`off_until_home`, persisted): the room stays Off, not Away, and
+  preheat stands aside (`off_by_hand`). Coming home ends it
+  (`_end_off_until_home`): the schedule's preset (Comfort without one), its
+  sticky override dropped, the window's restore target with a window open.
+  An Off picked once the sensor reads home again (home delay running) is an
+  ordinary change and stays. Evidence: 27 Oct, Off picked at 08:48 in all
+  four rooms, out 12:34–17:50; replayed, the rooms were still Off two days
+  later (only a Resume schedule at 13:11 undid it), and Away while out
+  wouldn't have. A pre-2.12 snapshot of away mode entered from an Off picked
+  by hand is read with these rules (`_load_presence_snapshot`; such a
+  snapshot has no `presence_override_off_until_home`): away mode entered
+  from an Off picked by hand becomes this override, the same after an Away
+  picked while out (2.11.0's preheat `held_cold`) is back to automatic, and
+  an Off picked while out (then a change with a limit) gets the flag; the
+  line saying so is logged unless summer mode is on. A Boost started from an
+  Off while nobody is home ends back on the Off until home (without a
+  schedule; with one it ends on the schedule's preset). At startup the
+  schedule's state is taken back before presence and window
+  (`_startup_schedule_state`; following it stays last, `_startup_schedule`),
+  so their restores see its preset and override as at any other time
+  (2.12.0 review: with a window open at a startup restore, Comfort came back
+  and the Off's sticky override hid the schedule).
 - **The limit only guards against heating an empty house.** When it fires
-  and the change heats no more than away would (Off, the room switched off,
-  a temperature at or below the away target; with a window open, what the
+  and the change heats no more than away would (the room switched off, a
+  temperature at or below the away target; with a window open, what the
   window will restore), the change stays and is looked at again after
   another limit. When it fires with the presence sensor reporting nothing
   (unavailable, unknown), the room goes back to away anyway
@@ -815,8 +848,8 @@ project doc `claude/roomstat-preheat-wiring-plan-2026-10-24.md`.
   - not in charge → `inactive`. Someone home, no presence sensor or none of
     the three entities set (`no_home_eta`) end the trip home too (everything
     reset, `_ENDS_THE_TRIP`); any other reason — a window, a change by hand,
-    switched off, summer, nothing warmer than Away to restore (a schedule at
-    Away or Frost protection) — and an Away held cold (`held_cold`, Away)
+    an Off picked by hand (`off_by_hand`), switched off, summer, nothing
+    warmer than Away to restore (a schedule at Away or Frost protection) —
     only stand preheat aside (`_stand_aside`: no latch, no level) and keep
     the trip's start, its cap and its arrival's missing time, so a short
     break can't re-arm the cap (review finding: a window opened and shut
@@ -877,22 +910,17 @@ project doc `claude/roomstat-preheat-wiring-plan-2026-10-24.md`.
   short, either side of `heatup_enter_c`. Measured 18–25 Oct: living room
   0.60–0.95 (median 0.77), master 0.30–0.57 (0.43), second 0.50–0.56 (0.54),
   study 0.43–0.65 (0.58); `tests/test_preheat.py` replays four mornings.
-- **Away picked by hand while nobody is home holds the room cold**
-  (`_preheat_hold_cold`, from `_async_presence_back_to_away`: owner,
-  25 Oct 2026, "an explicit Away must not be second-guessed"): no preheat of
-  any kind until someone is home (released quietly in
-  `_restore_presence_state`, whose window branch runs no cycle, and by the
-  invariant in `_preheat_expire_cold`: held cold only exists while
-  `nobody_home`),
-  Resume schedule (`async_resume_schedule`; it decides again after the
-  schedule's preset is saved for the return), a change by hand
-  (`_presence_takeover`, the 2.9.0 takeover; Off and Heat by hand are not
-  one), or `presence_override_max_min`
-  after the pick (each pick restarts it; 0 = until home; checked at each
-  evaluation, so one that ran out while HA was down ends at the first).
-  Unlike the 2.9.0 limit, its end is always back to automatic. An Away
-  picked at home is not carried: the away action turns it into away mode,
-  as before (owner's choice (c), 25 Oct 2026).
+- **Changes by hand while nobody is home** (2.12.0, see "Presence"): Away
+  or Resume schedule is back to automatic, where preheat works (it decides
+  again at once on what was saved for the return); an Off picked by hand
+  holds the room off until someone is home (`off_by_hand`); any other change
+  is in charge until its limit or until someone is home (`change_by_hand`).
+  The 2.11.0 Away held cold (owner, 25 Oct 2026, "an explicit Away must not
+  be second-guessed") went on 27 Oct 2026, when the owner asked for Away to
+  mean "back to automatic"; Off keeps a room cold now. A 2.11.0 save's
+  `held_cold` is ignored, and a decision logged as held cold is not taken
+  back. An Away picked at home is not carried: the away action turns it into
+  away mode, as before.
 - **Shown and logged:** a line per change of decision (`decision.key`: the
   state and the target to 0.1 °C) through `self._log(_LOGGER)` with the
   prefix `preheat (shadow)`, worded by `describe` (what it would heat to,
@@ -910,8 +938,8 @@ project doc `claude/roomstat-preheat-wiring-plan-2026-10-24.md`.
   starts preheat afresh).
 - **Persistence** (`preheat` in the restore-state extra data): the
   controller (latch, the arrival it started for, the trip's start and cap,
-  the level and its pending drop, the arrival's missing time), the learner,
-  the Away held cold and the decision last logged (a reload, which every
+  the level and its pending drop, the arrival's missing time), the learner
+  and the decision last logged (a reload, which every
   preset temperature change causes, writes no second line). Times from the
   future count as now.
 - **Settings** (`TIMING_OPTIONS`, section "Preheat timing"; each one's help
@@ -1050,7 +1078,10 @@ ruff check .
   (`asyncio.timeout`); CI uses 3.12.
 - `tests/test_preheat.py` (the rule, the learner, the log lines, HA-free)
   and `tests/test_preheat_entity.py` (through the entity: shadow sends what
-  off sends, an outing line by line, the Away held cold, restarts).
+  off sends, an outing line by line, changes by hand while out, restarts).
+- `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
+  Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
+  replayed, restarts and pre-2.12 snapshots).
 - `tests/plant_sim.py` models timer overlays (`ProxySettings.heat_timer_s`,
   `PlantParams.tado_schedule_c`: 5 °C, or None for Off) and
   `RoomSim.kill()` (the proxy stops, the room and valve carry on); the

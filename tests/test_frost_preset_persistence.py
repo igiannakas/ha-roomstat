@@ -567,9 +567,11 @@ class TestRestartEndToEnd:
         assert ent.preset_mode == "comfort"
 
     def test_presence_away_survives_restart(self):
+        # Night, not Off: an Off picked by hand ends with the absence (2.12.0,
+        # tests/test_off_and_automatic_while_away.py).
         old = _make_entity(window=False, presence=True)
         _run(_start(old))
-        _run(_select_preset(old, "frost_protection"))
+        _run(_select_preset(old, "eco"))
         old.hass.set(PRESENCE, "off")
         old._async_presence_changed(_event("off"))
         _fire_last_timer()
@@ -580,12 +582,12 @@ class TestRestartEndToEnd:
         new.hass.set(PRESENCE, "off")
         _restart_from(old, new)
         assert new.preset_mode == "away"
-        assert new._presence_ctrl.get_saved().preset == "frost_protection"
+        assert new._presence_ctrl.get_saved().preset == "eco"
 
         new2 = _make_entity(window=False, presence=True)
         new2.hass.set(PRESENCE, "on")
         _restart_from(old, new2)
-        assert new2.preset_mode == "frost_protection"
+        assert new2.preset_mode == "eco"
         assert not new2._presence_ctrl.is_active
 
     def _go_away(self, ent):
@@ -604,7 +606,7 @@ class TestRestartEndToEnd:
         on the preset the room had before away mode, never on Away."""
         ent = _make_entity(window=False, presence=True)
         _run(_start(ent))
-        _run(_select_preset(ent, "frost_protection"))
+        _run(_select_preset(ent, "eco"))
         self._go_away(ent)
         _run(_select_preset(ent, "boost"))
         assert ent.preset_mode == "boost"
@@ -614,9 +616,9 @@ class TestRestartEndToEnd:
                  if getattr(c["callback"], "__name__", "") == "_async_boost_expired"]
         boost[0]["cancelled"] = True
         _run(boost[0]["callback"](None))
-        assert ent.preset_mode == "frost_protection"
+        assert ent.preset_mode == "eco"
         self._come_home(ent)
-        assert ent.preset_mode == "frost_protection"
+        assert ent.preset_mode == "eco"
         assert not ent._presence_ctrl.nobody_home
 
     def test_boost_running_when_leaving_returns_to_pre_boost_preset(self):
@@ -632,11 +634,11 @@ class TestRestartEndToEnd:
     def test_leave_and_return_restores_previous_preset(self):
         ent = _make_entity(window=False, presence=True)
         _run(_start(ent))
-        _run(_select_preset(ent, "frost_protection"))
+        _run(_select_preset(ent, "eco"))
         self._go_away(ent)
         assert ent.target_temperature == 17.0  # PresetConfig default away target
         self._come_home(ent)
-        assert ent.preset_mode == "frost_protection"
+        assert ent.preset_mode == "eco"
 
     def test_user_selected_away_is_kept_when_home_with_snapshot(self):
         ent = _make_entity(window=False, presence=True)
