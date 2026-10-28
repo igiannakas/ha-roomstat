@@ -1053,6 +1053,27 @@ class Autotuner:
                 td_t = min(td_t, cur.td_s)
         return Tuning(kp_t, ki_t, td_t)
 
+    def _td_step(self, cur_s: float, tgt_s: float) -> float:
+        """The braking time after one update from ``cur_s`` towards ``tgt_s``.
+
+        More braking (the safe direction: an earlier stop lands the room
+        cooler, and a hold tops it up) steps at most ``td_step_frac`` (or
+        ``td_step_min_s``); the caller drops a step under ``td_deadband_s``.
+        Less braking is a moving average: ``td_less_smoothing`` of the way,
+        at most ``td_less_step_frac`` (or ``td_less_step_min_s``), and only
+        once the target is ``td_deadband_s`` below.  A heat-up's result is
+        mostly people and the weather, so one empty morning moves Td a
+        little, never most of the way (see ``AutotuneConfig``).
+        """
+        c = self.cfg
+        gap = tgt_s - cur_s
+        if gap >= 0.0:
+            return cur_s + min(gap, max(c.td_step_min_s, c.td_step_frac * cur_s))
+        if -gap < c.td_deadband_s:
+            return cur_s
+        step = max(c.td_less_step_min_s, c.td_less_step_frac * cur_s)
+        return cur_s - min(c.td_less_smoothing * -gap, step)
+
     # -- observation -----------------------------------------------------------
     def observe(self, s: AutotuneSample) -> str | None:
         """Feed one regulation cycle.  Returns a reason when values changed."""
@@ -1387,8 +1408,7 @@ class Autotuner:
         ki = self._toward(cur.ki, tgt.ki, c.ki_step_down, c.ki_step_up)
         td = cur.td_s
         if self.derivative_allowed:
-            step = max(c.td_step_min_s, c.td_step_frac * cur.td_s)
-            td = cur.td_s + _clamp(tgt.td_s - cur.td_s, -step, step)
+            td = self._td_step(cur.td_s, tgt.td_s)
         if emergency:
             # The caller has already cut the trims, so the targets are lower:
             # take one step down towards them now, never up, never less
@@ -1405,7 +1425,10 @@ class Autotuner:
             kp = cur.kp
         if abs(ki - cur.ki) <= c.ki_deadband_rel * max(cur.ki, 1e-12):
             ki = cur.ki
-        if abs(td - cur.td_s) < c.td_deadband_s:
+        # More braking: a step under the dead-band is dropped.  Less braking
+        # has its dead-band on the gap to the target (``_td_step``), as its
+        # smoothed steps are smaller than the dead-band by design.
+        if cur.td_s <= td < cur.td_s + c.td_deadband_s:
             td = cur.td_s
         new = self._bounded(Tuning(kp, ki, td))
         if emergency:
@@ -1459,7 +1482,11 @@ class Autotuner:
         if abs(new.td_s - cur.td_s) >= 1.0:
             parts.append(f"td {cur.td_s / 60:.0f}→{new.td_s / 60:.0f} min")
         self.last_update_reason = f"{trigger}: " + ", ".join(parts)
-        self._update_note = f"changed {_change_text(cur, new)}" + (
+        toward = ""
+        if new.td_s < cur.td_s - 1.0 and tgt.td_s < new.td_s - 1.0:
+            # A smoothed step: say where it is heading.
+            toward = f", a step towards {tgt.td_s / 60:.1f}"
+        self._update_note = f"changed {_change_text(cur, new)}{toward}" + (
             f" (on trial: judged on the next {c.confirm_up} heat-ups)"
             if self._pending is not None else ""
         )

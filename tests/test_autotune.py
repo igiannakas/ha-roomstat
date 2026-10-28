@@ -506,9 +506,62 @@ class TestSafety:
                 assert before.kp * c.kp_step_down - 1e-12 <= after.kp <= before.kp * c.kp_step_up + 1e-12
             if after.ki != before.ki:
                 assert before.ki * c.ki_step_down - 1e-15 <= after.ki <= before.ki * c.ki_step_up + 1e-15
-            if abs(after.td_s - before.td_s) > 1e-9:
+            if after.td_s > before.td_s + 1e-9:          # more braking
                 step = max(c.td_step_min_s, c.td_step_frac * before.td_s)
-                assert abs(after.td_s - before.td_s) <= step + 1e-6
+                assert after.td_s - before.td_s <= step + 1e-6
+            elif after.td_s < before.td_s - 1e-9:        # less braking: smoothed
+                step = max(c.td_less_step_min_s, c.td_less_step_frac * before.td_s)
+                assert before.td_s - after.td_s <= step + 1e-6
+
+    def test_more_braking_steps_at_the_old_pace(self):
+        t = _tuner(td=600.0)
+        assert t._td_step(600.0, 1800.0) == pytest.approx(900.0)    # 5 min (50 %)
+        assert t._td_step(1200.0, 1500.0) == pytest.approx(1500.0)  # all of a small gap
+        assert t._td_step(600.0, 600.0) == pytest.approx(600.0)
+
+    def test_less_braking_is_a_moving_average(self):
+        """28 Oct 2026, living room: the coast model said 8.0 min with 13.1
+        in use, and the full step jumped there; a smoothed step goes 30 %
+        of the way, and later empty mornings carry on from there."""
+        t = _tuner(td=786.0)
+        steps = [786.0]
+        while True:
+            nxt = t._td_step(steps[-1], 480.0)
+            if nxt == steps[-1]:
+                break
+            steps.append(nxt)
+        assert steps[1] == pytest.approx(786.0 - 0.3 * 306.0)           # 13.1 -> 11.6
+        assert all(b < a for a, b in zip(steps, steps[1:]))
+        # It stops within the dead-band above the target: a little more
+        # braking than the model, never less.
+        assert 480.0 < steps[-1] < 480.0 + CFG.td_deadband_s
+        assert len(steps) == 4
+
+    def test_less_braking_is_capped(self):
+        t = _tuner(td=1500.0)
+        # 30 % of a 20-min gap would be 6 min; 15 % of 25 min is the most.
+        assert t._td_step(1500.0, 300.0) == pytest.approx(1500.0 - 225.0)
+        # A short braking time still moves at least towards the minimum step.
+        assert t._td_step(300.0, 0.0) == pytest.approx(240.0)           # 1 min, not 45 s
+
+    def test_less_braking_waits_for_a_gap_beyond_the_dead_band(self):
+        t = _tuner(td=600.0)
+        assert t._td_step(600.0, 600.0 - CFG.td_deadband_s + 1.0) == 600.0
+        assert t._td_step(600.0, 600.0 - CFG.td_deadband_s) < 600.0
+
+    def test_a_small_less_braking_step_is_still_on_trial(self):
+        """Its 54-s step is under the 2-min dead-band of a more-braking step,
+        yet it is applied, rate-limited at 12 h and judged like any move to
+        more heat."""
+        t = _tuner(td=600.0)
+        t._targets = lambda: A.Tuning(0.6, 0.002, 420.0)
+        t._last_change_ts = DAY
+        assert t._maybe_update(DAY + 3600, "test") is None             # < 12 h
+        assert "a change towards more heat waits 12 h" in t._update_note
+        assert t._maybe_update(DAY + 13 * 3600, "test") is not None
+        assert t.active_tuning().td_s == pytest.approx(600.0 - 0.3 * 180.0)
+        assert t._pending is not None
+        assert "braking 10.0→9.1 min, a step towards 7.0 (on trial" in t._update_note
 
     def test_more_heat_needs_confirmation(self):
         """A single sag must not raise Kp (no braking active)."""

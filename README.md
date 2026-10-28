@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.12.0-blue)
+![Version](https://img.shields.io/badge/version-2.13.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -199,6 +199,11 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   ends early but keeps what it measured.
 - It changes values a little at a time, stays within safe limits around your
   own values, and undoes any change that makes things worse.
+- The braking time leans towards stopping early. More braking (a cooler
+  landing, topped up after) is taken in full steps. Less braking (a warmer
+  landing) moves only part of the way after each heat-up, about 1–2 minutes,
+  because one heat-up's result says more about people and the weather than
+  about the radiator.
 - Sensors per room:
   - Kp, Ki and braking time in use;
   - auto-tune status;

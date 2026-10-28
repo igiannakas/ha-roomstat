@@ -171,8 +171,25 @@ class AutotuneConfig:
     kp_step_up: float = 1.10
     ki_step_down: float = 0.7
     ki_step_up: float = 1.2
-    td_step_frac: float = 0.5          # Td moves at most 50 % (or 5 min) per update
+    # More braking (an earlier stop, a cooler landing: the safe direction)
+    # moves at most 50 % (or 5 min) per update.
+    td_step_frac: float = 0.5
     td_step_min_s: float = 300.0
+    # Less braking (a later stop, a warmer landing) is a moving average: each
+    # update moves Td this share of the way to its target, at most
+    # td_less_step_frac of its value (or td_less_step_min_s), and only once
+    # the target is td_deadband_s or more below it (2.13.0).  The owner (28
+    # Oct 2026): a room that lands short and takes another go is better than
+    # one that lands hot and needs a window opened.  Evidence, living room
+    # 21-28 Oct: heat-up results scattered +-0.33 C around zero, set by people
+    # and the weather (the coast: 4-12 min empty, 15-33 min with people), while
+    # 5 min of braking moves a landing by only 0.1-0.25 C; full steps chased
+    # that noise (11.0 -> 7.9 -> 10.3 -> 13.1 -> 8.4 -> 13.1 rollback -> 8.0).
+    # Those 12 heat-ups replayed: 9.0-13.2 min, down at most 1.6 min a time
+    # (up as before, after the guests' +0.48 and the people's +0.45).
+    td_less_smoothing: float = 0.3
+    td_less_step_frac: float = 0.15
+    td_less_step_min_s: float = 60.0
     # Changes smaller than these are ignored (noise, not evidence).
     kp_deadband_rel: float = 0.05
     ki_deadband_rel: float = 0.15

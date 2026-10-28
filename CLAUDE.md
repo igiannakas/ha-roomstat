@@ -372,7 +372,10 @@ be read.
   falling). 26 Oct 06:42 it read `heats again once heading 0.1 below within
   20 min (predicted: 0.11 below)` — met on paper while the valve stayed
   shut, the release only looking at falls. A coast whose target fell below
-  the room (a lower preset mid heat-up) reads `Heat-up ended`, a hold a
+  the room (a lower preset mid heat-up) reads `Heat-up ended` on the cycle
+  the coast begins (2.13.0: one that carries on is still short by the
+  regulator's own error, so a result rounded to 0.00 reads `Coasting`; 28
+  Oct 06:45, study), a hold a
   target step released reads `Holding (released): 0.76 below` (two
   decimals where one would read as the 0.8 of `full heat only from 0.8
   below`), a full push `Holding, full push: … stops once the leftover heat
@@ -1035,6 +1038,38 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
 - **Safety:**
   - hard bounds, plus bounds relative to the configured values;
   - small steps and dead-bands;
+  - **the braking time leans towards stopping early** (2.13.0, `_td_step`;
+    the owner, 28 Oct 2026: a room that lands short and takes another go is
+    better than one that lands hot and needs a window opened). More braking
+    steps as before (50 % or 5 min, a step under the 2-min dead-band
+    dropped); less braking is a moving average: `td_less_smoothing` (30 %)
+    of the way to the target, at most `td_less_step_frac` (15 %) or
+    `td_less_step_min_s` (1 min), and only once the target is the dead-band
+    below, so it settles up to 2 min above the model. Its steps are smaller
+    than the dead-band, so the dead-band is on the gap, not the step; any
+    step down is still "more heat" (12 h, on trial). The verdict names the
+    target (`…, a step towards 8.0`). Evidence, living room 21–28 Oct: heat-
+    up results scattered ±0.33 °C (sd) around +0.04, the coast 4–12 min
+    empty and 15–33 min with people, while 5 min of braking moves a landing
+    by only 0.1–0.25 °C; full steps chased it (11.0 → 7.9 → 10.3 → 13.1 →
+    8.4 → 13.1 rollback → 8.0 min). Those 12 heat-ups replayed: 9.0–13.2,
+    down at most 1.6 min a time. Simulated (`plant_sim`, four rooms, 40
+    days, people on half the heat-ups at +0.5–1.0 °C/h for 45–120 min from
+    15–75 min in, outdoor 5–13 °C day to day, six seeds, from day 7):
+    heat-ups with people peak +0.60/+0.32/+0.60/+0.27 → +0.50/+0.26/+0.57/
+    +0.24 (generic living, generic slow, fitted living, fitted second
+    bedroom), the share above +0.3 down 5–9 points, empty rooms' peaks
+    unchanged (±0.02), more short landings in the generic slow room (34 →
+    45 %), heat-ups 0–12 min slower, commands +2–9 %, rollbacks −2…+0.4,
+    the braking time's swing −24 % / ±0 / ±0 / −12 %. Tried: the same
+    smoothing both ways calms the swing more (−40…−61 % in three rooms) but
+    lands hotter with people than this; a 9-episode median drifts up to 16
+    min on the real heat-ups; ignoring heat-ups with people (an oracle)
+    holds the braking time steady but then nothing brakes for them (+0.96
+    against +0.60 in the generic living room). From the 10-min default an
+    empty fitted second bedroom takes about 6 days to come down (to 2.3
+    min; 1 day to 0.6 before), the generic living room as before, the
+    generic slow room a few days longer;
   - rate limits (3 h gentler, 12 h "more heat");
   - two agreeing episodes needed for "more heat";
   - a watchdog rolls back a "more heat" change if overshoot rises or an

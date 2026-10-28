@@ -198,6 +198,20 @@ class TestDecisionLines:
                      tado_c=None)
         assert line.startswith("Heat-up ended: valve shut, 11.7 above the target |")
 
+    def test_a_coast_a_few_thousandths_short_is_still_coasting(self):
+        """28 Oct 06:45, study: the coast was 0.004 short, the result's error
+        rounds to 0.00, and the line read 'Heat-up ended: valve shut, on the
+        target' between two 'Coasting' lines.  The regulator stops a coast at
+        or above the target, so a coast that carries on is short of it."""
+        line = _line(mode="coast", prev_mode="coast", error_c=0.0, slope_c_per_h=0.2,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None)
+        assert line.startswith("Coasting: valve shut, 0.0 to go, still rising 0.2 °C/h |")
+        # Entered this cycle at the target (a heat-up whose target fell to
+        # the room): ended, as before.
+        line = _line(mode="coast", prev_mode="heat", error_c=0.0, slope_c_per_h=0.2,
+                     command_c=5.0, command_off=True, tado="off", tado_c=None)
+        assert line.startswith("Heat-up ended: valve shut, on the target |")
+
     def test_the_first_decision_after_a_start_is_no_transition(self):
         """A shut valve resumes as coast and becomes a stop: no coast happened."""
         line = _line(mode="stop", prev_mode="coast", resumed=True, error_c=-0.2,
@@ -379,10 +393,11 @@ class TestTunerVerdicts:
         t._params = A.Tuning(3.0, 0.001, 780.0)
         t._on_heatup(_heatup(DAY, -0.35), DAY)
         assert t.verdicts == 1
-        # The coast model (7 min) wants less braking at once; more heat is on trial.
+        # The coast model (7 min) wants less braking: a smoothed step, 30 % of
+        # the 6-min gap, which says where it is heading; more heat is on trial.
         assert t.last_verdict == (
             "stopped 0.35 °C short: vote 1 of 2 for less braking; changed braking "
-            "13.0→7.0 min (on trial: judged on the next 2 heat-ups)")
+            "13.0→11.2 min, a step towards 7.0 (on trial: judged on the next 2 heat-ups)")
         t._on_heatup(_heatup(2 * DAY, -0.30), 2 * DAY)
         assert t.last_verdict == (
             "stopped 0.30 °C short: less braking (×0.85, 2 of 2 votes); no change while "

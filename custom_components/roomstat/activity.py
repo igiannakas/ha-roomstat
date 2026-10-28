@@ -317,9 +317,12 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
 
     over = (f.setpoint_c or 0.0) + cfg.stop_over_c       # the stop's line
     if f.mode == MODE_COAST:
-        if e <= 0:
+        if e <= 0 and f.prev_mode != MODE_COAST:
             # The target fell below the room (a lower preset, a window): a
             # heat-up ends as a coast, which the next cycle turns into a stop.
+            # A coast that carries on is still short of the target by the
+            # regulator's own error (one at or above it is a stop), so a 0.00
+            # there is a few thousandths rounded away (28 Oct 06:45, study).
             return f"Heat-up ended: valve shut, {_vs_target(e)}"
         if new and f.prev_mode in (MODE_HEAT, MODE_HOLD):
             # From a hold: a full push ending on the heat-up's exit.
