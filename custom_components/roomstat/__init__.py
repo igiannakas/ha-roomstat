@@ -25,7 +25,10 @@ from .const import (
     CLOUD_TRV_PLATFORMS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
+    CONF_HEATING_POWER_ENTITY_ID,
+    CONF_VALVE_LOOKAHEAD,
     DOMAIN,
+    safe_float,
 )
 from .parameters import (
     ENTITY_MISSING_REPORT_S,
@@ -152,6 +155,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_cloud"] = (
                 reg_entry is not None and reg_entry.platform in CLOUD_TRV_PLATFORMS
             )
+
+        # The zone's heating power (Tado's heating %), for the valve
+        # look-ahead's learning: the value and when it last changed (a new
+        # report of the cloud's polling).
+        data["heating_power"] = None
+        data["heating_power_ts"] = None
+        power_id = entry.options.get(CONF_HEATING_POWER_ENTITY_ID)
+        if power_id and entry.options.get(CONF_VALVE_LOOKAHEAD):
+            state = hass.states.get(power_id)
+            value = safe_float(state.state) if state is not None else None
+            if value is not None and 0.0 <= value <= 100.0:
+                data["heating_power"] = value
+                data["heating_power_ts"] = state.last_changed.timestamp()
 
         async_check_entities(
             hass, entry, missing_watch, time.time(),

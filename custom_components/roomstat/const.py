@@ -93,6 +93,13 @@ CONF_HEAT_TIMER_S = "heat_timer_s"
 TADO_DOMAIN = "tado"
 TADO_SERVICE_TIMER = "set_climate_timer"
 
+# Valve look-ahead (lookahead.py, climate_lookahead.py): cancel the Tado
+# valve's own look-ahead on its falling reading, learned from the zone's
+# heating power sensor (Tado's heating %, e.g. sensor.<zone>_heating).
+# Off by default.
+CONF_VALVE_LOOKAHEAD = "valve_lookahead"
+CONF_HEATING_POWER_ENTITY_ID = "heating_power_entity_id"
+
 # Out-of-band alarm (binary_sensor.<room>_out_of_band; parameters.OutOfBandConfig)
 CONF_BAND_C = "band_c"
 CONF_BAND_MIN = "band_min"

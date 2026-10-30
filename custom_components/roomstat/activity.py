@@ -255,6 +255,10 @@ class CycleFacts:
     send: str = ""                  # the send decision (climate._last_reason)
     td_s: float | None = None       # the braking time this cycle decided with
     sensor_lost_min: int | None = None
+    # The valve look-ahead (lookahead.py): what it took off the hold command,
+    # and how fast the valve's reading was falling.
+    lookahead_c: float = 0.0
+    trv_fall_c_per_h: float | None = None
 
 
 def _signed(value: float, digits: int) -> str:
@@ -391,6 +395,11 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
         if f"{e:.1f}" == f"{cfg.heatup_enter_c:.1f}":
             digits = 2
     detail = f"P {_signed(f.p_c, 1)}, I {_signed(f.i_c, 2)}"
+    if f.lookahead_c >= 0.05:
+        # The valve's look-ahead on its falling reading, cancelled.
+        fall = (f" falling {f.trv_fall_c_per_h:.1f} °C/h"
+                if f.trv_fall_c_per_h is not None else " falling")
+        detail += f"; {f.lookahead_c:.1f} off for its reading{fall}"
     if why_not:
         detail += "; " + "; ".join(why_not)
     line = f"{head}: {_gap(e, digits)}, valve {push} ({detail})"

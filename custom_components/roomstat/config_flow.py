@@ -7,7 +7,12 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
-from .climate_controllers import OBSOLETE_OPTIONS, change_trv
+from .climate_controllers import (
+    OBSOLETE_OPTIONS,
+    change_trv,
+    options_form_errors,
+    options_form_values,
+)
 from .const import (
     CONF_AUTOTUNE_DERIVATIVE,
     CONF_AUTOTUNE_ENABLED,
@@ -21,6 +26,7 @@ from .const import (
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEAT_TIMER_S,
+    CONF_HEATING_POWER_ENTITY_ID,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -41,6 +47,7 @@ from .const import (
     CONF_SOURCE_ENTITY_ID,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
+    CONF_VALVE_LOOKAHEAD,
     CONF_WINDOW_CLOSE_DELAY_S,
     CONF_WINDOW_DELAY_S,
     CONF_WINDOW_SENSOR_ID,
@@ -107,10 +114,27 @@ class RoomstatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return RoomstatOptionsFlow()
 
 
+# Optional entity settings: one left empty in the form is removed.
+_OPTIONAL_ENTITY_KEYS = (
+    CONF_WINDOW_SENSOR_ID,
+    CONF_PRESENCE_SENSOR_ID,
+    CONF_SUMMER_MODE_ENTITY_ID,
+    CONF_SCHEDULE_ENTITY_ID,
+    CONF_FALLBACK_ENTITY_ID,
+    CONF_PREHEAT_ARRIVAL_ENTITY_ID,
+    CONF_PREHEAT_CLOSE_ENTITY_ID,
+    CONF_PREHEAT_NEARBY_ENTITY_ID,
+    CONF_HEATING_POWER_ENTITY_ID,
+)
+
+
 class RoomstatOptionsFlow(config_entries.OptionsFlow):
     """Per-entry options (gear icon) for tuning, presets & sensor selection."""
 
     async def async_step_init(self, user_input=None):
+        errors: dict[str, str] = {}
+        # On an error the form is shown again with what was entered.
+        entered: dict = {}
         if user_input is not None:
             # Flatten section data (sections return nested dicts) into
             # a single flat dict for storage in config_entry.options.
@@ -120,23 +144,18 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                     flat.update(value)
                 else:
                     flat[key] = value
-
+            # E.g. the valve look-ahead without the heating power it learns from.
+            errors = options_form_errors(flat)
+            if errors:
+                entered = flat
+        if user_input is not None and not errors:
             # Strip empty optional sensor values so they're stored as absent
             cleaned = {k: v for k, v in flat.items() if v not in (None, "")}
             # Preserve existing options not shown in this form (e.g. preset
             # temperatures set via Number entities).
             merged = dict(self.config_entry.options)
             # Remove optional sensor keys that were cleared by the user
-            for key in (
-                CONF_WINDOW_SENSOR_ID,
-                CONF_PRESENCE_SENSOR_ID,
-                CONF_SUMMER_MODE_ENTITY_ID,
-                CONF_SCHEDULE_ENTITY_ID,
-                CONF_FALLBACK_ENTITY_ID,
-                CONF_PREHEAT_ARRIVAL_ENTITY_ID,
-                CONF_PREHEAT_CLOSE_ENTITY_ID,
-                CONF_PREHEAT_NEARBY_ENTITY_ID,
-            ):
+            for key in _OPTIONAL_ENTITY_KEYS:
                 if key not in cleaned:
                     merged.pop(key, None)
             merged.update(cleaned)
@@ -164,8 +183,9 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
             # AFTER HA has persisted the new options, avoiding stale data.
             return self.async_create_entry(title="", data=merged)
 
-        # Load current values (options > data > defaults)
-        opts = self.config_entry.options
+        # Load current values (options > data > defaults).  After an error:
+        # what was just entered, an optional entity left empty included.
+        opts = options_form_values(self.config_entry.options, entered, _OPTIONAL_ENTITY_KEYS)
         data = self.config_entry.data
         defaults = RegulationConfig()
         beh_defaults = BehaviourConfig()
@@ -344,7 +364,7 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         )
 
         # --- Build TRV communication section schema ---
-        source_entity = data.get(CONF_SOURCE_ENTITY_ID)
+        source_entity = opts.get(CONF_SOURCE_ENTITY_ID) or data.get(CONF_SOURCE_ENTITY_ID)
         trv_section_schema = vol.Schema(
             {
                 # The TRV the room reads and commands, e.g. a Tado valve via
@@ -419,6 +439,26 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         if fallback_entity:
             trv_section_schema = self.add_suggested_values_to_schema(
                 trv_section_schema, {CONF_FALLBACK_ENTITY_ID: fallback_entity}
+            )
+
+        # --- Build the valve look-ahead section schema ---
+        lookahead_section_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_VALVE_LOOKAHEAD,
+                    default=bool(opts.get(CONF_VALVE_LOOKAHEAD, False)),
+                ): selector.BooleanSelector(),
+                # The zone's heating power (Tado's heating %), e.g.
+                # sensor.<zone>_heating: what the look-ahead learns from.
+                vol.Optional(CONF_HEATING_POWER_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+            }
+        )
+        heating_power_entity = opts.get(CONF_HEATING_POWER_ENTITY_ID)
+        if heating_power_entity:
+            lookahead_section_schema = self.add_suggested_values_to_schema(
+                lookahead_section_schema, {CONF_HEATING_POWER_ENTITY_ID: heating_power_entity}
             )
 
         # --- Main options schema with sections ---
@@ -551,6 +591,12 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                     {"collapsed": True},
                 ),
 
+                # Section: Valve look-ahead
+                vol.Required("valve_lookahead"): section(
+                    lookahead_section_schema,
+                    {"collapsed": True},
+                ),
+
                 # Section: Out-of-band alarm
                 vol.Required("out_of_band"): section(
                     vol.Schema(
@@ -632,4 +678,5 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=options_schema,
+            errors=errors,
         )

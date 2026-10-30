@@ -90,6 +90,20 @@ async def async_get_config_entry_diagnostics(
         "states": {eid: _state_snapshot(hass, eid) for eid in selected_entities},
         "autotune": _autotune_snapshot(hass, config_entry),
         "preheat": _preheat_snapshot(hass, config_entry),
+        "valve_lookahead": _lookahead_snapshot(hass, config_entry),
+    }
+
+
+def _lookahead_snapshot(hass: HomeAssistant, config_entry: ConfigEntry) -> dict[str, Any] | None:
+    """The valve look-ahead: on or not, what it learned and from which releases."""
+    coordinator = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    climate = getattr(coordinator, "climate_entity", None)
+    if climate is None:
+        return None
+    return {
+        "enabled": climate.lookahead_enabled,
+        "summary": climate.valve_lookahead_summary(),
+        "state": climate._lookahead.to_dict(),
     }
 
 

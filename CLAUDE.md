@@ -38,22 +38,28 @@ parameters.py → autotune.py         ├─ climate_regulation.py (RegulationMi
 climate_controllers.py              ├─ climate_presets.py (PresetMixin)
 regulation.py → activity.py         ├─ climate_schedule.py (ScheduleMixin)
 parameters.py → preheat.py          ├─ climate_summer.py (SummerMixin)
-                                    ├─ climate_activity.py (ActivityMixin)
+parameters.py → lookahead.py        ├─ climate_activity.py (ActivityMixin)
                                     ├─ climate_preheat.py (PreheatMixin)
+                                    ├─ climate_lookahead.py (LookaheadMixin)
                                     └─ __init__.py (coordinator), config_flow.py
 ```
 
 Build new logic in the HA-free modules first (`parameters.py`,
 `regulation.py`, `autotune.py`, `climate_controllers.py`, `activity.py`,
-`preheat.py`), then wire it into the HA modules.
+`preheat.py`, `lookahead.py`), then wire it into the HA modules.
 
 ### Key files
 
 - `parameters.py`: all defaults (RegulationConfig, PresetConfig,
-  CorrectionTuning, BehaviourConfig, AutotuneConfig).
+  CorrectionTuning, BehaviourConfig, AutotuneConfig, LookaheadConfig).
 - `regulation.py`: the controller (modes heat / coast / hold / stop);
   `outlook()` holds the predictions a mode is decided on, which the
-  activity log explains with.
+  activity log explains with; `lookahead_correction_c` (the valve
+  look-ahead's lowering of a hold command; it stays in this module so
+  regulation.py imports nothing but parameters.py, which the tests that load
+  it on its own rely on).
+- `lookahead.py`: the valve look-ahead's learner (`LookaheadLearner`, see
+  "Valve look-ahead" below), HA-free.
 - `autotune.py`: background tuning of Kp, Ki and the braking time Td. Each
   judged episode leaves a verdict (`last_verdict`, `last_verdict_until`,
   `verdicts`): what it changed, or why it changed nothing (a vote short, on
@@ -68,7 +74,9 @@ Build new logic in the HA-free modules first (`parameters.py`,
   last command's bookkeeping (`pending_command`, `resend_grace_s`,
   `trv_holds_command`, `CommandRecord`), the
   fail-cold helpers (timer overlays, watchdog test, `OutOfBandMonitor`),
-  and the config entry option migration.
+  the config entry option migration, and the options form's checks
+  (`options_form_errors`, `options_form_values`: shown again after an
+  error with what was entered).
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
   feeding the auto-tuner. At debug it logs one line per cycle with the
@@ -95,6 +103,11 @@ Build new logic in the HA-free modules first (`parameters.py`,
   (`_preheat_inputs`, `_preheat_scheduled_c`), the evaluation at the start
   of every cycle and on a Home ETA change, the learner's
   feed, persistence (`preheat`), the attributes and sensors' values.
+- `climate_lookahead.py`: the valve look-ahead on the entity
+  (`LookaheadMixin`): the valve reading's slope and the look-ahead for the
+  regulator (`_lookahead_inputs`), releases and their answers
+  (`_lookahead_after_send`, `_lookahead_observe`), persistence
+  (`lookahead`, with the TRV it was learned on), the sensor's values.
 - `climate_activity.py`: the room's activity log on the entity: a decision
   line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
   verdicts, the sensor's state and attributes, persistence (`activity`).
@@ -102,8 +115,10 @@ Build new logic in the HA-free modules first (`parameters.py`,
   override remaining, auto-tune sensors, and the regulation trace (command to
   the valve, room error as measurement sensors — long-term statistics outlive
   the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
-  an enum), the activity log (`RoomstatActivitySensor`), and preheat's
-  decision (`preheat`, an enum) and 30-minute recovery (`preheat_recovery`).
+  an enum), the activity log (`RoomstatActivitySensor`), preheat's
+  decision (`preheat`, an enum) and 30-minute recovery (`preheat_recovery`),
+  and the valve look-ahead in use (`valve_lookahead`, only while its option
+  is on).
   `button.py`: resume schedule, reset auto-tune.
   `binary_sensor.py`: sensor degraded, out of band.
 - `config_flow.py`: setup and the options flow (sections).
@@ -955,6 +970,113 @@ project doc `claude/roomstat-preheat-wiring-plan-2026-10-24.md`.
   entities join the entity-gone repairs (warnings) while preheat is not off
   (`PREHEAT_ROLES`).
 
+## Valve look-ahead (2.14.0)
+
+Read this before changing `lookahead.py`, `climate_lookahead.py`,
+`LookaheadConfig` or `regulation.lookahead_correction_c`.  Evidence: project
+doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
+
+- **The owner's request (30 Oct 2026):** a negative adjustment to the hold
+  command, from how fast the valve's own reading falls, starting low and
+  learned. An option per room (`valve_lookahead`, off by default) with the
+  zone's heating power sensor it learns from (`heating_power_entity_id`,
+  Tado's `sensor.<zone>_heating`; the options form refuses the option
+  without it, `options_form_errors`). The owner chose it knowing the
+  simulation below; holding the release until the slide slows was
+  rejected (the room may cool too far).
+- **The mechanism (real data, living room, 36 releases 23-30 Oct 2026):** a
+  Tado looks ahead on its own reading. Its first answer to a release follows
+  push + 13 min × fall (r = 0.85; push alone 0.50; fit: first % = 16 + 38 ×
+  (push + 15 × fall per min), R² 0.73; a dynamic P + I + look-ahead fit on
+  the heating % series gives 8.5-15 min). Fast slides (≥ 2.5 °C/h) got 5.7
+  valve-minutes in the first 10 min against 1.4 for slow ones, and peaked
+  +0.29 (median) against +0.15. **But a release's peak does not follow its
+  dose** (r = 0.04), and night releases (no people or sun, reading falling
+  0.9 °C/h) still peak +0.21: most of a top-up's overshoot is the 7-9-min
+  dead time (no feedback on the room can dose less; a derivative only sees
+  the rise once the heat is committed), the look-ahead adds at most ~0.1 on
+  morning re-fires.
+- **What it does:** in hold only, the command is lowered by
+  `lookahead_correction_c` = look-ahead × (fall − 0.3 °C/h deadband), at
+  most 1.5 °C (`lookahead_deadband_c_per_h`, `lookahead_cap_c`). One-sided:
+  a flat, rising or unknown reading changes nothing; heat, coast and stop are
+  untouched. The full push is decided on the uncorrected push; the
+  integral's saturation check uses the command actually sent
+  (`raw − lookahead`), and the lowering is not "saturated". The slope is a
+  12-min Theil-Sen (`SlopeEstimator`, 4 samples, 400-s gap) over the
+  reading of the TRV entity in use, fed every regulated cycle; a switch of
+  entity starts it afresh, a gap over 400 s clears it.
+- **Learning (`LookaheadLearner`):** a release is a hold command sent while
+  the valve was shut (`_lookahead_valve_shut`: `trv.off`, or the frost
+  level as the baseline with no heat setpoint showing; never while a heat
+  command of ours may still be on its way, whose stale "off" a cloud zone
+  shows for a minute), with the reading's slope known and a heating power
+  sensor set. The command booked is the one tried (`_last_attempt_c`, kept
+  inside what the valve accepts). Its answer is the first heating power
+  report above 0 whose report time (the state's `last_changed`) is after
+  the command and within `observe_s` (8 min): cycles that skip the
+  look-ahead (room sensor lost, no data, waiting) must not make a later
+  report the answer. The push is the setpoint the valve first shows after
+  the command's own cycle (`note_setpoint(seen_ts=…)`; a cloud zone rounds
+  to 0.5 °C: 18.3 → 18.5) minus its reading at the send.
+  A report ≥ 98 % (fully open) is not counted; an off or full power sent
+  before the answer cancels it (also Roomstat's own off, summer, the
+  watchdog: `_lookahead_observe` checks the last attempt). Least squares
+  over the last 24 releases, response = a + b × push + d × fall, look-ahead
+  = d / b, trusted from 8 releases when the fall rates spread ≥ 0.5 °C/h,
+  b ≥ 10 %/°C and |r(push, fall)| ≤ 0.9 (with the look-ahead in use the push
+  is lowered on a falling reading, so they correlate). The value in use
+  starts at 0 and moves towards the fit by at most 2 min per release (gap
+  under 1 min left alone), within 0-20 min. Each release's lesson is an
+  activity line (`valve look-ahead: the valve answered 62 % to a push of
+  +0.5 on a reading falling 3.0 °C/h → …`).
+- **The auto-tuner** gets the look-ahead taken off the command the valve
+  holds (`AutotuneSample.lookahead_c`, `_held_lookahead_c`, set with each
+  command sent, 0 for an off and on a drift): its demand is the push the
+  valve answers. Without it a top-up on a falling reading could read as no
+  top-up (demand under `heatup_reheat_demand_c`) and its heat as coast,
+  inflating the braking time.
+- **Simulated** (scratch `lookahead/sim.py`: the room fitted to seven
+  mornings, room rms 0.09-0.14 °C, 30 Oct reproduced: 06:00 18.54 against
+  18.55, target in 61 min against 57, the re-fire at +90 against +88; the
+  valve reading fitted separately, its slide −1.2…−4.6 °C/h against
+  −1.1…−4.6; the Tado fit above; cloud steps, latency, off, 3-min polls;
+  the real regulator and learner; 3 plants × 3 outdoor temperatures × 3
+  seeds × with and without people and sun, 8 days, metrics from day 4):
+  the learner settles at 11-20 min for a 13-min valve (once 8; it learns in
+  its own 12-min slope, which lags the valve's instant one) and 2-20 for an
+  8.5-min one, and cuts a fast-slide release's first opening 73 → 52 % and
+  its 10-min dose by a quarter, but **the peaks after top-ups barely move**
+  (median 0…−0.01, −0.01…−0.03 with a faster reading slide; p90 within
+  −0.015…+0.002; the worst peak +0.00…+0.02), time below −0.2 rises 52-84
+  → 72-124 min/day, below −0.3 0.3-9 → 20-59 min/day, commands +14-27 %,
+  heat −0.2…−0.8 %. The simulator's top-ups are
+  gentler than the real ones (its peaks about half), so it may understate
+  the benefit; the cost (heat later on a cooling room) is mechanistic.
+  This matches "tried and dropped: cancelling the Tado's own anticipation"
+  under Regulation concepts. Judge it live on the trace sensors.
+- **On the entity:** the sensor `valve_lookahead` (minutes in use, only while
+  the option is on; attributes: the fit, releases, the last lesson), the
+  thermostat's `valve_lookahead_min` and `valve_lookahead_c` (this cycle's
+  lowering, unrecorded), the hold's activity phrase (`0.6 off for its
+  reading falling 2.8 °C/h`), the debug line (`, look-ahead -0.62` and the
+  reading's slope), diagnostics. **Reset auto-tune** forgets it too. The
+  learner rides along in the restore-state extra data (`lookahead`, with
+  the TRV it was learned on: another valve starts afresh), with the
+  reading's slope samples (taken back under the SlopeEstimator's own
+  rules) and the look-ahead taken off the command the valve holds (taken
+  back only with that command, `CommandRecord`): a reload, which every
+  preset temperature change causes, neither sends an unlowered hold on a
+  still-sliding reading nor understates the tuner's demand. The off
+  baseline (`_note_trv_holds_off`, `_async_send_off_to_tado`) zeroes the
+  held look-ahead. With the option
+  on and no heating sensor (a repair can remove it) a warning at start; the
+  look-ahead then stays where it is. The heating sensor joins the
+  entity-gone repairs (warning) while the option is on (`LOOKAHEAD_ROLES`).
+- **Never stops the regulation:** every step catches everything, logs once
+  with the traceback, and switches the look-ahead off for the session
+  (`lookahead_active`).
+
 ## Auto-tune
 
 Read this before changing `autotune.py` or `AutotuneConfig`.
@@ -1114,6 +1236,12 @@ ruff check .
 - `tests/test_preheat.py` (the rule, the learner, the log lines, HA-free)
   and `tests/test_preheat_entity.py` (through the entity: shadow sends what
   off sends, an outing line by line, changes by hand while out, restarts).
+- `tests/test_lookahead.py` (the correction, the regulator's hold, the
+  tuner's demand, the learner on a synthetic Tado, persistence, the options
+  form's checks) and `tests/test_lookahead_entity.py` (through the entity:
+  a release and its answer, the lowered command, the tuner's sample, an off
+  before the answer, no heating sensor, persistence with its TRV, reset, a
+  failure that leaves the room regulated).
 - `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
   Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
   replayed, restarts and pre-2.12 snapshots).

@@ -174,6 +174,18 @@
               "heat_timer_s": "Nur für Tado-Cloud-Thermostate. Befehle mit voller Leistung gehen als Tado-Timer dieser Länge raus und werden nach der Hälfte erneuert, solange sie nötig sind. Fallen Home Assistant, das Netzwerk oder die Tado-Cloud aus, kehrt die Zone innerhalb dieser Zeit zu ihrem Zeitplan in der Tado-App zurück. Vorher den Zeitplan jeder Roomstat-Zone in der Tado-App auf 5 °C oder Aus stellen, dann sind 3600 s ein guter Wert. 0 = aus: volle Leistung bleibt bis zum nächsten Befehl. Weniger als 900 s zählt als 900 s."
             }
           },
+          "valve_lookahead": {
+            "name": "Vorausschau des Ventils",
+            "description": "Experimentell. Ein Tado-Ventil schaut darauf voraus, wie schnell sich sein eigener Messwert ändert: Fällt sein Messwert (der Heizkörper kühlt nach dem Aufheizen ab), öffnet es stärker, als Roomstat verlangt hat. Ist dies eingeschaltet, senkt Roomstat seine Halte-Befehle, solange der Messwert des Ventils fällt, um eine Vorausschau, die es aus den Antworten des Ventils lernt. Es nimmt nur Wärme weg: Der Raum liegt etwas öfter knapp unter dem Ziel.",
+            "data": {
+              "valve_lookahead": "Vorausschau des Ventils ausgleichen",
+              "heating_power_entity_id": "Heizleistungs-Sensor des Ventils"
+            },
+            "data_description": {
+              "valve_lookahead": "Senkt einen Halte-Befehl um die gelernte Vorausschau mal der Fallgeschwindigkeit des Ventil-Messwerts (höchstens 1,5 °C). Beginnt bei 0 und wird schrittweise gelernt, ab 8 Nachheiz-Vorgängen; Aufheizen mit voller Leistung bleibt unberührt. Das Zurücksetzen der Autotune vergisst sie ebenfalls.",
+              "heating_power_entity_id": "Die Heizleistung der Zone in % (bei einer Tado-Zone: sensor.<zone>_heating). Roomstat lernt die Vorausschau aus der ersten Antwort des Ventils auf jedes Nachheizen. Erforderlich, solange die Vorausschau eingeschaltet ist."
+            }
+          },
           "out_of_band": {
             "name": "Alarm außerhalb des Bereichs",
             "description": "Der Sensor „Außerhalb des Bereichs“ des Raums schaltet ein, wenn der Raum zu warm oder zu kalt bleibt, während geheizt wird (nicht im Sommermodus, kein Fenster offen, Raumsensor funktioniert). Für eine Benachrichtigung gedacht.",
@@ -205,7 +217,8 @@
     },
     "error": {
       "temp_entity_not_found": "Externer Temperatursensor nicht gefunden.",
-      "temp_not_temperature": "Bitte einen Temperatursensor (device_class: temperature) auswählen."
+      "temp_not_temperature": "Bitte einen Temperatursensor (device_class: temperature) auswählen.",
+      "lookahead_needs_heating_power": "Wähle den Heizleistungs-Sensor des Ventils: Die Vorausschau lernt aus ihm."
     },
     "abort": {
       "trv_in_use": "Dieses Thermostat wird bereits von einem anderen Roomstat-Raum verwendet."
@@ -297,6 +310,9 @@
       "autotune_last_overshoot": {
         "name": "Letztes Überschwingen"
       },
+      "valve_lookahead": {
+        "name": "Vorausschau des Ventils"
+      },
       "regulation_command": {
         "name": "Befehl an das Ventil"
       },
@@ -373,7 +389,8 @@
               "schedule_entity_id": "Zeitplan-Helfer",
               "preheat_arrival_entity_id": "Erwartete Ankunft (Vorheizen)",
               "preheat_close_entity_id": "Jemand nah an zu Hause (Vorheizen)",
-              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)"
+              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)",
+              "heating_power_entity_id": "Heizleistungs-Sensor des Ventils"
             }
           }
         },
@@ -399,7 +416,8 @@
               "schedule_entity_id": "Zeitplan-Helfer",
               "preheat_arrival_entity_id": "Erwartete Ankunft (Vorheizen)",
               "preheat_close_entity_id": "Jemand nah an zu Hause (Vorheizen)",
-              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)"
+              "preheat_nearby_entity_id": "Jemand in der Nähe (Vorheizen)",
+              "heating_power_entity_id": "Heizleistungs-Sensor des Ventils"
             }
           }
         },

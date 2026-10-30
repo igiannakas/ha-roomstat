@@ -61,6 +61,7 @@ from .climate_controllers import (
     resolve_boost_restore,
     window_startup_action,
 )
+from .climate_lookahead import LookaheadMixin
 from .climate_preheat import PREHEAT_LIVE_ATTRIBUTES, PreheatMixin
 from .climate_presets import PresetMixin
 from .climate_regulation import RegulationMixin
@@ -131,9 +132,10 @@ class _AutomationExtraData(ExtraStoredData):
     middle of a heat-up must not blind its predicted stop), and the activity
     log's lines under ``activity`` (a reload must not empty it), the
     last change by hand under ``manual_change_ts`` (a preset temperature
-    change reloads the room; it still settles before it adds heat), and
+    change reloads the room; it still settles before it adds heat),
     preheat's state under ``preheat`` (a heading-home start, an Away held
-    cold, the learned 30-minute recovery, the decision last logged).
+    cold, the learned 30-minute recovery, the decision last logged), and the
+    valve look-ahead's learning under ``lookahead``.
     """
 
     def __init__(
@@ -146,6 +148,7 @@ class _AutomationExtraData(ExtraStoredData):
         activity: dict[str, Any] | None = None,
         manual_change_ts: float | None = None,
         preheat: dict[str, Any] | None = None,
+        lookahead: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
@@ -155,6 +158,7 @@ class _AutomationExtraData(ExtraStoredData):
         self._activity = activity
         self._manual_change_ts = manual_change_ts
         self._preheat = preheat
+        self._lookahead = lookahead
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -173,6 +177,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["manual_change_ts"] = self._manual_change_ts
         if self._preheat is not None:
             data["preheat"] = self._preheat
+        if self._lookahead is not None:
+            data["lookahead"] = self._lookahead
         return data
 
 
@@ -195,6 +201,7 @@ async def async_setup_entry(
 class RoomstatClimate(
     ActivityMixin,
     PreheatMixin,
+    LookaheadMixin,
     RegulationMixin,
     PresetMixin,
     ScheduleMixin,
@@ -209,7 +216,10 @@ class RoomstatClimate(
     # The live activity line changes every cycle; the activity sensor's
     # history already keeps the lines.  Likewise preheat's live numbers:
     # the Preheat sensor records each decision with what it was made with.
-    _unrecorded_attributes = frozenset({"activity", *PREHEAT_LIVE_ATTRIBUTES})
+    # The valve look-ahead's correction changes every cycle too.
+    _unrecorded_attributes = frozenset(
+        {"activity", "valve_lookahead_c", *PREHEAT_LIVE_ATTRIBUTES}
+    )
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_TENTHS
     _attr_supported_features = (
@@ -266,6 +276,8 @@ class RoomstatClimate(
             ),
         )
         self._slope = SlopeEstimator()
+        # The valve look-ahead (climate_lookahead.py; off unless the option is on).
+        self._lookahead_setup()
         # The activity log (climate_activity.py): set up before anything logs.
         self._activity_setup()
         # Preheat on the way home (climate_preheat.py, shadow only).
@@ -502,10 +514,12 @@ class RoomstatClimate(
         return summary
 
     async def async_reset_autotune(self) -> None:
-        """Forget learned values and return to the configured ones."""
+        """Forget learned values and return to the configured ones (the
+        valve look-ahead's too)."""
         self._autotuner.reset()
         self._apply_active_tuning()
         self._log(_LOGGER).info("auto-tune reset to configured values")
+        self._lookahead_reset()
         self._write_state_with_binary_sensor()
 
     @staticmethod
@@ -568,6 +582,8 @@ class RoomstatClimate(
                 # Preheat: a heading-home start, the 30-minute recovery and
                 # the decision last logged.
                 self._preheat_restore(extra_dict.get("preheat"), now)
+                # The valve look-ahead learned on this room's TRV.
+                self._lookahead_restore(extra_dict.get("lookahead"), now)
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
                 if self._slope.restore(extra_dict.get("slope"), now):
@@ -581,6 +597,7 @@ class RoomstatClimate(
             "started (Home Assistant restart or room reload)%s",
             "" if extra is not None else "; nothing saved to take back",
         )
+        self._lookahead_check_setup()
 
         # Carry on a heat burst (or stop) the TRV is still holding.  What
         # the TRV holds is the last command it took (or one still on its
@@ -960,6 +977,7 @@ class RoomstatClimate(
             self._activity.as_dict(),
             self._manual_change_ts,
             self._preheat_as_dict(),
+            self._lookahead_state(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -1338,6 +1356,11 @@ class RoomstatClimate(
             # Preheat on the way home (shadow: what it would do).
             **self._preheat_attributes(),
         }
+        # The valve look-ahead (only with the option on): the look-ahead in
+        # use and what it took off this cycle's command.
+        if self._lookahead_enabled:
+            attrs["valve_lookahead_min"] = self.valve_lookahead_min
+            attrs["valve_lookahead_c"] = round(self._cycle_lookahead_c, 2)
 
         # Sensor resilience diagnostics
         if self._last_valid_room_temp is not None:

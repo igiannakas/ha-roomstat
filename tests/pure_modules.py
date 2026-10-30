@@ -1,4 +1,4 @@
-"""Load the HA-free modules (parameters, regulation, autotune,
+"""Load the HA-free modules (parameters, lookahead, regulation, autotune,
 climate_controllers, activity, preheat) for tests.
 
 Not a test module.  Loads them as ``roomstat_pure.*`` so relative imports
@@ -32,6 +32,7 @@ if _PKG not in sys.modules:
     sys.modules[_PKG] = pkg
 
 parameters = _load("parameters")
+lookahead = _load("lookahead")
 regulation = _load("regulation")
 autotune = _load("autotune")
 climate_controllers = _load("climate_controllers")

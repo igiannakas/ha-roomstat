@@ -209,6 +209,11 @@ class RegulationMixin:
             if self._last_sent_setpoint is not None
             else self.coordinator.data.get("tado_setpoint")
         )
+        # The look-ahead taken off the command the valve holds counts back
+        # in: the valve answers it as the push (AutotuneSample.lookahead_c).
+        held_lookahead = (
+            self._held_lookahead_c if self._last_sent_setpoint is not None else 0.0
+        )
         try:
             reason = self._autotuner.observe(
                 AutotuneSample(
@@ -221,6 +226,7 @@ class RegulationMixin:
                     command_saturated=result.is_saturated,
                     room_temp_ts=self.coordinator.data.get("room_temp_ts"),
                     window=self._window_open(),
+                    lookahead_c=held_lookahead,
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop
@@ -508,6 +514,10 @@ class RegulationMixin:
             self._slope.add(now, room_temp, self.coordinator.data.get("room_temp_ts"))
             slope = self._slope.slope_c_per_s()
 
+        # 3c. The valve look-ahead (option): the slope of the valve's own
+        # reading and the look-ahead learned so far (None, 0 while off).
+        trv_slope, valve_lookahead_s = self._lookahead_inputs(now, trv)
+
         # 4. Compute regulation
         prev_mode = self._reg_state.mode
         result = self._regulator.compute(
@@ -517,18 +527,26 @@ class RegulationMixin:
             time_delta_s=dt,
             state=self._reg_state,
             room_slope_c_per_s=slope,
+            trv_slope_c_per_s=trv_slope,
+            valve_lookahead_s=valve_lookahead_s,
         )
         self._reg_state = result.new_state
         self._last_result = result
+        self._lookahead_note_result(result)
 
         # 4b. The 30-minute recovery preheat uses (learned whatever its mode;
         # it never raises).
         self._preheat_learn(now, setpoint, room_temp)
 
-        # 5-6. Send decision and command
+        # 5-6. Send decision and command.  A hold command to a shut valve is
+        # a release: the valve look-ahead learns from the valve's answer.
+        was_shut = self._lookahead_valve_shut(now, trv)
         await self._async_decide_and_send(
-            now, trv, result.target_for_tado_c, strong=result.mode != MODE_HOLD
+            now, trv, result.target_for_tado_c, strong=result.mode != MODE_HOLD,
+            lookahead_c=result.lookahead_c,
         )
+        self._lookahead_after_send(now, trv, result, was_shut)
+        self._lookahead_observe(now, trv)
 
         # The braking time this cycle decided with (the tuner may change it).
         td_used_s = self._config.tuning.td_s
@@ -556,8 +574,11 @@ class RegulationMixin:
             # for custom_components.roomstat; the coordinator's own refresh
             # chatter is on custom_components.roomstat.coordinator).
             cmd = result.target_for_tado_c
+            lookahead = (
+                f", look-ahead -{result.lookahead_c:.2f}" if result.lookahead_c > 0 else ""
+            )
             _LOGGER.debug(
-                "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s%s | cmd %s"
+                "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s%s%s | cmd %s"
                 " P %+.2f I %+.2f | %s",
                 self._config_entry.title,
                 f"{result.mode} (full push)" if result.full_push else result.mode,
@@ -567,8 +588,9 @@ class RegulationMixin:
                 tado_internal,
                 " off" if trv.off else (" auto" if trv.scheduled else ""),
                 "" if trv.heating is None else (" heating" if trv.heating else " idle"),
+                "" if trv_slope is None else f" {trv_slope * 3600:+.1f} °C/h",
                 "off" if is_off_command(cmd, self._config.min_target_c)
-                else f"{cmd:.1f} ({cmd - tado_internal:+.1f} vs trv)",
+                else f"{cmd:.1f} ({cmd - tado_internal:+.1f} vs trv{lookahead})",
                 result.p_correction_c, result.i_correction_c, self._last_reason,
             )
 
@@ -732,6 +754,7 @@ class RegulationMixin:
         while a heat command of ours may be landing: see pending_command.)"""
         self._last_sent_setpoint = self._config.min_target_c
         self._last_sent_was_max = False
+        self._held_lookahead_c = 0.0
         self._heat_timer_sent_ts = None
         self._resend_count = 0
         self._resend_due = False
@@ -797,14 +820,16 @@ class RegulationMixin:
     # ------------------------------------------------------------------
 
     async def _async_decide_and_send(
-        self, now: float, trv: TrvReading, target: float, *, strong: bool = False
+        self, now: float, trv: TrvReading, target: float, *, strong: bool = False,
+        lookahead_c: float = 0.0,
     ) -> None:
         """Decide whether *target* goes to the TRV this cycle, and send it.
 
         Sets ``_last_reason``.  Rate limiting: at most one command per
         ``min_command_interval_s``, except an urgent decrease and a
         strong command (``strong``: heat, coast or stop, one command each,
-        which must not wait).
+        which must not wait).  ``lookahead_c``: what the valve look-ahead
+        took off *target* (kept with the command the valve holds).
         """
         # Prefer our own last-sent value (always fresh) over coordinator data
         # (which may be up to 60s stale from the polling interval).
@@ -842,6 +867,7 @@ class RegulationMixin:
                 _command_text(self._last_sent_setpoint, floor), again,
             )
             self._last_sent_setpoint = None
+            self._held_lookahead_c = 0.0
             # A valve that showed the command and then left it (Tado app, a
             # schedule block, an expired timer) is no reason to back off.
             self._resend_due = not self._last_attempt_shown
@@ -873,7 +899,10 @@ class RegulationMixin:
         # Keep the command inside what the TRV accepts right now (anything
         # else is refused before it is sent).
         lo, hi = command_limits(floor, self._config.max_target_c, trv.min_c, trv.max_c)
-        target = max(lo, min(hi, target))
+        kept = max(lo, min(hi, target))
+        # Raised to what the valve accepts: that much less was taken off.
+        lookahead_c = max(0.0, lookahead_c - max(0.0, kept - target))
+        target = kept
 
         # Fail cold: the maximum to a cloud TRV is a timer overlay, renewed
         # once half of it has passed while the command is still the maximum
@@ -992,7 +1021,8 @@ class RegulationMixin:
         if reason == "heat_timer_refresh":
             self._heat_timer_refresh_tried = True
         sent = await self._async_send_to_tado(
-            target, trv.entity_id, timer_s=timer_s, maximum=maximum, paced=paced
+            target, trv.entity_id, timer_s=timer_s, maximum=maximum, paced=paced,
+            lookahead_c=lookahead_c,
         )
         self._note_attempt(now, target, trv, sent)
         self._last_reason = f"{'sent' if sent else 'send_failed'}({reason})"
@@ -1242,6 +1272,7 @@ class RegulationMixin:
             # demand, as with the 5 °C setpoint before).
             self._last_sent_setpoint = self._config.min_target_c
             self._last_sent_was_max = False
+            self._held_lookahead_c = 0.0
             # An OFF overlay replaces any timer: nothing to renew or shut.
             self._heat_timer_sent_ts = None
         return sent
@@ -1254,6 +1285,7 @@ class RegulationMixin:
         timer_s: float | None = None,
         maximum: bool = False,
         paced: bool = False,
+        lookahead_c: float = 0.0,
     ) -> bool:
         """Send a temperature command to the TRV (default: the configured one).
 
@@ -1262,9 +1294,10 @@ class RegulationMixin:
         (``climate.set_temperature``).  ``maximum``: the command is the
         highest the TRV takes (the watchdog replaces such a command if the
         cycle stops).  ``paced``: its turn at the bridge has been waited for
-        already.  Returns whether the TRV took it.  A failed command is
-        retried by the next cycle once the rate limit allows (no baseline,
-        or the drift check).
+        already.  ``lookahead_c``: what the valve look-ahead took off it.
+        Returns whether the TRV took it.  A failed command is retried by the
+        next cycle once the rate limit allows (no baseline, or the drift
+        check).
         """
         source_entity = entity_id or self._config_entry.data.get("source_entity_id")
         if not source_entity:
@@ -1296,6 +1329,7 @@ class RegulationMixin:
         if sent:
             self._last_sent_setpoint = target_c
             self._last_sent_was_max = maximum
+            self._held_lookahead_c = max(0.0, lookahead_c)
             if timer_s:
                 # The renewal clock starts when the TRV took the timer.
                 self._heat_timer_sent_ts = time.time()

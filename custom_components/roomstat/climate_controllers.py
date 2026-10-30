@@ -1081,6 +1081,32 @@ def change_trv(
     return new_data, new_options
 
 
+def options_form_errors(flat: Mapping[str, Any]) -> dict[str, str]:
+    """What the options form must refuse (``base`` error keys, strings.json).
+
+    The valve look-ahead learns from the zone's heating power sensor, so it
+    cannot be switched on without one.  (Keys as in const.py.)"""
+    if flat.get("valve_lookahead") and not flat.get("heating_power_entity_id"):
+        return {"base": "lookahead_needs_heating_power"}
+    return {}
+
+
+def options_form_values(
+    options: Mapping[str, Any],
+    entered: Mapping[str, Any],
+    optional_entity_keys: Iterable[str],
+) -> dict[str, Any]:
+    """The values the options form is shown with: the saved options, or,
+    shown again after an error, what was just entered (an optional entity
+    left empty stays empty)."""
+    values = dict(options)
+    if entered:
+        for key in optional_entity_keys:
+            values.pop(key, None)
+        values.update({k: v for k, v in entered.items() if v not in (None, "")})
+    return values
+
+
 # A command this close to the frost level counts as "off".
 OFF_TOLERANCE_C = 0.05
 

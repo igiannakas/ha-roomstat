@@ -266,13 +266,20 @@ class AutotuneSample:
     # A window is open, or its close delay runs: the room will re-warm on
     # its own afterwards, so no heat-up episode starts for a while.
     window: bool = False
+    # What the valve look-ahead (lookahead.py) took off the command the TRV
+    # holds: the valve answers it as Roomstat's push, so it counts back in.
+    lookahead_c: float = 0.0
 
     @property
     def demand_c(self) -> float | None:
-        """What the TRV's own controller acts on: its setpoint - its reading."""
+        """What the TRV's own controller acts on: its setpoint - its reading,
+        plus the look-ahead taken off that setpoint (the push the valve
+        answers; without it a top-up on a falling reading could read as no
+        top-up, and its heat as the radiator's coast)."""
         if not _finite(self.tado_setpoint_c, self.tado_internal_c):
             return None
-        return self.tado_setpoint_c - self.tado_internal_c
+        extra = self.lookahead_c if _finite(self.lookahead_c) and self.lookahead_c > 0 else 0.0
+        return self.tado_setpoint_c + extra - self.tado_internal_c
 
 
 @dataclass
@@ -1088,7 +1095,7 @@ class Autotuner:
         s = AutotuneSample(s.ts, sp, room, s.tado_internal_c, s.tado_setpoint_c,
                            s.eligible and sp is not None, s.command_saturated,
                            s.room_temp_ts if _finite(s.room_temp_ts) else None,
-                           window=bool(s.window))
+                           window=bool(s.window), lookahead_c=s.lookahead_c)
         resumed = (
             self._prev_ts is not None
             and (not self._prev_eligible or s.ts - self._prev_ts > self.cfg.max_gap_s)

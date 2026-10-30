@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.13.0-blue)
+![Version](https://img.shields.io/badge/version-2.14.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -102,6 +102,12 @@ changes.
   not learn from the heating that follows a window.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
+- **Valve look-ahead (experimental).** A Tado valve looks ahead on how fast
+  its own reading moves. After a heat-up, when the radiator cools and the
+  valve's reading falls, it opens harder than Roomstat asked. With this on,
+  Roomstat lowers its hold commands while the valve's reading falls, by a
+  look-ahead it learns from the valve's own answers. Off by default. See
+  [Valve look-ahead](#valve-look-ahead).
 - **A trace per room.** Diagnostic sensors for the command sent to the valve,
   the room error and the regulation mode, updated every cycle. The first two
   keep long-term statistics, so you can look at a room's behaviour weeks later
@@ -213,6 +219,29 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 
 You can set the braking time by hand instead, under **Configure →
 Controller → Heat-up braking time**, with **Learn heat-up braking** off.
+
+## Valve look-ahead
+
+Turn it on per room: **Configure → Valve look-ahead**, then pick the
+zone's heating power sensor (for a Tado zone, `sensor.<zone>_heating`).
+
+- While the room holds near its target, each command is lowered by the
+  look-ahead times how fast the valve's own reading is falling (at most
+  1.5 °C). A flat or rising reading changes nothing, and heat-ups at full
+  power are not touched, so it only ever takes heat away.
+- The look-ahead starts at 0. Each top-up from a shut valve teaches it: the
+  valve's first heating power report, against what it was asked and how fast
+  its reading fell. From 8 top-ups on it moves towards what they show, at
+  most 2 minutes per top-up (up to 20 minutes).
+- The **Valve look-ahead** sensor shows the value in use, with what the
+  learning has seen. The activity log has a line for each top-up it learns
+  from.
+- The trade-off: in a simulation of a living room it cut the valve's first
+  heat after a heat-up by about a quarter, but the overshoot after top-ups
+  barely moved, and the room spent more time a little under its target.
+  Judge it on your own room's trace sensors.
+- **Reset auto-tune** forgets the learned look-ahead too. Another valve
+  (a changed TRV) starts afresh.
 
 ## Activity log
 

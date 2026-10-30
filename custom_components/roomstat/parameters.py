@@ -457,6 +457,14 @@ class RegulationConfig:
     release_below_c: float = 0.10
     release_lead_s: float = 1200.0
 
+    # Valve look-ahead (lookahead.py, an option per room, 2.14.0): while the
+    # valve's own reading falls faster than this, a hold command is lowered
+    # by the learned look-ahead times the fall beyond it, at most by
+    # lookahead_cap_c.  The deadband keeps the reading's 0.1 °C steps (a
+    # cloud zone's reading is polled every ~3 min) from moving the command.
+    lookahead_deadband_c_per_h: float = 0.3
+    lookahead_cap_c: float = 1.5
+
     # Fail cold (see CLAUDE.md "Failure handling").  Every command is an
     # overlay that lasts until the next one, so a maximum command left in
     # place by a dead Home Assistant, network or cloud keeps the valve open
@@ -475,6 +483,50 @@ class RegulationConfig:
     # returning early every time): the room is reported as stalled, and a
     # maximum command still in place is replaced by the minimum.
     cycle_watchdog_s: float = 600.0
+
+
+# ---------------------------------------------------------------------------
+# Valve look-ahead (lookahead.py, climate_lookahead.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LookaheadConfig:
+    """How the valve's look-ahead is learned (lookahead.LookaheadLearner).
+
+    A release is a hold command to a shut valve.  Its sample is the valve's
+    first heating power report above 0 within ``observe_s`` of the command,
+    against the push the valve held (its setpoint minus its reading) and how
+    fast its reading fell.  Living room, 23-30 Oct 2026 (36 releases): the
+    first response follows push + 13 min x fall (r = 0.85; first % = 16 +
+    38 x (push + 15 x fall per min), R^2 0.73), and comes 1-6 min after the
+    command, so 8 min is enough for the cloud's 3-minute polls.
+    """
+
+    # Releases kept for the fit, and how many before it is trusted.
+    window: int = 24
+    min_samples: int = 8
+    observe_s: float = 480.0
+    # The look-ahead in use starts at 0 and moves towards the fit at most
+    # step_s per release; a gap under deadband_s is left alone.
+    step_s: float = 120.0
+    deadband_s: float = 60.0
+    max_lookahead_s: float = 1200.0
+    # The fit is trusted only when the releases spread enough in fall rate
+    # (sd, °C/h) for the look-ahead to show, the valve clearly answers the
+    # push (%/°C), and push and fall are not too entangled (|r|): with the
+    # look-ahead in use the push is lowered on a falling reading, so the
+    # two become correlated.
+    min_fall_spread_c_per_h: float = 0.5
+    min_push_gain_pct_per_c: float = 10.0
+    max_push_fall_correlation: float = 0.9
+    # A report at or above this is the valve fully open: the push no
+    # longer shows in it, so it says nothing about the look-ahead.
+    saturated_pct: float = 98.0
+    # The valve's reading slope (Theil-Sen, autotune.SlopeEstimator): a
+    # 12-min window, known once it has 4 samples.
+    slope_window_s: float = 720.0
+    slope_min_samples: int = 4
+    slope_max_gap_s: float = 400.0
 
 
 # ---------------------------------------------------------------------------

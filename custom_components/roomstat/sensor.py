@@ -12,7 +12,9 @@
   (activity.py, climate_activity.py);
 * preheat on the way home (climate_preheat.py): the decision last made
   (state and what it was made with, one recorder row per decision) and the
-  room's learned 30-minute recovery.
+  room's learned 30-minute recovery;
+* the valve look-ahead in use (climate_lookahead.py, only while its option
+  is on), with what its learning has seen.
 """
 from __future__ import annotations
 
@@ -47,6 +49,8 @@ class TuningSensorDescription(SensorEntityDescription):
     attrs_fn: Callable[[Any], dict[str, Any]] | None = None
     # Model sensors are only meaningful while auto-tune is on.
     needs_autotune: bool = False
+    # Only while the valve look-ahead option is on.
+    needs_lookahead: bool = False
 
 
 def _gain_attrs(name: str) -> Callable[[Any], dict[str, Any]]:
@@ -202,6 +206,20 @@ TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
         value_fn=lambda c: c.preheat_recovery_c,
         attrs_fn=lambda c: c.preheat_recovery_attributes(),
     ),
+    # The valve's learned look-ahead (minutes), and the releases it learns
+    # from.  Its attributes change only when a release is counted or given up.
+    TuningSensorDescription(
+        key="valve_lookahead",
+        translation_key="valve_lookahead",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: c.valve_lookahead_min,
+        attrs_fn=lambda c: c.valve_lookahead_summary(),
+        needs_lookahead=True,
+    ),
     TuningSensorDescription(
         key="autotune_last_overshoot",
         translation_key="autotune_last_overshoot",
@@ -271,6 +289,8 @@ class RoomstatTuningSensor(CoordinatorEntity, SensorEntity):
         if climate is None:
             return False
         if self.entity_description.needs_autotune and not climate.autotune_enabled:
+            return False
+        if self.entity_description.needs_lookahead and not climate.lookahead_enabled:
             return False
         return True
 

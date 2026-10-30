@@ -171,6 +171,12 @@ class ActivityMixin:
             facts.p_c = result.p_correction_c
             facts.i_c = result.i_correction_c
             facts.saturated = result.is_saturated
+            facts.lookahead_c = float(getattr(result, "lookahead_c", 0.0) or 0.0)
+            if facts.lookahead_c > 0:
+                trv_slope = self._trv_slope.slope_c_per_s()
+                facts.trv_fall_c_per_h = (
+                    -trv_slope * 3600.0 if trv_slope is not None else None
+                )
         return facts
 
     def _activity_tado(self, trv: Any, floor: float) -> tuple[str, float | None]:

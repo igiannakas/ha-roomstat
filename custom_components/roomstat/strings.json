@@ -174,6 +174,18 @@
               "heat_timer_s": "Tado cloud thermostats only. Full-power commands go to Tado as a timer of this length, renewed every half while still needed. If Home Assistant, the network or the Tado cloud stop, the zone falls back to its Tado app schedule within this time. Set every Roomstat zone's schedule in the Tado app to 5 °C or Off first, then 3600 s is a good value. 0 = off: full power lasts until the next command. Shorter than 900 s counts as 900 s."
             }
           },
+          "valve_lookahead": {
+            "name": "Valve look-ahead",
+            "description": "Experimental. A Tado valve looks ahead on how fast its own reading moves, so when its reading falls (the radiator cooling after a heat-up) it opens harder than Roomstat asked. With this on, Roomstat lowers its hold commands while the valve's reading falls, by a look-ahead it learns from the valve's own answers. It only ever takes heat away: the room may spend a little more time just under its target.",
+            "data": {
+              "valve_lookahead": "Cancel the valve's look-ahead",
+              "heating_power_entity_id": "Valve heating power sensor"
+            },
+            "data_description": {
+              "valve_lookahead": "Lowers a hold command by the learned look-ahead times how fast the valve's reading is falling (at most 1.5 °C). Starts at 0 and is learned a step at a time, from 8 top-ups on; full-power heat-ups are not touched. Auto-tune's reset forgets it too.",
+              "heating_power_entity_id": "The zone's heating power in % (for a Tado zone: sensor.<zone>_heating). Roomstat learns the look-ahead from the valve's first answer to each top-up. Required while the look-ahead is on."
+            }
+          },
           "out_of_band": {
             "name": "Out-of-band alarm",
             "description": "The room's Out of band sensor turns on when the room stays too hot or too cold while heating is on (not in summer mode, with no window open and a working room sensor). Use it in a notification.",
@@ -205,7 +217,8 @@
     },
     "error": {
       "temp_entity_not_found": "External temperature sensor not found.",
-      "temp_not_temperature": "Please select a temperature sensor (device_class: temperature)."
+      "temp_not_temperature": "Please select a temperature sensor (device_class: temperature).",
+      "lookahead_needs_heating_power": "Pick the valve's heating power sensor: the look-ahead learns from it."
     },
     "abort": {
       "trv_in_use": "That thermostat is already used by another Roomstat room."
@@ -297,6 +310,9 @@
       "autotune_last_overshoot": {
         "name": "Last heat-up overshoot"
       },
+      "valve_lookahead": {
+        "name": "Valve look-ahead"
+      },
       "regulation_command": {
         "name": "Command to valve"
       },
@@ -373,7 +389,8 @@
               "schedule_entity_id": "Schedule helper",
               "preheat_arrival_entity_id": "Expected arrival (preheat)",
               "preheat_close_entity_id": "Someone close to home (preheat)",
-              "preheat_nearby_entity_id": "Someone nearby (preheat)"
+              "preheat_nearby_entity_id": "Someone nearby (preheat)",
+              "heating_power_entity_id": "Valve heating power sensor"
             }
           }
         },
@@ -399,7 +416,8 @@
               "schedule_entity_id": "Schedule helper",
               "preheat_arrival_entity_id": "Expected arrival (preheat)",
               "preheat_close_entity_id": "Someone close to home (preheat)",
-              "preheat_nearby_entity_id": "Someone nearby (preheat)"
+              "preheat_nearby_entity_id": "Someone nearby (preheat)",
+              "heating_power_entity_id": "Valve heating power sensor"
             }
           }
         },

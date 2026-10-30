@@ -57,6 +57,14 @@ Strong commands where they matter, fine ones near the target:
   two); the same happened after every restart, when a shut valve resumed
   as coast and fell through to hold.
 
+Valve look-ahead (lookahead.py, an option per room): a Tado valve looks
+ahead on how fast its own reading moves, so after a heat-up, with the
+radiator cooling and its reading sliding, a hold command just over the
+reading opens it hard.  With a learned look-ahead, a hold command is
+lowered by it times the reading's fall (one-sided: only while it falls,
+capped), so the valve answers the push as if its reading were flat.  The
+push that decides a full push is the uncorrected one.
+
 The heat-up's end and the stop use the room's rise rate only while it
 rises (one-sided); only the release looks at a fall, and it only hands back
 to the hold.  A reading that fell ``fast_fall_c`` since the previous cycle
@@ -124,6 +132,7 @@ class RegulationResult:
     mode: str = MODE_HOLD          # heat / coast / hold (PI) / stop
     room_held: bool = False        # the reading fell fast: the previous one was used
     full_push: bool = False        # a hold that ends like a heat-up (hold_push_c)
+    lookahead_c: float = 0.0       # taken off the hold command for the valve's look-ahead
 
 
 def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
@@ -147,6 +156,28 @@ def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
     if trv_setpoint_c <= config.min_target_c + 0.05:
         return MODE_COAST
     return MODE_HOLD
+
+
+def lookahead_correction_c(
+    lookahead_s: float,
+    trv_slope_c_per_s: float | None,
+    deadband_c_per_h: float,
+    cap_c: float,
+) -> float:
+    """How much a hold command is lowered for the valve's look-ahead (0 or
+    more, °C; lookahead.py): the look-ahead times the fall of the valve's
+    reading beyond the deadband, at most ``cap_c``.  Nothing for a flat,
+    rising or unknown reading."""
+    values = (lookahead_s, trv_slope_c_per_s, deadband_c_per_h, cap_c)
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
+        return 0.0
+    if lookahead_s <= 0 or cap_c <= 0:
+        return 0.0
+    fall = -float(trv_slope_c_per_s) - max(0.0, deadband_c_per_h) / 3600.0
+    if fall <= 0:
+        return 0.0
+    return min(cap_c, lookahead_s * fall)
+
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +280,8 @@ class FeedforwardPiRegulator:
         time_delta_s: float,
         state: RegulationState,
         room_slope_c_per_s: float | None = None,
+        trv_slope_c_per_s: float | None = None,
+        valve_lookahead_s: float = 0.0,
     ) -> RegulationResult:
         """Run one regulation cycle and return the result.
 
@@ -268,6 +301,11 @@ class FeedforwardPiRegulator:
             Robust estimate of the room temperature slope (°C/s), used by the
             heat-up and stop predictions.  None: no prediction (the room is
             taken as flat).
+        trv_slope_c_per_s:
+            The slope of the valve's own reading (°C/s), for the valve
+            look-ahead.  None: unknown (no correction).
+        valve_lookahead_s:
+            The valve's learned look-ahead (lookahead.py); 0: off.
         """
 
         # 0. Guard: reject NaN/Inf inputs – they would corrupt all calculations
@@ -327,25 +365,34 @@ class FeedforwardPiRegulator:
             prev_mode, error, room_slope_c_per_s, self.cfg,
             push_c=raw_command - tado_internal_c, full_push=state.full_push,
         )
+        lookahead = 0.0
         if mode == MODE_HEAT:
             command = self.cfg.max_target_c
         elif mode in (MODE_COAST, MODE_STOP):
             command = self.cfg.min_target_c
         else:
-            command = raw_command
+            # The valve's look-ahead on its falling reading, cancelled
+            # (one-sided, capped; see the module docstring).
+            lookahead = lookahead_correction_c(
+                valve_lookahead_s, trv_slope_c_per_s,
+                self.cfg.lookahead_deadband_c_per_h, self.cfg.lookahead_cap_c,
+            )
+            command = raw_command - lookahead
 
-        # 5. Clamp to safe actuator range
+        # 5. Clamp to safe actuator range.  Saturated: the clamp changed the
+        # command (the look-ahead's lowering is not a saturation).
         final_command = max(
             self.cfg.min_target_c,
             min(self.cfg.max_target_c, command),
         )
-        is_saturated = abs(final_command - raw_command) > _SATURATION_TOLERANCE_C
+        is_saturated = abs(final_command - (raw_command - lookahead)) > _SATURATION_TOLERANCE_C
 
         # 6. Integral (see the module docstring)
         new_integral = state.integral_c
         if time_delta_s > 0:
-            saturated_high = raw_command > self.cfg.max_target_c
-            saturated_low = raw_command < self.cfg.min_target_c
+            commanded = raw_command - lookahead
+            saturated_high = commanded > self.cfg.max_target_c
+            saturated_low = commanded < self.cfg.min_target_c
 
             may_integrate = mode == MODE_HOLD
             if saturated_high and error > 0:
@@ -380,4 +427,5 @@ class FeedforwardPiRegulator:
             mode=mode,
             room_held=room_held,
             full_push=full_push,
+            lookahead_c=round(lookahead, 2),
         )
