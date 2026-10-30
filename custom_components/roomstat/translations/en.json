@@ -183,7 +183,7 @@
             },
             "data_description": {
               "valve_lookahead": "Lowers a hold command by the learned look-ahead times how fast the valve's reading is falling (at most 1.5 °C). Starts at 0 and is learned a step at a time, from 8 top-ups on; full-power heat-ups are not touched. Auto-tune's reset forgets it too.",
-              "heating_power_entity_id": "The zone's heating power in % (for a Tado zone: sensor.<zone>_heating). Roomstat learns the look-ahead from the valve's first answer to each top-up. Required while the look-ahead is on."
+              "heating_power_entity_id": "The zone's heating power in % (for a Tado zone, the zone's Heating sensor). Roomstat learns the look-ahead from the valve's first answer to each top-up. Required while the look-ahead is on."
             }
           },
           "out_of_band": {

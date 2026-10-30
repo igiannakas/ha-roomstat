@@ -183,7 +183,7 @@
             },
             "data_description": {
               "valve_lookahead": "Senkt einen Halte-Befehl um die gelernte Vorausschau mal der Fallgeschwindigkeit des Ventil-Messwerts (höchstens 1,5 °C). Beginnt bei 0 und wird schrittweise gelernt, ab 8 Nachheiz-Vorgängen; Aufheizen mit voller Leistung bleibt unberührt. Das Zurücksetzen der Autotune vergisst sie ebenfalls.",
-              "heating_power_entity_id": "Die Heizleistung der Zone in % (bei einer Tado-Zone: sensor.<zone>_heating). Roomstat lernt die Vorausschau aus der ersten Antwort des Ventils auf jedes Nachheizen. Erforderlich, solange die Vorausschau eingeschaltet ist."
+              "heating_power_entity_id": "Die Heizleistung der Zone in % (bei einer Tado-Zone ihr Heating-Sensor). Roomstat lernt die Vorausschau aus der ersten Antwort des Ventils auf jedes Nachheizen. Erforderlich, solange die Vorausschau eingeschaltet ist."
             }
           },
           "out_of_band": {

@@ -131,7 +131,9 @@ Build new logic in the HA-free modules first (`parameters.py`,
   `boost_duration_min` and `source_entity_id` from the climate attributes.
 - `const.py`: DOMAIN, option keys, custom preset names, `safe_float()`.
 - `strings.json` + `translations/` (en, de): UI texts. Keep `strings.json`
-  and `en.json` identical, and add new keys to `de.json` too.
+  and `en.json` identical, and add new keys to `de.json` too. No `<word>`
+  in a string: the frontend reads it as a markup tag and shows
+  "Translation error: UNCLOSED_TAG" (`tests/test_translations.py`).
 - `manifest.json`: version and metadata.
 
 ## Regulation concepts
