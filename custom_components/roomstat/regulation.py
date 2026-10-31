@@ -57,35 +57,39 @@ Strong commands where they matter, fine ones near the target:
   two); the same happened after every restart, when a shut valve resumed
   as coast and fell through to hold.
 
-* ``dose`` (dosed top-ups, dosing.py, an option per room, 2.15.0): in the
-  *settled* state (the room has reached its target, a stop, and stays
-  within ``DoseConfig.settled_window_c`` of it) the hold is replaced by
-  full-power pulses (the maximum) of a computed length, then the minimum.
-  A top-up from a shut valve takes 8-12 min to show in the room, so the
-  hold, a derivative or the valve look-ahead, which all act on what has
-  already shown, ran the valve 10-30 min for a 2-3-min shortfall (19
-  living-room top-ups, 25-30 Oct 2026: peaks +0.23 median, +0.94 worst).
-  A Smith predictor (dosing.py) tracks the rise still in flight from heat
-  already sent; the regulator decides on the *virtual* error (error - in
-  flight), fires when that error plus the cooling over the visible dead
-  time (theta + tau / 2) reaches ``release_below_c`` (also at or just above
-  the target: a 25 °C pulse cannot trickle as a hold command there would),
-  and ends the pulse once it covers the virtual shortfall plus the cooling
-  until the heat has landed (theta + 2 tau), after at least
+* ``dose`` (dosed top-ups, dosing.py, an option per room, 2.15.0): with the
+  option on there are two phases and no hold (owner, 31 Oct 2026): a
+  heat-up (a shortfall of ``heatup_enter_c`` or more: full power, ended on
+  its predicted coast, then the coast while the room still rises short of
+  the target, the ordinary rules) and the *dosing phase* (everything else:
+  the valve shut, or full-power pulses of a computed length, then the
+  minimum).  A top-up from a shut valve takes 8-12 min to show in the
+  room, so the hold, a derivative or the valve look-ahead, which all act
+  on what has already shown, ran the valve 10-30 min for a 2-3-min
+  shortfall (19 living-room top-ups, 25-30 Oct 2026: peaks +0.23 median,
+  +0.94 worst).  A Smith predictor (dosing.py) tracks the rise still in
+  flight from heat already sent; the regulator decides on the *virtual*
+  error (error - in flight), fires when that error plus the cooling over
+  the visible dead time (theta + tau / 2) reaches ``release_below_c``
+  (also at or just above the target: a 25 °C pulse cannot trickle as a
+  hold command there would) and a minimum pulse would not land more than
+  ``stop_over_c`` over, and ends the pulse once it covers the virtual
+  shortfall plus the cooling until the heat has landed (theta + 2 tau;
+  a room warming by itself needs that much less), after at least
   ``DoseConfig.pulse_min_s`` (unless the target was lowered since it
-  started); the measured stop rule still ends it at any time.  The next
-  pulse waits only for the refractory time (theta + 2 tau after the last
-  one started): heat still in flight is already taken off the virtual
-  error, so waiting for its tail to fade as well only let the room cool
-  past the band (0.18 under at 0.8 °C/h).  A pulse may also fire early on
-  another zone's burn or with another room's pulse (the boiler is on/off:
-  radiators share its burns), only when a minimum pulse would land at most
-  ``DoseConfig.fire_max_overshoot_c`` above the target.  The settled state
-  ends on a shortfall of ``DoseConfig.unsettle_c``, virtual or measured,
-  and after ``DoseConfig.capped_pulses_unsettle`` pulses in a row at their
-  maximum length (more than pulses can give; not entered again until the
-  room is back at its target): the ordinary modes take over.  Design:
-  project doc claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md.
+  started), at its cap (:func:`dose_cap_s`, set when it starts: the same
+  dose worked out on the room's own heating rate, without the aim bias and
+  on its own cooling observer, plus ``cap_margin_c``: a wrong model cannot
+  run past it), on the heat-up's own exit once its heat shows, or at once on
+  the measured stop rule.  The next pulse waits theta + 2 tau after the last
+  one started and theta + tau / 2 after it ended: heat still in flight is
+  already taken off the virtual error, so waiting for its tail to fade as
+  well only let the room cool past the band (0.18 under at 0.8 °C/h).  A
+  pulse may also fire early on another zone's burn or with another room's
+  pulse (the boiler is on/off: radiators share its burns), only when a
+  minimum pulse would land at most ``DoseConfig.fire_max_overshoot_c``
+  above the target.  Design: project doc
+  claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md.
 
 Valve look-ahead (lookahead.py, an option per room): a Tado valve looks
 ahead on how fast its own reading moves, so after a heat-up, with the
@@ -118,7 +122,7 @@ import logging
 import math
 from dataclasses import dataclass
 
-from .parameters import RegulationConfig
+from .parameters import DoseConfig, RegulationConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,16 +151,18 @@ class RegulationState:
     mode: str = MODE_HOLD
     last_room_c: float | None = None   # the previous cycle's raw reading
     full_push: bool = False            # this hold's push reached hold_push_c
-    # Dosed top-ups (dosing.py): the room is settled on settled_setpoint_c;
-    # the running pulse's start and the target it started for, the last
-    # pulse's start (refractory), and the pulses in a row that ran to their
-    # maximum length.
+    # Dosed top-ups (dosing.py): the room is in the dosing phase; the
+    # running pulse's start, the target it is for and its cap; the last
+    # pulse's start, end and target (the refractory, which a raised target
+    # skips).  ``settled`` keeps its 2.15.0 name, which the
+    # restore-state data uses.
     settled: bool = False
-    settled_setpoint_c: float | None = None
     pulse_start_ts: float | None = None
     last_pulse_start_ts: float | None = None
     pulse_setpoint_c: float | None = None
-    capped_pulses: int = 0
+    pulse_cap_s: float | None = None
+    last_pulse_end_ts: float | None = None
+    last_pulse_setpoint_c: float | None = None
 
 
 @dataclass
@@ -178,10 +184,11 @@ class RegulationResult:
     virtual_error_c: float = 0.0   # error - the rise still in flight
     need_c: float = 0.0            # what a pulse (still) has to cover
     pulse_s: float = 0.0           # how long the running pulse has run
+    pulse_cap_s: float | None = None  # the running pulse's cap (s)
     ready_in_s: float | None = None  # seconds to the dosed release (ready, falling)
-    settled: bool = False
+    settled: bool = False          # in the dosing phase (stop or dose; the 2.15.0 name)
     fired_by: str | None = None    # "release" / "burn" / "together", on the cycle a pulse starts
-    dose_end: str | None = None    # "covered" / "max" / "stop_rule" / "unsettled", on the cycle it ends
+    dose_end: str | None = None    # covered / max / landing / stop_rule / heat_up, as it ends
 
 
 def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
@@ -244,6 +251,67 @@ def dose_fall_c_per_s(room_slope_c_per_s: float | None, deadband_c_per_h: float)
         return 0.0
     fall = -float(room_slope_c_per_s)
     return fall if fall * 3600.0 >= max(0.0, deadband_c_per_h) else 0.0
+
+
+def dose_rise_c_per_s(room_slope_c_per_s: float | None, deadband_c_per_h: float) -> float:
+    """The room's own rise (°C/s, 0 or more) beyond the slope deadband: a
+    room warming by itself (sun, people) needs that much less dose.  The
+    other side of :func:`dose_fall_c_per_s`, and only ever less heat."""
+    if not _finite(room_slope_c_per_s, deadband_c_per_h):
+        return 0.0
+    rise = float(room_slope_c_per_s)
+    return rise if rise * 3600.0 >= max(0.0, deadband_c_per_h) else 0.0
+
+
+def dose_cap_s(cap_need_c: float, cap_gain_c_per_open_min: float | None,
+               cfg: DoseConfig, *, running: bool = False) -> float:
+    """The longest a pulse may run (s): the open time ``cap_need_c`` plus
+    ``cap_margin_c`` takes at the room's own rise per open-minute at full
+    power (``cap_gain_c_per_open_min``: the auto-tuner's heating rate / 60),
+    within ``pulse_min_s`` and ``pulse_ceiling_s``; as a pulse from its
+    command (the valve opens ``latency_s`` after it and shuts
+    ``close_delay_s`` after the off), or with ``running`` the time still to
+    run from now (the valve open).  Unknown room: ``pulse_max_s``.
+
+    ``cap_need_c`` is the dose worked out on that rate (:func:`dose_cap_need_c`),
+    not the model's: the cap is the safety net for a model that is wrong
+    (owner, 31 Oct 2026: "if the room is short 0.8 C and the historical heat
+    up rate is smaller ... adjust the max pulse to match what the room max
+    need would be"), so a slow room short 0.8 may run long, a fast room short
+    0.1 only a few minutes, and a pulse that reaches its cap lands about
+    ``cap_margin_c`` over if the room's heating rate is right.  Set when the
+    pulse starts.  The room's cooling while the pulse runs is not added: in
+    cold weather that cuts a long pulse the model sizes right, which then
+    lands short and takes another go (the owner's preference over landing
+    hot).  House simulation (31 Oct 2026, four seeds, real and real - 4 °C):
+    with that cooling counted, or with the cap judged again every cycle, the
+    living room's daily peaks rose +0.22 -> +0.25 / +0.17 -> +0.20 for less
+    time under -0.2 (262 -> 239 min a day in the cold)."""
+    if not _finite(cap_gain_c_per_open_min) or cap_gain_c_per_open_min <= 0:
+        return cfg.pulse_max_s
+    need = max(0.0, float(cap_need_c)) if _finite(cap_need_c) else 0.0
+    open_min = (need + max(0.0, cfg.cap_margin_c)) / float(cap_gain_c_per_open_min)
+    if running:
+        return min(cfg.pulse_ceiling_s, max(0.0, 60.0 * open_min - cfg.close_delay_s))
+    pulse_s = 60.0 * open_min + cfg.latency_s - cfg.close_delay_s
+    return min(cfg.pulse_ceiling_s, max(cfg.pulse_min_s, pulse_s))
+
+
+def dose_cap_need_c(
+    error_c: float, cap_inflight_c: float, cap_slope_c_per_s: float | None,
+    horizon_s: float, deadband_c_per_h: float,
+) -> float:
+    """The dose the cap is sized on (°C): the measured shortfall less the
+    heat in flight at the cap's rise per open-minute, plus the cooling (or
+    less the room's own rise) until the heat has landed, from the cap's own
+    observer (dosing.RoomDoser: the room less Roomstat's heat at that rise
+    per open-minute).  No aim bias and nothing of the learned gain: the
+    cap must not grow with the model it guards."""
+    e = float(error_c) if _finite(error_c) else 0.0
+    inflight = max(0.0, float(cap_inflight_c)) if _finite(cap_inflight_c) else 0.0
+    fall = dose_fall_c_per_s(cap_slope_c_per_s, deadband_c_per_h)
+    rise = dose_rise_c_per_s(cap_slope_c_per_s, deadband_c_per_h)
+    return dose_need_c(e - inflight, fall, horizon_s) - rise * max(0.0, horizon_s)
 
 
 def dose_need_c(
@@ -337,18 +405,20 @@ def outlook(error_c: float, room_slope_c_per_s: float | None,
 
 @dataclass(frozen=True)
 class _DoseStep:
-    """One cycle's dosed decision.  ``mode`` None: the room is not settled,
-    so the ordinary modes decide."""
+    """One cycle's decision with dosed top-ups on: a heat-up phase mode
+    (heat, coast; ``settled`` False) or the dosing phase's (stop, dose)."""
 
-    mode: str | None
+    mode: str
     settled: bool
-    settled_setpoint_c: float | None
     pulse_start_ts: float | None
     last_pulse_start_ts: float | None
+    last_pulse_end_ts: float | None
     virtual_error_c: float
     need_c: float
+    last_pulse_setpoint_c: float | None = None
     pulse_setpoint_c: float | None = None
-    capped_pulses: int = 0
+    pulse_limit_s: float | None = None     # the running pulse's cap (kept in the state)
+    pulse_cap_s: float | None = None       # the same, reported
     pulse_s: float = 0.0
     ready_in_s: float | None = None
     fired_by: str | None = None
@@ -409,13 +479,27 @@ class FeedforwardPiRegulator:
         inflight_c: float, tail_c: float, gain_c_per_open_min: float,
         theta_s: float, tau_s: float, bias_c: float, fire_now: str | None,
         loss_slope_c_per_s: float | None = None,
+        cap_gain_c_per_open_min: float | None = None,
+        cap_inflight_c: float = 0.0,
+        cap_loss_slope_c_per_s: float | None = None,
+        unbooked_until_ts: float | None = None,
     ) -> _DoseStep:
-        """The settled state and the dosed mode for this cycle (see the
-        module docstring and dosing.py)."""
+        """The mode for this cycle with dosed top-ups on (see the module
+        docstring and dosing.py).
+
+        Two phases, nothing in between (owner, 31 Oct 2026): a heat-up — a
+        shortfall of ``heatup_enter_c`` or more, full power until its coast
+        is predicted to land it, then the coast while the room still rises
+        short of the target, exactly the ordinary rules — and the dosing
+        phase, everything else: the valve shut, or a full-power pulse sized
+        by the model.  There is no hold."""
         cfg, dose = self.cfg, self.cfg.dose
         inflight = max(0.0, _finite_or(inflight_c, 0.0))
         tail = max(0.0, _finite_or(tail_c, 0.0))
         gain = _finite_or(gain_c_per_open_min, 0.0)
+        cap_gain = (float(cap_gain_c_per_open_min)
+                    if _finite(cap_gain_c_per_open_min) and cap_gain_c_per_open_min > 0
+                    else None)
         bias = _finite_or(bias_c, 0.0)
         theta = _finite_or(theta_s, 0.0)
         tau = _finite_or(tau_s, 0.0)
@@ -431,142 +515,186 @@ class FeedforwardPiRegulator:
         # the room's own slope.  After each landing the room's own slope
         # still holds part of the rise, which reads as a slower cooling: the
         # next pulse came late and small (troughs -0.13..-0.19 in the entity
-        # test before 2.15.0 shipped).
+        # test before 2.15.0 shipped).  A room warming by itself (sun,
+        # people) needs that much less: its rise only ever takes heat off.
         loss_slope = (loss_slope_c_per_s if _finite(loss_slope_c_per_s)
                       else room_slope_c_per_s)
         fall = dose_fall_c_per_s(loss_slope, cfg.slope_deadband_c_per_h)
-        last_pulse = state.last_pulse_start_ts
-        # Pulses that ran to their maximum in a row; forgotten once the room
-        # is back at its target (the hold brought it there).
-        capped = max(0, int(_finite_or(state.capped_pulses, 0.0)))
-        if error_c <= 0:
-            capped = 0
+        rise = dose_rise_c_per_s(loss_slope, cfg.slope_deadband_c_per_h)
 
-        # The settled state: entered from a stop within the band (not while
-        # pulses have just proved too small), kept while the target stays
-        # put and the room within the band, left on a real cold event,
-        # virtual or measured (the ordinary hold or heat-up takes over).
-        settled = state.settled
-        settled_sp = state.settled_setpoint_c if settled else None
-        if settled and (
-            settled_sp is None
-            or abs(setpoint_c - settled_sp) > dose.settled_setpoint_tolerance_c
-        ):
-            settled, settled_sp = False, None
-        if (
-            not settled and prev_mode == MODE_STOP and abs(e_star) < dose.settled_window_c
-            and capped < dose.capped_pulses_unsettle
-        ):
-            settled, settled_sp = True, setpoint_c
-        # Left on a shortfall (virtual or measured), or with the room itself
-        # far above the target (sun, people: a stop either way).  Not on a
-        # virtual excess: in cold weather a pulse carries more than 0.5 °C
-        # in flight to cover the cooling until it lands, and ending it there
-        # turned every pulse into a hold (2.0 °C/h, 2.15.0 review).
-        if settled and (
-            e_star >= dose.unsettle_c or error_c >= dose.unsettle_c
-            or error_c <= -dose.settled_window_c
-        ):
-            settled, settled_sp = False, None
+        def need_for(virtual_error: float) -> float:
+            return (dose_need_c(virtual_error, fall, horizon_s, dose.aim_under_c, bias)
+                    - rise * horizon_s)
 
-        if not settled:
+        need = need_for(e_star)
+        # The cap's own dose: the room's heating rate, no aim bias, its own
+        # observer (dose_cap_need_c).
+        cap_slope = (cap_loss_slope_c_per_s if _finite(cap_loss_slope_c_per_s)
+                     else room_slope_c_per_s)
+
+        def cap_need(error: float) -> float:
+            return dose_cap_need_c(error, cap_inflight_c, cap_slope, horizon_s,
+                                   cfg.slope_deadband_c_per_h)
+
+        # The longest a pulse may run whatever the cap says: the fixed
+        # maximum while the room's heating rate is unknown.
+        limit_s = dose.pulse_ceiling_s if cap_gain is not None else dose.pulse_max_s
+
+        def cap_at_start() -> float:
+            if cap_gain is None:
+                return limit_s
+            return min(limit_s, dose_cap_s(cap_need(error_c), cap_gain, dose))
+        # Times from the future (the clock went back) count as now.
+        last_pulse = (min(state.last_pulse_start_ts, now_ts)
+                      if _finite(state.last_pulse_start_ts) else None)
+        last_end = (min(state.last_pulse_end_ts, now_ts)
+                    if _finite(state.last_pulse_end_ts) else None)
+        last_sp = state.last_pulse_setpoint_c if _finite(state.last_pulse_setpoint_c) else None
+        running = prev_mode == MODE_DOSE
+        o = outlook(error_c, room_slope_c_per_s, cfg)
+
+        # The heat-up phase: the ordinary rules.  A pulse running when the
+        # shortfall reaches heatup_enter_c becomes the heat-up (its 25 °C
+        # carries on, ended on the heat-up's predicted coast).
+        heat_up_mode = None
+        if prev_mode == MODE_HEAT:
+            heat_up_mode = MODE_COAST if o.landing_c <= cfg.heatup_exit_c else MODE_HEAT
+        elif error_c >= cfg.heatup_enter_c and o.landing_c > cfg.heatup_exit_c:
+            heat_up_mode = MODE_HEAT
+        elif prev_mode == MODE_COAST and error_c > 0 and o.rising_c_per_s > 0:
+            heat_up_mode = MODE_COAST
+        if heat_up_mode is not None:
             dose_end = None
-            if prev_mode == MODE_DOSE:
-                dose_end = "unsettled"
-                if state.pulse_start_ts is not None:
-                    last_pulse = state.pulse_start_ts
+            if running:
+                dose_end = "heat_up"
+                start = state.pulse_start_ts
+                last_pulse = start if _finite(start) and start <= now_ts else now_ts
+                last_end = now_ts
+                last_sp = (state.pulse_setpoint_c if _finite(state.pulse_setpoint_c)
+                           else setpoint_c)
             return _DoseStep(
-                mode=None, settled=False, settled_setpoint_c=None,
-                pulse_start_ts=None, last_pulse_start_ts=last_pulse,
-                virtual_error_c=e_star,
-                need_c=dose_need_c(e_star, fall, horizon_s, dose.aim_under_c, bias),
-                capped_pulses=capped, dose_end=dose_end,
+                mode=heat_up_mode, settled=False, pulse_start_ts=None,
+                last_pulse_start_ts=last_pulse, last_pulse_end_ts=last_end,
+                last_pulse_setpoint_c=last_sp,
+                virtual_error_c=e_star, need_c=need, dose_end=dose_end,
             )
 
-        # The measured stop rule applies in the settled state too: a room
+        # The dosing phase.  The measured stop rule applies here too: a room
         # predicted to overshoot gets no heat, and a running pulse ends.
-        stop_due = outlook(error_c, room_slope_c_per_s, cfg).stop_landing_c <= -cfg.stop_over_c
+        stop_due = o.stop_landing_c <= -cfg.stop_over_c
+        floor_open_min = (dose.pulse_min_s - dose.latency_s + dose.close_delay_s) / 60.0
+        # A minimum pulse's landing on the stronger of the two estimates of
+        # the room's rise per open-minute: a pulse that would overshoot even
+        # at its shortest waits until the room needs it.
+        floor_gain = max(gain, cap_gain or 0.0)
 
-        if prev_mode == MODE_DOSE:
+        if running:
             start = state.pulse_start_ts
             # Unknown: the pulse's command was held back (a change by hand
             # settling, a window's delay), so the pulse starts when it goes
-            # out: counted from now, and reported as fired again, so the
+            # out: counted from now and reported as fired again, so the
             # cycle that sends it starts its episode.  A start in the future
             # (the clock went back) counts from now too, but it is the same
             # pulse.
             restarted = start is None or not math.isfinite(start)
             if restarted or start > now_ts:
                 start = now_ts
+            pulse_sp = (state.pulse_setpoint_c
+                        if _finite(state.pulse_setpoint_c) and not restarted else setpoint_c)
             pulse_s = now_ts - start
-            pulse_sp = state.pulse_setpoint_c if _finite(state.pulse_setpoint_c) else setpoint_c
-            need = dose_need_c(e_star - tail, fall, horizon_s, dose.aim_under_c, bias)
-            # A target lowered since the pulse started (by hand, within the
-            # settled tolerance): the minimum length no longer applies.
+            cap = (min(state.pulse_cap_s, limit_s)
+                   if _finite(state.pulse_cap_s) and state.pulse_cap_s > 0 and not restarted
+                   else cap_at_start())
+            if cap_gain is not None and setpoint_c > pulse_sp + 0.05:
+                # A target raised mid-pulse: the cap is worked out again for
+                # what is left to cover (review 3: the old one ended the
+                # pulse 0.61 short), and the pulse is for the new target.
+                cap = max(cap, min(limit_s, pulse_s + dose_cap_s(
+                    cap_need(error_c - cap_gain * dose.close_delay_s / 60.0), cap_gain, dose,
+                    running=True)))
+                pulse_sp = setpoint_c
+            need_run = need_for(e_star - tail)
+            # A target lowered since the pulse started (by hand): the
+            # minimum length no longer applies.
             lowered = setpoint_c < pulse_sp - 0.05
+            may_end = pulse_s >= dose.pulse_min_s or lowered
             end = None
             if stop_due:
                 end = "stop_rule"
-            elif need <= 0 and (pulse_s >= dose.pulse_min_s or lowered):
+            elif need_run <= 0 and may_end:
                 end = "covered"
-            elif pulse_s >= dose.pulse_max_s:
+            elif pulse_s >= cap:
                 end = "max"
+            elif (may_end and pulse_s >= lead_s and error_c > 0
+                  and o.rising_c_per_s > 0 and o.landing_c <= cfg.heatup_exit_c):
+                # The heat-up's own exit, measured: once the pulse's heat
+                # shows and the room rises onto its target, the radiator's
+                # leftover heat lands it (as a full push ends, 2.10.4).
+                end = "landing"
             if end is None:
                 return _DoseStep(
-                    mode=MODE_DOSE, settled=True, settled_setpoint_c=settled_sp,
-                    pulse_start_ts=start, last_pulse_start_ts=last_pulse,
-                    virtual_error_c=e_star, need_c=need, pulse_s=pulse_s,
-                    pulse_setpoint_c=pulse_sp, capped_pulses=capped,
+                    mode=MODE_DOSE, settled=True, pulse_start_ts=start,
+                    last_pulse_start_ts=last_pulse, last_pulse_end_ts=last_end,
+                    last_pulse_setpoint_c=last_sp,
+                    virtual_error_c=e_star, need_c=need_run, pulse_s=pulse_s,
+                    pulse_setpoint_c=pulse_sp, pulse_limit_s=cap, pulse_cap_s=cap,
                     fired_by="release" if restarted else None,
                 )
-            capped = capped + 1 if end == "max" else 0
-            if capped >= dose.capped_pulses_unsettle:
-                # Pulses at their maximum, again: more than pulses can give.
-                # The ordinary modes take over (this one counts as a just
-                # ended maximum, a coast), until the room is back at its
-                # target.
-                return _DoseStep(
-                    mode=None, settled=False, settled_setpoint_c=None,
-                    pulse_start_ts=None, last_pulse_start_ts=start,
-                    virtual_error_c=e_star, need_c=need, pulse_s=pulse_s,
-                    capped_pulses=capped, dose_end=end,
-                )
             return _DoseStep(
-                mode=MODE_STOP, settled=True, settled_setpoint_c=settled_sp,
-                pulse_start_ts=None, last_pulse_start_ts=start,
-                virtual_error_c=e_star, need_c=need, pulse_s=pulse_s,
-                capped_pulses=capped, dose_end=end,
+                mode=MODE_STOP, settled=True, pulse_start_ts=None,
+                last_pulse_start_ts=start, last_pulse_end_ts=now_ts,
+                last_pulse_setpoint_c=pulse_sp,
+                virtual_error_c=e_star, need_c=need_run, pulse_s=pulse_s, dose_end=end,
             )
 
-        # Shut (a stop, or a hold or coast resumed after a reload): ready
-        # once the last pulse has had theta + 2 tau to land (the
-        # refractory).  Heat still in flight needs no wait of its own: the
-        # virtual error already subtracts it, and waiting for its tail to
-        # fade let the room fall to 0.18 under the target at 0.8 °C/h.
-        need = dose_need_c(e_star, fall, horizon_s, dose.aim_under_c, bias)
+        # Shut (a stop, a coast just ended, or a hold resumed after a
+        # reload): ready once the last pulse has had theta + 2 tau from its
+        # start to land (the refractory) and theta + tau / 2 from its end to
+        # show.  Heat still in flight needs no wait of its own: the virtual
+        # error already subtracts it, and waiting for its tail to fade let
+        # the room fall to 0.18 under the target at 0.8 °C/h.  A target
+        # raised since the last pulse skips the wait for the same reason
+        # (2.15.0 handed such a step to the hold at once).  Heat that is
+        # booked nowhere (a hold's, a heat-up's) is not in the virtual
+        # error: nothing fires until it has had theta + tau / 2 to show.
         refractory_s = min(horizon_s, dose.refractory_max_s)
-        ready = last_pulse is None or now_ts - last_pulse >= refractory_s
+        raised = last_sp is not None and setpoint_c > last_sp + 0.05
+        unbooked = (min(unbooked_until_ts, now_ts) if _finite(unbooked_until_ts) else None)
+        ready = (
+            (raised or (
+                (last_pulse is None or now_ts - last_pulse >= refractory_s)
+                and (last_end is None or now_ts - last_end >= lead_s)))
+            and (unbooked is None or now_ts - unbooked >= lead_s)
+        )
         fired_by = None
         if ready and not stop_due:
-            if e_star + lead_s * fall >= cfg.release_below_c:
+            # A negative aim bias (landings above the target) shrinks the
+            # dose, not the room's need of a first pulse.
+            floor_landing = dose_floor_landing_c(need - min(0.0, bias), floor_gain,
+                                                 floor_open_min)
+            if (e_star + lead_s * (fall - rise) >= cfg.release_below_c
+                    and floor_landing <= cfg.stop_over_c):
                 fired_by = "release"
-            elif fire_now in ("burn", "together") and gain > 0:
-                floor_open_min = (dose.pulse_min_s - dose.latency_s + dose.close_delay_s) / 60.0
-                if dose_floor_landing_c(need, gain, floor_open_min) <= dose.fire_max_overshoot_c:
-                    fired_by = fire_now
+            elif (fire_now in ("burn", "together") and gain > 0
+                  and floor_landing <= dose.fire_max_overshoot_c):
+                fired_by = fire_now
         if fired_by is not None:
+            cap = cap_at_start()
             return _DoseStep(
-                mode=MODE_DOSE, settled=True, settled_setpoint_c=settled_sp,
-                pulse_start_ts=now_ts, last_pulse_start_ts=last_pulse,
+                mode=MODE_DOSE, settled=True, pulse_start_ts=now_ts,
+                last_pulse_start_ts=last_pulse, last_pulse_end_ts=last_end,
+                last_pulse_setpoint_c=last_sp,
                 virtual_error_c=e_star, need_c=need, fired_by=fired_by,
-                pulse_setpoint_c=setpoint_c, capped_pulses=capped,
+                pulse_setpoint_c=setpoint_c, pulse_limit_s=cap, pulse_cap_s=cap,
             )
         return _DoseStep(
-            mode=MODE_STOP, settled=True, settled_setpoint_c=settled_sp,
-            pulse_start_ts=None, last_pulse_start_ts=last_pulse,
-            virtual_error_c=e_star, need_c=need, capped_pulses=capped,
+            mode=MODE_STOP, settled=True, pulse_start_ts=None,
+            last_pulse_start_ts=last_pulse, last_pulse_end_ts=last_end,
+            last_pulse_setpoint_c=last_sp,
+            virtual_error_c=e_star, need_c=need,
             ready_in_s=(
-                dose_ready_in_s(e_star, fall, lead_s, cfg.release_below_c) if ready else None
+                dose_ready_in_s(e_star - lead_s * rise, fall, lead_s, cfg.release_below_c)
+                if ready else None
             ),
         )
 
@@ -591,6 +719,10 @@ class FeedforwardPiRegulator:
         now_ts: float | None = None,
         fire_now: str | None = None,
         loss_slope_c_per_s: float | None = None,
+        cap_gain_c_per_open_min: float | None = None,
+        cap_inflight_c: float = 0.0,
+        cap_loss_slope_c_per_s: float | None = None,
+        unbooked_until_ts: float | None = None,
     ) -> RegulationResult:
         """Run one regulation cycle and return the result.
 
@@ -640,6 +772,19 @@ class FeedforwardPiRegulator:
             rise of Roomstat's heat that has arrived, dosing.RoomDoser): the
             dose's cooling rate.  None: the room's own slope.  The heat-up
             and stop predictions always use the room's own slope.
+        cap_gain_c_per_open_min:
+            The room's own rise per open-minute at full power for the
+            pulse's cap (the auto-tuner's heating rate / 60, else the
+            learned gain; :func:`dose_cap_s`).  None: the fixed
+            ``DoseConfig.pulse_max_s``.
+        cap_inflight_c, cap_loss_slope_c_per_s:
+            The heat in flight at that rise per open-minute (°C) and the
+            room's slope less Roomstat's heat at it (°C/s; None: the room's
+            own slope): the cap's own dose (:func:`dose_cap_need_c`).
+        unbooked_until_ts:
+            When heat booked nowhere (a hold's, a heat-up's) last went to
+            the valve (now: still going); no pulse fires until it has had
+            theta + tau / 2 to show.  None: none.
         """
 
         # 0. Guard: reject NaN/Inf inputs – they would corrupt all calculations
@@ -694,9 +839,10 @@ class FeedforwardPiRegulator:
 
         # 4. Mode: heat (maximum), coast or stop (minimum), or hold.  The
         # hold's push over the valve's reading: (1 + kp) * error + integral.
-        # Dosed top-ups decide in the settled state; otherwise (and with
-        # the option off) the ordinary modes, where a pulse still running
-        # counts as a just-ended maximum: a coast.
+        # With dosed top-ups on, a heat-up phase or the dosing phase (no
+        # hold); otherwise (and with the option off) the ordinary modes,
+        # where a pulse still running counts as a just-ended maximum: a
+        # coast.
         prev_mode = state.mode if state.mode in MODES else MODE_HOLD
         dose_on = bool(dosing) and isinstance(now_ts, (int, float)) and math.isfinite(now_ts)
         dose_step = None
@@ -707,8 +853,12 @@ class FeedforwardPiRegulator:
                 gain_c_per_open_min=gain_c_per_open_min, theta_s=theta_s,
                 tau_s=tau_s, bias_c=bias_c, fire_now=fire_now,
                 loss_slope_c_per_s=loss_slope_c_per_s,
+                cap_gain_c_per_open_min=cap_gain_c_per_open_min,
+                cap_inflight_c=cap_inflight_c,
+                cap_loss_slope_c_per_s=cap_loss_slope_c_per_s,
+                unbooked_until_ts=unbooked_until_ts,
             )
-        if dose_step is not None and dose_step.mode is not None:
+        if dose_step is not None:
             mode, full_push = dose_step.mode, False
         else:
             mode, full_push = self._next_mode(
@@ -764,25 +914,33 @@ class FeedforwardPiRegulator:
 
         if dose_step is not None:
             settled = dose_step.settled
-            settled_sp = dose_step.settled_setpoint_c
             pulse_start = dose_step.pulse_start_ts
             last_pulse = dose_step.last_pulse_start_ts
-            pulse_sp = dose_step.pulse_setpoint_c if pulse_start is not None else None
-            capped = dose_step.capped_pulses
+            last_end = dose_step.last_pulse_end_ts
+            running = pulse_start is not None
+            pulse_sp = dose_step.pulse_setpoint_c if running else None
+            pulse_cap = dose_step.pulse_limit_s if running else None
+            last_sp = dose_step.last_pulse_setpoint_c
         else:
-            # Off: not settled; a pulse that was running still counts for
-            # the refractory time once dosing resumes.
-            settled, settled_sp, pulse_start, pulse_sp = False, None, None, None
+            # Off: not in the dosing phase; a pulse that was running still
+            # counts for the refractory time once dosing resumes.
+            settled, pulse_start, pulse_sp, pulse_cap = False, None, None, None
             last_pulse = (
                 state.pulse_start_ts if state.pulse_start_ts is not None
                 else state.last_pulse_start_ts
             )
-            capped = state.capped_pulses
+            last_end = state.last_pulse_end_ts
+            last_sp = state.last_pulse_setpoint_c
+            if state.pulse_start_ts is not None and _finite(now_ts):
+                last_end = float(now_ts)
+                if _finite(state.pulse_setpoint_c):
+                    last_sp = state.pulse_setpoint_c
         new_state = RegulationState(
             integral_c=new_integral, mode=mode, last_room_c=room_temp_c,
-            full_push=full_push, settled=settled, settled_setpoint_c=settled_sp,
+            full_push=full_push, settled=settled,
             pulse_start_ts=pulse_start, last_pulse_start_ts=last_pulse,
-            pulse_setpoint_c=pulse_sp, capped_pulses=capped,
+            pulse_setpoint_c=pulse_sp, pulse_cap_s=pulse_cap, last_pulse_end_ts=last_end,
+            last_pulse_setpoint_c=last_sp,
         )
 
         dose_fields: dict = {}
@@ -797,6 +955,9 @@ class FeedforwardPiRegulator:
                 "settled": dose_step.settled,
                 "fired_by": dose_step.fired_by,
                 "dose_end": dose_step.dose_end,
+                "pulse_cap_s": (
+                    round(dose_step.pulse_cap_s, 1) if dose_step.pulse_cap_s is not None else None
+                ),
             }
 
         return RegulationResult(

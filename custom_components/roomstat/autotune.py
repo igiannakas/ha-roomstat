@@ -269,10 +269,14 @@ class AutotuneSample:
     # What the valve look-ahead (lookahead.py) took off the command the TRV
     # holds: the valve answers it as Roomstat's push, so it counts back in.
     lookahead_c: float = 0.0
-    # The room is settled under dosed top-ups (dosing.py): pulses, not the
-    # PI, are in charge, so no hold window counts the cycle (Kp and Ki are
-    # judged on the hold they drive; 2.15.0 review: Ki 0.001 -> 0.0012 in
-    # 36 h on dosed cycles).  Heat-ups are judged as always.
+    # The room is in the dosing phase of dosed top-ups (dosing.py): pulses,
+    # not the PI, are in charge, so no hold window counts the cycle (Kp and
+    # Ki are judged on the hold they drive; 2.15.0 review: Ki 0.001 ->
+    # 0.0012 in 36 h on dosed cycles), and a target step it doses is no
+    # heat-up (review 3, 31 Oct 2026: six dosed 0.7 steps took the braking
+    # time 10 -> 14.7 min, and the heating rate the pulses' cap is sized on
+    # came from pulses).  Heat-ups (heatup_enter_c or more) are judged as
+    # always.
     dosed: bool = False
 
     @property
@@ -1144,9 +1148,10 @@ class Autotuner:
 
         # Start of a heat-up: a setpoint step up (or heating resuming after a
         # summer / off / away period) with the room well below target.  Not
-        # after a window: the room is recovering by itself.
+        # after a window: the room is recovering by itself.  Not one dosed
+        # top-ups take (no heat-up at all).
         if (
-            self._heatup is None and s.eligible and room is not None
+            self._heatup is None and s.eligible and not s.dosed and room is not None
             and sp - room >= self.cfg.heatup_min_error_c
         ):
             step_up = (

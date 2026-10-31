@@ -20,13 +20,17 @@ What it does
 A Smith predictor runs a model of Roomstat's own heat alongside the room
 and the regulator decides on a *virtual* room temperature: the reading plus
 the rise the model says is committed but not yet visible
-(:class:`TopupPredictor`).  In the settled state a top-up is a pulse at the
-maximum (one strong command the Tado answers the same way every time),
-ended once the heat committed covers the virtual shortfall plus the room's
-cooling until the heat has landed (regulation.dose_need_c); the next pulse
-waits theta + 2 tau from the last one's start (the refractory time: the
-heat still in flight is already taken off the virtual shortfall).  Outside
-the settled state nothing changes.
+(:class:`TopupPredictor`).  With the option on a room is either in a
+heat-up (a shortfall of heatup_enter_c or more: the ordinary heat-up and
+its coast) or in the dosing phase (owner, 31 Oct 2026: no hold).  There a
+top-up is a pulse at the maximum (one strong command the Tado answers the
+same way every time), ended once the heat committed covers the virtual
+shortfall plus the room's cooling until the heat has landed
+(regulation.dose_need_c), or at its cap: a few times what the room's own
+heating rate says the need takes (regulation.dose_cap_s), the safety net
+for a wrong model.  The next pulse waits theta + 2 tau from the last one's
+start and theta + tau / 2 from its end (the refractory time: the heat
+still in flight is already taken off the virtual shortfall).
 
 The unit is the *open-minute*: a minute the valve is commanded open,
 booked from Roomstat's own maximums (:class:`RoomDoser`).  The zone's
@@ -54,7 +58,7 @@ The boiler
 ----------
 The boiler is an on/off type: any single-radiator call already cycles it on
 its flow thermostat.  The lever is how many radiators share each burn, so
-:class:`PulseCoordinator` lets a settled room ride another zone's burn and
+:class:`PulseCoordinator` lets a dosed room ride another zone's burn and
 fire together with another room's pulse when it is due soon anyway; it
 only chooses the moment, each room sizes its own pulse.
 """
@@ -438,6 +442,7 @@ class Episode:
     landed_ts: float | None = None     # when its heat was seen to have landed
     cut_ts: float | None = None        # the next opening's heat may show from here
     cut_short: bool = False            # landed at the cut, not on a stall or the deadline
+    end_reason: str | None = None      # the regulator's dose_end (None: not known)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -450,6 +455,7 @@ class Episode:
             "samples": [[round(t, 1), round(y, 3)] for t, y in self.samples],
             "pulse_end_ts": self.pulse_end_ts, "landed_ts": self.landed_ts,
             "cut_ts": self.cut_ts, "cut_short": self.cut_short,
+            "end_reason": self.end_reason,
         }
 
     @classmethod
@@ -474,6 +480,7 @@ class Episode:
                 landed_ts=(float(d["landed_ts"]) if d.get("landed_ts") is not None else None),
                 cut_ts=(float(d["cut_ts"]) if d.get("cut_ts") is not None else None),
                 cut_short=bool(d.get("cut_short", False)),
+                end_reason=(d["end_reason"] if isinstance(d.get("end_reason"), str) else None),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -501,6 +508,8 @@ class Judged:
     gap_start_c: float | None
     rms_c: float
     loss_c_per_s: float = 0.0
+    shortfall_start_c: float | None = None   # target - room when it fired
+    end_reason: str | None = None            # the regulator's dose_end
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -511,6 +520,9 @@ class Judged:
             "at_floor": self.at_floor, "rode_burn": self.rode_burn,
             "gap_start_c": (round(self.gap_start_c, 2) if self.gap_start_c is not None else None),
             "rms_c": round(self.rms_c, 4),
+            "shortfall_start_c": (round(self.shortfall_start_c, 3)
+                                  if self.shortfall_start_c is not None else None),
+            "end_reason": self.end_reason,
         }
 
     @classmethod
@@ -526,6 +538,9 @@ class Judged:
                 gap_start_c=(float(d["gap_start_c"]) if d.get("gap_start_c") is not None else None),
                 rms_c=float(d.get("rms_c", 0.0)),
                 loss_c_per_s=float(d.get("loss_c_per_h", 0.0)) / 3600.0,
+                shortfall_start_c=(float(d["shortfall_start_c"])
+                                   if d.get("shortfall_start_c") is not None else None),
+                end_reason=(d["end_reason"] if isinstance(d.get("end_reason"), str) else None),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -645,6 +660,12 @@ class DoseLearner:
                            else self.cfg.default_gain_c_per_open_min)
         if not self.learned:
             self.gain_c_per_open_min = self._seed_gain
+
+    @property
+    def rate_gain_c_per_open_min(self) -> float | None:
+        """The room's rise per open-minute by the auto-tuner's heating rate
+        (a heat-up at full power), None while the tuner has none."""
+        return self._seed_rate / 60.0 if self._seed_rate is not None else None
 
     # -- episodes -------------------------------------------------------------
     def start_episode(
@@ -797,6 +818,16 @@ class DoseLearner:
             if ep.pulse_end_ts is None:
                 ep.pulse_end_ts = float(ts)
 
+    def note_end_reason(self, start_ts: float | None, reason: str) -> None:
+        """Why the pulse that started at ``start_ts`` ended (the regulator's
+        dose_end): only one its own dose ended teaches the aim bias to dose
+        more."""
+        if not _finite(start_ts):
+            return
+        for ep in self._episodes:
+            if abs(ep.start_ts - start_ts) < 1.0 and ep.end_reason is None:
+                ep.end_reason = reason
+
     def observe(self, ts: float, setpoint_c: float, *, window: bool, boost: bool) -> list[Verdict]:
         """Judge each episode being measured if it can be: dropped when
         disturbed, judged once its heat has landed (:meth:`_landing`).
@@ -886,7 +917,7 @@ class DoseLearner:
         the visible dead time in use to show since the pulse ended.  Failing
         all, once theta + 4 tau have passed since the pulse ended (98 % of
         the model's heat has arrived), at most ``episode_max_s`` after the
-        start."""
+        pulse ended."""
         if ep.pulse_end_ts is None:
             return None, None, False
         cut = ep.cut_ts
@@ -902,8 +933,8 @@ class DoseLearner:
             if cut - ep.pulse_end_ts < self.visible_dead_time_s or ts[-1] < ep.pulse_end_ts:
                 return None, "the next pulse's heat came before this one's could show", False
             return ts[-1], None, True
-        deadline = min(ep.pulse_end_ts + self.theta_s + 4.0 * self.tau_s,
-                       ep.start_ts + self.cfg.episode_max_s)
+        deadline = ep.pulse_end_ts + min(self.theta_s + 4.0 * self.tau_s,
+                                         self.cfg.episode_max_s)
         return (ts[-1], None, False) if now >= deadline else (None, None, False)
 
     def _open_min(self, ep: Episode, now: float) -> float:
@@ -958,7 +989,8 @@ class DoseLearner:
             ts=ep.start_ts, gain_c_per_open_min=fit.gain_c_per_open_min,
             theta_s=fit.theta_s, tau_s=fit.tau_s, peak_error_c=peak_err, open_min=open_min,
             at_floor=at_floor, rode_burn=ep.rode_burn, gap_start_c=ep.gap_start_c, rms_c=fit.rms_c,
-            loss_c_per_s=fit.loss_c_per_s,
+            loss_c_per_s=fit.loss_c_per_s, shortfall_start_c=ep.setpoint_c - ep.room_start_c,
+            end_reason=ep.end_reason,
         )
         self._judged.append(judged)
         self._accepted_total += 1
@@ -1017,11 +1049,21 @@ class DoseLearner:
         # The aim bias absorbs slow drift the gain misses: a landing short
         # moves it up, a hot one down.  A floor-length pulse that landed hot
         # says nothing about the aim: the floor, not the model, set that
-        # landing.
-        if not (judged.at_floor and judged.peak_error_c > cfg.bias_target_c):
-            self.bias_c = _clamp(
-                self.bias_c + cfg.bias_gain * (cfg.bias_target_c - judged.peak_error_c),
-                -cfg.bias_clamp_c, cfg.bias_clamp_c)
+        # landing.  Up (bigger doses) only from a pulse its own dose ended
+        # (not its cap, not the stop rule: they set that landing) that
+        # started near the target: a big dose landing short is a gain error,
+        # which the gain corrects slowly (the owner's choice), and an
+        # additive bias learned from it overdoses every small top-up.
+        miss = cfg.bias_target_c - judged.peak_error_c
+        if miss > 0:
+            learn = (judged.end_reason == "covered"
+                     and judged.shortfall_start_c is not None
+                     and judged.shortfall_start_c <= cfg.bias_max_shortfall_c)
+        else:
+            learn = not judged.at_floor
+        if learn:
+            self.bias_c = _clamp(self.bias_c + cfg.bias_gain * miss,
+                                 -cfg.bias_clamp_c, cfg.bias_clamp_c)
         self._watchdog_fired = False
         if len(recent) >= 2 and all(j.peak_error_c > cfg.watchdog_peak_c for j in recent[-2:]):
             self.gain_c_per_open_min = min(g_hi, self.gain_c_per_open_min * 1.5)
@@ -1031,6 +1073,11 @@ class DoseLearner:
     def _remove(self, ep: Episode) -> None:
         if ep in self._episodes:
             self._episodes.remove(ep)
+
+    def drop_all(self, why: str) -> list[Verdict]:
+        """Drop every episode being measured (a heat-up took the pulse
+        over: its heat is no pulse's)."""
+        return [self._drop(ep, why) for ep in list(self._episodes)]
 
     def _drop(self, ep: Episode, why: str) -> Verdict:
         self._remove(ep)
@@ -1178,7 +1225,7 @@ class _RoomNote:
 
 
 class PulseCoordinator:
-    """Lets settled rooms share the boiler's burns (design §12).
+    """Lets dosed rooms share the boiler's burns (design §12).
 
     The boiler is an on/off type: one radiator draws far less than its
     minimum output, so any single-radiator call cycles it on its flow
@@ -1351,11 +1398,28 @@ class RoomDoser:
         # it (the regulator's room-slope estimator and window).
         self._delivered_c = 0.0
         self._loss = SlopeEstimator()
+        # The cap's own observer (regulation.dose_cap_need_c): the rise of
+        # Roomstat's heat that has arrived at the cap's rise per open-minute
+        # (cumulative, each arrival at the gain then, so a change of the
+        # tuner's rate is no step in the history: review 3), and the slope
+        # of the room less it.  Nothing of the learned gain once the rate is
+        # known, so the cap does not grow with a model it guards.
+        self._cap_delivered_c = 0.0
+        self._cap_loss = SlopeEstimator()
+        # When the last heat booked nowhere (a hold's, a heat-up's) ended,
+        # kept after its mark is gone: the next pulse waits for it to show.
+        self._unbooked_last_ts: float | None = None
 
     @property
     def loss_slope_c_per_s(self) -> float | None:
         """The room's slope as if unheated (°C/s), None while unknown."""
         return self._loss.slope_c_per_s()
+
+    @property
+    def cap_loss_slope_c_per_s(self) -> float | None:
+        """The room's slope less Roomstat's heat at the cap's rise per
+        open-minute (°C/s), None while unknown."""
+        return self._cap_loss.slope_c_per_s()
 
     # -- commands and booking ---------------------------------------------------
     @property
@@ -1372,7 +1436,7 @@ class RoomDoser:
         self.learner.seed(rate_c_per_h)
 
     def note_command(self, ts: float, command_c: float, *, min_c: float,
-                     max_c: float, ok: bool) -> None:
+                     max_c: float, ok: bool, pulse: bool = True) -> None:
         """Every command tried, whatever the path (regulation, Roomstat's own
         off, summer, the watchdog).  A maximum (``max_c`` - 0.05 or more)
         opens the booking; anything else closes it as an off does, and ends
@@ -1394,6 +1458,15 @@ class RoomDoser:
             return
         cfg = self.cfg
         is_max = _finite(max_c) and command_c >= max_c - 0.05
+        if is_max and not pulse:
+            # A heat-up's maximum (``pulse`` False): a cold radiator's heat,
+            # not a pulse's, unknown to this model like a hold's (the
+            # living room's 34-min heat-up of 31 Oct 2026 booked 1.48 °C
+            # where the room rose 1.2, and the observer would have read the
+            # gap as a fast cooling).  Marked, not booked.
+            if ok:
+                self._unbooked_heat(ts)
+            return
         if not ok and not is_max:
             return
         if ok:
@@ -1411,6 +1484,15 @@ class RoomDoser:
         if self.open:
             self._open_until = max(self._open_from, ts + cfg.close_delay_s)
         self.learner.note_pulse_end(ts)
+
+    def _unbooked_heat(self, ts: float) -> None:
+        """Heat of unknown size from now (a heat-up's maximum, or a pulse
+        a heat-up took over): a pulse's booking closes, the hold mark (heat
+        the learner must not fit) starts or carries on."""
+        if self.open:
+            self._open_until = max(self._open_from, ts + self.cfg.close_delay_s)
+            self.learner.note_pulse_end(ts)
+        self._mark_hold(ts, False)
 
     def _mark_hold(self, ts: float, max_or_off: bool) -> None:
         """A command the valve took: a maximum or an off ends a hold's mark
@@ -1457,11 +1539,15 @@ class RoomDoser:
         # What arrived at the room this step (left the emitter).
         arrived = max(0.0, before + booked - self.predictor.committed_open_min())
         self._delivered_c += self.learner.gain_c_per_open_min * arrived
+        cap_gain = self.cap_gain_c_per_open_min
+        self._cap_delivered_c += (
+            cap_gain if cap_gain is not None else self.learner.gain_c_per_open_min) * arrived
         if last is None or now > last:
             self._last_book = now
         if self._open_until is not None and self._open_until <= now:
             self._open_from = self._open_until = None
         if self._hold_until is not None and self._hold_until <= now:
+            self._unbooked_last_ts = self._hold_until
             self._hold_from = self._hold_until = None
         self.inflight_c = self.predictor.inflight_c(self.learner.gain_c_per_open_min)
 
@@ -1485,10 +1571,15 @@ class RoomDoser:
         # The room as if unheated: its slope is the cooling the dose covers.
         # Only while dosing decides (a window's draught or a boost is not
         # the room's loss): otherwise the history starts afresh.
+        cap_gain = self.cap_gain_c_per_open_min
         if not self._enabled:
             self._loss.reset()
+            self._cap_loss.reset()
         elif room_fresh and _finite(room_c):
             self._loss.add(now, room_c - self._delivered_c)
+            # Taken at the gain in use while the cap has none of its own (the
+            # pulse then has the fixed maximum), so it is primed once one comes.
+            self._cap_loss.add(now, room_c - self._cap_delivered_c)
         loss_slope = self._loss.slope_c_per_s()
         cooling_slope = loss_slope if loss_slope is not None else room_slope_c_per_s
         fire_now = None
@@ -1496,7 +1587,7 @@ class RoomDoser:
                 and getattr(state, "settled", False) and getattr(state, "mode", None) != MODE_DOSE):
             fall = dose_fall_c_per_s(cooling_slope, deadband_c_per_h)
             lead = lr.visible_dead_time_s
-            ready = self._ready(now, getattr(state, "last_pulse_start_ts", None))
+            ready = self._ready(now, state, setpoint_c)
             ready_in = dose_ready_in_s(e_star, fall, lead, release_below_c) if ready else None
             verdict = self.coordinator.should_fire(
                 self.room_id, now, virtual_error_c=e_star, ready=ready,
@@ -1514,15 +1605,71 @@ class RoomDoser:
             "now_ts": now,
             "fire_now": fire_now,
             "loss_slope_c_per_s": loss_slope,
+            "cap_gain_c_per_open_min": cap_gain,
+            "cap_inflight_c": self.predictor.inflight_c(cap_gain) if cap_gain is not None else 0.0,
+            "cap_loss_slope_c_per_s": self._cap_loss.slope_c_per_s(),
+            "unbooked_until_ts": self.unbooked_until_ts(now),
         }
 
-    def _ready(self, now: float, last_pulse_start_ts: float | None) -> bool:
-        """The regulator's readiness: the refractory time only (the heat in
-        flight is already taken off the virtual error)."""
-        if last_pulse_start_ts is None or not _finite(last_pulse_start_ts):
+    @property
+    def cap_gain_c_per_open_min(self) -> float | None:
+        """The room's rise per open-minute a pulse's cap is sized on
+        (regulation.dose_cap_s): the auto-tuner's heating rate / 60, which
+        the room's heat-ups measured independently of this model (owner, 31
+        Oct 2026).  None while the tuner has none: the pulse then has the
+        fixed maximum (the learned gain is the model the cap guards against,
+        so it is no cap: review 3)."""
+        return self.learner.rate_gain_c_per_open_min
+
+    def _ready(self, now: float, state: Any, setpoint_c: float | None) -> bool:
+        """The regulator's readiness (regulation._dose_step): theta + 2 tau
+        from the last pulse's start (at most refractory_max_s) and theta +
+        tau / 2 from its end, unless the target was raised since; heat
+        booked nowhere must have had theta + tau / 2 to show.  Times from
+        the future count as now (the heat in flight is already taken off the
+        virtual error)."""
+        lr = self.learner
+        lead = lr.visible_dead_time_s
+        unbooked = self.unbooked_until_ts(now)
+        if unbooked is not None and now - min(unbooked, now) < lead:
+            return False
+        last_sp = getattr(state, "last_pulse_setpoint_c", None)
+        if _finite(last_sp, setpoint_c) and setpoint_c > last_sp + 0.05:
             return True
-        wait = min(self.learner.landing_horizon_s, self.cfg.refractory_max_s)
-        return now - last_pulse_start_ts >= wait
+        start = getattr(state, "last_pulse_start_ts", None)
+        end = getattr(state, "last_pulse_end_ts", None)
+        if _finite(start) and now - min(start, now) < min(
+                lr.landing_horizon_s, self.cfg.refractory_max_s):
+            return False
+        return not (_finite(end) and now - min(end, now) < lead)
+
+    def unbooked_until_ts(self, now: float) -> float | None:
+        """When heat booked nowhere (a hold's, a heat-up's maximum) last went
+        to the valve: now while it still goes, None when there is none."""
+        if self._hold_from is None:
+            return self._unbooked_last_ts
+        if self._hold_until is None:
+            return now
+        return self._hold_until
+
+    def resume_open(self, now: float) -> None:
+        """A pulse of ours taken back after a restart whose booking did not
+        join up (the predictor older than its restore age): the valve holds
+        the maximum, so it is booked open from now."""
+        if not _finite(now) or self.open:
+            return
+        self._open_from, self._open_until = float(now), None
+        if self._last_book is None:
+            self._last_book = float(now)
+
+    def note_valve_heating_unbooked(self, now: float) -> None:
+        """The valve is seen holding a heat setpoint no command of ours
+        explains (a hold sent before dosing was on, before the upgrade from
+        2.15.0): its heat is booked nowhere, so it is marked like a hold's,
+        until an off or a maximum of ours, or the valve seen shut."""
+        if not _finite(now) or self.open:
+            return
+        self._mark_hold(now, False)
 
     def after_compute(
         self, now: float, result: Any, *, setpoint_c: float, room_c: float | None,
@@ -1563,8 +1710,16 @@ class RoomDoser:
             self._fired.append((now, fired_by))
             if self.coordinator is not None:
                 woke = self.coordinator.note_pulse_start(self.room_id, now)
-        if getattr(result, "dose_end", None):
+        dose_end = getattr(result, "dose_end", None)
+        if dose_end == "heat_up":
+            # The pulse's 25 °C carries on as a heat-up: from now its heat
+            # is a heat-up's (unbooked, marked), and nothing of it is learned.
+            self._unbooked_heat(now)
+            lines.extend(v.line for v in lr.drop_all("a heat-up took the pulse over"))
+        elif dose_end:
             lr.note_pulse_end(now)
+            lr.note_end_reason(
+                getattr(getattr(result, "new_state", None), "last_pulse_start_ts", None), dose_end)
         lr.note_cycle(now, room_c if room_fresh else None, heating_pct=heating_pct,
                       heating_ts=heating_ts, open_from=self._open_from, open_until=self._open_until,
                       hold_from=self._hold_from, hold_until=self._hold_until)
@@ -1584,7 +1739,8 @@ class RoomDoser:
     def _wake_in(self, now: float, result: Any) -> float | None:
         """Seconds until a running pulse should be judged again: its minimum
         length, or the open time still needed to cover its need (after the
-        valve has opened).  None when the minute timer comes first."""
+        valve has opened), at the latest its cap.  None when the minute
+        timer comes first."""
         if getattr(result, "mode", None) != MODE_DOSE:
             return None
         cfg = self.cfg
@@ -1594,6 +1750,9 @@ class RoomDoser:
         to_open = max(0.0, self._open_from - now) if self._open_from is not None else 0.0
         cover = to_open + (need / gain * 60.0 if gain > 0 and need > 0 else 0.0)
         wake = max(cfg.pulse_min_s - pulse_s, cover)
+        cap = getattr(result, "pulse_cap_s", None)
+        if _finite(cap):
+            wake = min(wake, max(0.0, cap - pulse_s))
         if wake >= 60.0:
             return None
         return max(5.0, wake)
@@ -1637,6 +1796,7 @@ class RoomDoser:
         data = self.learner.diagnostics()
         data.update(self.summary())
         loss = self.loss_slope_c_per_s
+        cap_loss = self.cap_loss_slope_c_per_s
         data.update({
             "inflight_c": round(self.inflight_c, 3),
             "valve_open": self.open,
@@ -1646,6 +1806,8 @@ class RoomDoser:
             "hold_until": self._hold_until,
             "episode_running": self.learner.episode is not None,
             "loss_slope_c_per_h": round(loss * 3600.0, 3) if loss is not None else None,
+            "cap_loss_slope_c_per_h": (round(cap_loss * 3600.0, 3)
+                                       if cap_loss is not None else None),
             "virtual_error_c": (round(self.virtual_error_c, 3)
                                 if _finite(self.virtual_error_c) else None),
         })
@@ -1663,6 +1825,9 @@ class RoomDoser:
             "fired": [[round(t, 1), k] for t, k in self._fired],
             "delivered_c": round(self._delivered_c, 5),
             "loss": self._loss.to_dict(),
+            "cap_delivered_c": round(self._cap_delivered_c, 5),
+            "cap_loss": self._cap_loss.to_dict(),
+            "unbooked_last_ts": self._unbooked_last_ts,
         }
 
     def restore(self, data: Any, now: float) -> None:
@@ -1681,6 +1846,14 @@ class RoomDoser:
         else:
             self._loss.reset()
             self._delivered_c = 0.0
+        # The cap's observer likewise, with the rise it was taken against
+        # (none saved before 2.16.0: it starts afresh).
+        cap_delivered = data.get("cap_delivered_c")
+        if _finite(cap_delivered) and self._cap_loss.restore(data.get("cap_loss"), now):
+            self._cap_delivered_c = float(cap_delivered)
+        else:
+            self._cap_loss.reset()
+            self._cap_delivered_c = 0.0
         if self.predictor.restore(data.get("predictor"), now):
             last = data.get("last_book")
             self._last_book = float(last) if _finite(last) and last <= now + 1.0 else self.predictor.last_step
@@ -1696,6 +1869,9 @@ class RoomDoser:
                 self._open_until = None
             else:
                 self._open_from = self._open_until = None
+        unbooked_last = data.get("unbooked_last_ts")
+        self._unbooked_last_ts = (float(unbooked_last)
+                                  if _finite(unbooked_last) and unbooked_last <= now + 1.0 else None)
         # A hold's mark, unless it comes from the future.
         hold_from, hold_until = data.get("hold_from"), data.get("hold_until")
         self._hold_from = self._hold_until = None
@@ -1721,3 +1897,6 @@ class RoomDoser:
         self.inflight_c = 0.0
         self._loss.reset()
         self._delivered_c = 0.0
+        self._cap_loss.reset()
+        self._cap_delivered_c = 0.0
+        self._unbooked_last_ts = None

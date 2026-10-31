@@ -630,7 +630,7 @@ class RoomstatClimate(
         # sees it (_resume_pending).
         held = self._held_command(now, self._active_trv())
         self._reg_state.mode = resume_mode(held, self._config)
-        self._dosing_resume()
+        self._dosing_resume(now)
         self._resume_pending = held is None
         self._last_sent_was_max = held is not None and is_maximum(
             held, self._config.max_target_c

@@ -188,12 +188,12 @@
           },
           "dosed_topups": {
             "name": "Dosierte Nachheizung",
-            "description": "Experimentell. Hat der Raum seine Zieltemperatur erreicht, heizt Roomstat mit kurzen Impulsen bei voller Leistung nach, statt das Ventil halb offen zu halten. Jeder Impuls wird aus der Wärme berechnet, die schon auf dem Weg in den Raum ist, und daraus, wie schnell der Raum abkühlt, so dass der Raum etwa 0,1 °C um seine Zieltemperatur bleibt, statt nach jedem Nachheizen zu überschwingen. Was ein Impuls in diesem Raum bewirkt, wird aus den eigenen Impulsen des Raums gelernt. Räume mit dieser Option legen ihre Impulse nach Möglichkeit zusammen, damit der Kessel für mehrere Heizkörper nur einmal startet. Verwendet den Heizleistungs-Sensor aus dem Abschnitt Ventil-Vorausschau.",
+            "description": "Experimentell. Ein Raum heizt entweder auf (ab 0,8 °C unter dem Ziel) oder wird mit kurzen Impulsen bei voller Leistung nachgeheizt, statt das Ventil halb offen zu halten. Jeder Impuls wird aus der Wärme berechnet, die schon auf dem Weg in den Raum ist, und daraus, wie schnell der Raum abkühlt, so dass der Raum etwa 0,1 °C um seine Zieltemperatur bleibt, statt nach jedem Nachheizen zu überschwingen. Was ein Impuls in diesem Raum bewirkt, wird aus den eigenen Impulsen des Raums gelernt. Räume mit dieser Option legen ihre Impulse nach Möglichkeit zusammen, damit der Kessel für mehrere Heizkörper nur einmal startet. Verwendet den Heizleistungs-Sensor aus dem Abschnitt Ventil-Vorausschau.",
             "data": {
               "dosed_topups": "Dosierte Nachheizung"
             },
             "data_description": {
-              "dosed_topups": "Impulse dauern mindestens 3 Minuten. Aufheizen, Fenster, Anwesenheit und Boost arbeiten wie bisher, und ab 0,3 °C Unterschreitung übernimmt wieder die normale Regelung. Das Zurücksetzen der automatischen Anpassung vergisst auch das Gelernte."
+              "dosed_topups": "Impulse dauern mindestens 3 Minuten und höchstens so lange, wie die eigene Aufheizrate des Raums (aus der automatischen Anpassung) für seine Unterschreitung braucht, mit 0,2 °C Reserve (12 Minuten, solange diese Rate nicht bekannt ist). Ab 0,8 °C Unterschreitung wird normal aufgeheizt, darunter dosiert nachgeheizt, nie gehalten. Fenster, Anwesenheit und Boost arbeiten wie bisher. Das Zurücksetzen der automatischen Anpassung vergisst auch das Gelernte."
             }
           },
           "out_of_band": {

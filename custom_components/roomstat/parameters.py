@@ -559,7 +559,8 @@ class LookaheadConfig:
 @dataclass
 class DoseConfig:
     """Dosed top-ups: a Smith predictor sizes full-power pulses in the
-    settled state (2.15.0; design: project doc
+    dosing phase, every shortfall under ``heatup_enter_c`` (2.15.0, two
+    phases since 2.16.0; design: project doc
     claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md).
 
     The model is first order plus dead time on *open-minutes* (minutes the
@@ -597,35 +598,38 @@ class DoseConfig:
     # (owner, 30 Oct 2026): the dose aims at the target itself; "land short
     # rather than hot" lives in the learner's asymmetry, not in the aim.
     aim_under_c: float = 0.0
-    # The minimum pulse is the owner's decision (30 Oct 2026); the maximum
-    # is 0.5 °C at the default gain (anything bigger is a hold or heat-up).
+    # The minimum pulse is the owner's decision (30 Oct 2026).  Each pulse
+    # is capped by the room's own expected behaviour (owner, 31 Oct 2026: a
+    # safety net, so a wrong model cannot heat the room far over): when it
+    # starts, the dose is worked out again on the room's rise per open-minute
+    # at full power (the auto-tuner's heating rate / 60, measured on the
+    # room's own heat-ups) with no aim bias and its own cooling observer, and
+    # the cap is the open time that dose plus cap_margin_c takes
+    # (regulation.dose_cap_s), within pulse_min_s and pulse_ceiling_s; a
+    # target raised meanwhile widens it.  While the tuner has no rate the
+    # fixed pulse_max_s (the learned gain is the model the cap guards).  It
+    # must not scale with that model: in the house simulation (31 Oct 2026,
+    # learned gains 2-3x high, the aim bias wound up to +0.25) a cap of 1.5 x
+    # the model's own need let 17-24-min pulses through near the target
+    # (peaks +0.22..+0.47).  0.2: the tuner's rate is a heat-up's steepest
+    # rise, 5-25 % above a top-up's rise per open-minute (living room 0.0437
+    # against 0.041, master 0.029 against 0.023), and a pulse that runs to
+    # its cap lands at most about 0.2 over if the room's heating rate is
+    # right.
     pulse_min_s: float = 180.0
     pulse_max_s: float = 720.0
+    cap_margin_c: float = 0.2
+    pulse_ceiling_s: float = 3600.0
     # "Nothing left in flight": the landing phrase only (readiness is the refractory).
     inflight_min_c: float = 0.02
-    # No new pulse until theta + 2 tau after the last one started, at most
-    # this long.
+    # No new pulse until theta + 2 tau after the last one started (at most
+    # refractory_max_s) and theta + tau / 2 after the last one ended: the
+    # last pulse's heat has started to show, also after a long one.
     refractory_max_s: float = 1800.0
-    # A shortfall this big, virtual or measured, is a real cold event: the
-    # settled state ends and the ordinary hold or heat-up takes over.  The
-    # measured one too (2.15.0 review): a model that under-doses keeps the
-    # virtual shortfall small while the room sinks (at 2 °C/h it fell to
-    # 0.62 under before the virtual one reached 0.3).
-    unsettle_c: float = 0.3
-    # A pulse that ran to pulse_max_s this many times in a row: the room
-    # needs more than pulses can give (a weak radiator, a cold spell), and
-    # the settled state ends so the ordinary hold takes over (2.15.0
-    # review: pulses at the cap left a room 0.3 °C under for 12 h).
-    capped_pulses_unsettle: int = 2
-    # The settled state's band (entered from a stop with the virtual error
-    # within it; left with the room itself this far above the target), and
-    # how far the target may move before the room is no longer settled on
-    # it.
-    settled_window_c: float = 0.5
-    settled_setpoint_tolerance_c: float = 0.3
     # A pulse fired early (riding another zone's burn, or with another
     # room) only when a minimum pulse would land at most this far above
-    # the target.
+    # the target.  A pulse released by the room itself: at most the stop
+    # rule's stop_over_c (RegulationConfig) above.
     fire_max_overshoot_c: float = 0.05
 
     # The pulse coordinator (dosing.PulseCoordinator; the boiler is an
@@ -646,7 +650,10 @@ class DoseConfig:
 
     # The learner (dosing.DoseLearner): each episode (a pulse to the room's
     # first peak) is fitted by a grid over theta and tau with the
-    # closed-form gain and the room's loss fitted with it.
+    # closed-form gain and the room's loss fitted with it.  An episode with
+    # no landing is judged at most episode_max_s after its pulse ended (from
+    # the start, a 32-min pulse was judged at -0.21 while it peaked at -0.01:
+    # review 3, 31 Oct 2026).
     episode_max_s: float = 3600.0
     episodes_kept: int = 6
     min_open_min: float = 2.0
@@ -657,8 +664,10 @@ class DoseConfig:
     fit_max_rms_c: float = 0.06
     # The learner keeps this much of the room's readings and the valve's
     # open intervals, so each episode's fit can include the heat of earlier
-    # pulses still arriving and estimate the room's loss with it.
-    fit_history_s: float = 5400.0
+    # pulses still arriving and estimate the room's loss with it: the 15 min
+    # before the longest pulse (pulse_ceiling_s), the pulse, and up to
+    # episode_max_s after it, with 5 min to spare.
+    fit_history_s: float = 8400.0
     # Bounds: the gain within these multiples of the default (seeded) gain;
     # an episode's gain is accepted within these multiples of the gain in
     # use.
@@ -678,10 +687,17 @@ class DoseConfig:
     step_more_frac: float = 0.15
     step_more_interval_s: float = 43200.0
     # The aim bias (°C added to the need) moves this fraction of each
-    # landing's miss, within +-bias_clamp_c.
+    # landing's miss, within +-bias_clamp_c.  Towards bigger doses only on a
+    # pulse that ended by its own dose (not its cap or the stop rule) from
+    # a shortfall of at most bias_max_shortfall_c: a big dose landing short
+    # is a gain error, the gain's to correct (slowly, the owner's choice),
+    # and an additive bias learned from it overdoses every small top-up
+    # (house simulation, 31 Oct 2026: the bias at +0.10..+0.25 once the
+    # dosing phase took 0.3-0.8 shortfalls, and peaks near the target up).
     bias_gain: float = 0.3
     bias_target_c: float = 0.0
     bias_clamp_c: float = 0.25
+    bias_max_shortfall_c: float = 0.3
     # Two landings in a row above this: the gain x 1.5 and the bias -0.1
     # at once.
     watchdog_peak_c: float = 0.3

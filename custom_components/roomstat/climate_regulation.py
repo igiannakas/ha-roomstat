@@ -376,6 +376,9 @@ class RegulationMixin:
         # is this cycle's decision (the watchdog counts it as completed).
         if self._summer_active:
             self._note_cycle_completed(now)
+            # A running pulse ends with the lock (review 3: switched back on
+            # within its cap, the old pulse carried on with a new 25 °C).
+            self._dosing_interrupted(now, "summer mode began")
             await self._async_summer_enforce(now)
             self._activity_cycle(now, PATH_SUMMER)
             return
@@ -384,6 +387,7 @@ class RegulationMixin:
         # run by switching Roomstat off sends the off at once.
         if self._hvac_mode == HVACMode.OFF:
             self._note_cycle_completed(now)
+            self._dosing_interrupted(now, "Roomstat was switched off")
             await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
             self._activity_cycle(now, PATH_OFF)
             return
@@ -417,7 +421,7 @@ class RegulationMixin:
         if held is not None:
             self._resume_pending = False
             self._reg_state.mode = resume_mode(held, self._config)
-            self._dosing_resume()
+            self._dosing_resume(now)
             self._last_sent_was_max = is_maximum(held, self._config.max_target_c)
             _LOGGER.debug(
                 "%s: resuming as %s from %.1f held by the valve",
@@ -477,9 +481,10 @@ class RegulationMixin:
             # or any maximum the TRV took (a hold clamped at 25), is ended
             # (coast).  Until the TRV has taken the stop, it is tried again
             # (once per rate-limit interval).
-            # A dosed room is no longer settled, and a running pulse ends.
-            self._dosing_interrupted()
-            if self._reg_state.mode in (MODE_HEAT, MODE_DOSE) or self._last_sent_was_max:
+            # A dosed room leaves the dosing phase, and a running pulse ends.
+            at_max = self._reg_state.mode in (MODE_HEAT, MODE_DOSE) or self._last_sent_was_max
+            self._dosing_interrupted(now, "the room sensor was lost")
+            if at_max:
                 await self._async_decide_and_send(
                     now, trv, self._config.min_target_c, strong=True
                 )
@@ -1488,9 +1493,9 @@ class RegulationMixin:
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST
-                # A dosed pulse it shut has ended: not settled, and the next
-                # one waits its refractory from this one.
-                self._dosing_interrupted()
+                # A dosed pulse it shut has ended: out of the dosing phase,
+                # and the next one waits its refractory from this one.
+                self._dosing_interrupted(now, "the watchdog shut the valve")
                 self._log(_LOGGER).warning(
                     "watchdog switched %s off",
                     trv.entity_id,

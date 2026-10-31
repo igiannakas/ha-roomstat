@@ -45,7 +45,7 @@ from .const import (
 )
 from .dosing import PulseCoordinator, RoomDoser
 from .parameters import DoseConfig
-from .regulation import MODE_DOSE, MODE_HEAT
+from .regulation import MODE_DOSE, MODE_HEAT, MODE_STOP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -196,13 +196,17 @@ class DosingMixin:
 
     # -- the regulation cycle ---------------------------------------------------
     def _dosing_note_command(self, now: float, command_c: float, ok: bool) -> None:
-        """Every command tried, whatever the path (``_note_attempt``)."""
+        """Every command tried, whatever the path (``_note_attempt``).  A
+        maximum is a pulse's only while the cycle decided a pulse (the
+        regulation state is this cycle's by the send): a heat-up's is heat
+        the model does not know."""
         if not self._dosing_enabled or self._dosing_failure is not None:
             return
         try:
             self._doser.note_command(
                 now, command_c, min_c=self._config.min_target_c,
                 max_c=self._config.max_target_c, ok=ok,
+                pulse=self._reg_state.mode == MODE_DOSE,
             )
         except Exception as err:  # noqa: BLE001 - never stop the regulation
             self._dosing_fail(err)
@@ -244,8 +248,14 @@ class DosingMixin:
             # The valve seen shut with no heat command of ours on its way: an
             # off that was never sent (the valve already showed off, a
             # restart in between) must not leave the booking open.
-            if trv.off and self._pending(now, trv) != PENDING_HEAT:
+            pending = self._pending(now, trv)
+            if trv.off and pending != PENDING_HEAT:
                 self._doser.note_valve_shut(now)
+            elif self._trv_holds_unbooked_heat(trv) and pending is None:
+                # A heat setpoint no command of ours explains (a hold sent
+                # before dosing was on, the upgrade from 2.15.0, the app):
+                # its heat must show before a pulse is judged on top of it.
+                self._doser.note_valve_heating_unbooked(now)
             if self._autotune_enabled:
                 # The heat-up's rise at full power seeds the gain; its dead
                 # time and coast are a cold radiator's, not a top-up's.
@@ -261,6 +271,15 @@ class DosingMixin:
         except Exception as err:  # noqa: BLE001 - never stop the regulation
             self._dosing_fail(err)
             return {}
+
+    def _trv_holds_unbooked_heat(self, trv: Any) -> bool:
+        """The valve holds a heat setpoint between the frost level and the
+        maximum: a hold's, never a pulse's or an off's."""
+        if trv.off or trv.scheduled or not _finite(trv.setpoint_c):
+            return False
+        cfg = self._config
+        top = trv.max_c if _finite(trv.max_c) else cfg.max_target_c
+        return cfg.min_target_c + 0.05 < trv.setpoint_c < min(top, cfg.max_target_c) - 0.05
 
     def _dosing_after_compute(
         self, now: float, result: Any, setpoint: float, room_temp: float,
@@ -309,30 +328,51 @@ class DosingMixin:
         except Exception as err:  # noqa: BLE001 - never stop the regulation
             self._dosing_fail(err)
 
-    def _dosing_interrupted(self) -> None:
-        """The room sensor is lost, or the watchdog shut the valve: the room
-        is no longer settled, and a running pulse has ended (its start counts
-        for the next one's refractory)."""
+    def _dosing_interrupted(self, now: float, why: str | None = None) -> None:
+        """The room sensor is lost, the watchdog shut the valve, Roomstat was
+        switched off or summer mode began: the room is out of the dosing
+        phase, and a running pulse has ended now (its start, end and target
+        count for the next one's refractory).  With ``why`` the episodes
+        being measured are dropped (the room was not left to its pulse)."""
         state = self._reg_state
+        running = state.pulse_start_ts is not None or state.mode == MODE_DOSE
         state.settled = False
-        state.settled_setpoint_c = None
         if state.pulse_start_ts is not None:
             state.last_pulse_start_ts = state.pulse_start_ts
             state.pulse_start_ts = None
+            state.last_pulse_end_ts = now
+            if _finite(state.pulse_setpoint_c):
+                state.last_pulse_setpoint_c = state.pulse_setpoint_c
+        if state.mode == MODE_DOSE:
+            state.mode = MODE_STOP
         state.pulse_setpoint_c = None
+        state.pulse_cap_s = None
+        if why and running and self._dosing_enabled and self._dosing_failure is None:
+            try:
+                for verdict in self._doser.learner.drop_all(why):
+                    self._log(_LOGGER).info("dosed top-up: %s", verdict.line)
+            except Exception as err:  # noqa: BLE001 - never stop the regulation
+                self._dosing_fail(err)
 
-    def _dosing_resume(self) -> None:
+    def _dosing_resume(self, now: float) -> None:
         """After the resume mode was decided from what the valve holds: a
         maximum resumes as a heat-up, but one that is a pulse of ours still
-        running (saved with the room) carries on as the pulse it is."""
+        running (saved with the room) carries on as the pulse it is, its
+        open time booked from now if the booking did not join up (a long
+        restart); the regulator then ends it on its first cycle if it is
+        due.  Any other resume ends a pulse saved running: the valve no
+        longer holds it."""
         if not self.dosing_active:
             return
         state = self._reg_state
-        if (
-            state.mode == MODE_HEAT and state.settled
-            and state.pulse_start_ts is not None and self._doser.open
-        ):
+        if state.pulse_start_ts is None:
+            return
+        if state.mode == MODE_HEAT and state.settled:
             state.mode = MODE_DOSE
+            if not self._doser.open:
+                self._doser.resume_open(now)
+        elif state.mode != MODE_DOSE:
+            self._dosing_interrupted(now)
 
     def _dosing_activity_facts(self, facts: Any, result: Any) -> None:
         """The decision line's dosing facts (activity.CycleFacts)."""
@@ -345,6 +385,7 @@ class DosingMixin:
         facts.dose_fired_by = getattr(result, "fired_by", None)
         facts.dose_end = getattr(result, "dose_end", None)
         facts.dose_ready_in_s = getattr(result, "ready_in_s", None)
+        facts.dose_cap_s = getattr(result, "pulse_cap_s", None)
         if self._dose_fired_with is not None:
             facts.dose_with = self._dosing_room_name(self._dose_fired_with[1])
 
@@ -370,16 +411,17 @@ class DosingMixin:
             "trv": self._config_entry.data.get(CONF_SOURCE_ENTITY_ID),
             "doser": self._doser.to_dict(),
             "settled": state.settled,
-            "settled_setpoint_c": state.settled_setpoint_c,
             "pulse_start_ts": state.pulse_start_ts,
             "last_pulse_start_ts": state.last_pulse_start_ts,
+            "last_pulse_end_ts": state.last_pulse_end_ts,
             "pulse_setpoint_c": state.pulse_setpoint_c,
-            "capped_pulses": state.capped_pulses,
+            "pulse_cap_s": state.pulse_cap_s,
+            "last_pulse_setpoint_c": state.last_pulse_setpoint_c,
         }
 
     def _dosing_restore(self, data: Any, now: float) -> None:
         """Take back what was learned on this room's TRV, the heat in flight
-        and the settled state (before the resume mode is decided)."""
+        and the dosing phase (before the resume mode is decided)."""
         if not isinstance(data, dict):
             return
         trv = self._config_entry.data.get(CONF_SOURCE_ENTITY_ID)
@@ -399,32 +441,42 @@ class DosingMixin:
                 return float(ts) if _finite(ts) and now - within_s <= ts <= now + 1.0 else None
 
             state.settled = data.get("settled") is True
-            setpoint = data.get("settled_setpoint_c")
-            state.settled_setpoint_c = float(setpoint) if _finite(setpoint) else None
-            if state.settled_setpoint_c is None:
-                state.settled = False
-            # A pulse still running when the room was saved (an entry reload);
-            # older than its longest length it is over.
-            state.pulse_start_ts = past(data.get("pulse_start_ts"), cfg.pulse_max_s)
+            # A pulse still running when the room was saved (an entry reload),
+            # with its longest length (a save from 2.15.0: the fixed maximum).
+            # Within the longest any pulse may run it is taken back, and the
+            # first cycle ends it if it is due (review 3: older than its cap
+            # it was dropped, and the valve's 25 °C resumed as a heat-up).
+            limit = data.get("pulse_cap_s")
+            limit = (min(float(limit), cfg.pulse_ceiling_s)
+                     if _finite(limit) and limit > 0 else cfg.pulse_max_s)
+            state.pulse_start_ts = past(data.get("pulse_start_ts"), cfg.pulse_ceiling_s)
+            state.pulse_cap_s = limit if state.pulse_start_ts is not None else None
             state.last_pulse_start_ts = past(
                 data.get("last_pulse_start_ts"), cfg.refractory_max_s
             )
+            state.last_pulse_end_ts = past(
+                data.get("last_pulse_end_ts"), cfg.refractory_max_s
+            )
             if state.pulse_start_ts is None and _finite(data.get("pulse_start_ts")):
+                # Saved running, over since: it ended at the latest by now.
                 state.last_pulse_start_ts = past(
                     data.get("pulse_start_ts"), cfg.refractory_max_s
                 )
+                if state.last_pulse_start_ts is not None:
+                    state.last_pulse_end_ts = now
             pulse_sp = data.get("pulse_setpoint_c")
             state.pulse_setpoint_c = (
                 float(pulse_sp) if _finite(pulse_sp) and state.pulse_start_ts is not None
                 else None
             )
-            capped = data.get("capped_pulses")
-            state.capped_pulses = (
-                int(capped) if _finite(capped) and 0 <= capped <= 100 else 0
+            last_sp = data.get("last_pulse_setpoint_c")
+            state.last_pulse_setpoint_c = (
+                float(last_sp) if _finite(last_sp) and state.last_pulse_start_ts is not None
+                else None
             )
         except Exception as err:  # noqa: BLE001 - a bad save starts afresh
             self._doser.reset()
-            self._dosing_interrupted()
+            self._dosing_interrupted(now)
             self._log(_LOGGER).warning(
                 "the saved dosed top-ups could not be taken back (%s): learning afresh",
                 err,

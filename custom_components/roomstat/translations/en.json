@@ -188,12 +188,12 @@
           },
           "dosed_topups": {
             "name": "Dosed top-ups",
-            "description": "Experimental. Once the room has reached its target, Roomstat tops it up with short full-power pulses instead of holding the valve part-open. Each pulse is sized from the heat already on its way to the room and from how fast the room is cooling, so the room stays within about 0.1 °C of its target instead of overshooting after every top-up. What a pulse does in this room is learned from the room's own pulses. Rooms with this on time their pulses together where they can, so the boiler fires once for several radiators. Uses the heating power sensor picked in the Valve look-ahead section.",
+            "description": "Experimental. A room is either heating up (0.8 °C or more short) or topped up with short full-power pulses, instead of holding the valve part-open. Each pulse is sized from the heat already on its way to the room and from how fast the room is cooling, so the room stays within about 0.1 °C of its target instead of overshooting after every top-up. What a pulse does in this room is learned from the room's own pulses. Rooms with this on time their pulses together where they can, so the boiler fires once for several radiators. Uses the heating power sensor picked in the Valve look-ahead section.",
             "data": {
               "dosed_topups": "Dosed top-ups"
             },
             "data_description": {
-              "dosed_topups": "Pulses last at least 3 minutes. Heat-ups, windows, presence and boost work as before, and a shortfall of more than 0.3 °C hands back to the normal hold. Auto-tune's reset forgets what was learned."
+              "dosed_topups": "Pulses last at least 3 minutes, and at most what the room's own heating rate (from auto-tune) says its shortfall needs, with 0.2 °C to spare (12 minutes until that rate is known). A shortfall of 0.8 °C or more is a normal heat-up; anything less is dosed, never held. Windows, presence and boost work as before. Auto-tune's reset forgets what was learned."
             }
           },
           "out_of_band": {

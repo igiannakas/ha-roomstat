@@ -289,9 +289,10 @@ T0 = 1_800_000_000.0
 
 def _run_episode(lr, *, gain=0.04, fall_h=0.4, pulse_s=180.0, setpoint=20.0, room0=19.95,
                  window_at=None, heating=100.0, people_after=None, end_s=3600.0,
-                 start=T0, theta=300.0, tau=480.0):
-    """One synthetic pulse through the learner, sampled every minute.
-    Returns (verdict, peak error seen by the episode)."""
+                 start=T0, theta=300.0, tau=480.0, end_reason="covered"):
+    """One synthetic pulse through the learner, sampled every minute,
+    ended for ``end_reason`` (the regulator's dose_end).  Returns the
+    verdict."""
     open_from, open_until = start + 60.0, start + pulse_s + 90.0
     ts, room, _ = _synthetic(gain=gain, theta=theta, tau=tau, fall_h=fall_h, open_from=60.0,
                              open_until=pulse_s + 90.0, dt=60.0, end=end_s, room0=room0)
@@ -305,6 +306,7 @@ def _run_episode(lr, *, gain=0.04, fall_h=0.4, pulse_s=180.0, setpoint=20.0, roo
                       open_from=open_from, open_until=open_until if t >= pulse_s else None)
         if t >= pulse_s:
             lr.note_pulse_end(start + pulse_s)
+            lr.note_end_reason(start, end_reason)
         verdicts = lr.observe(now, setpoint, window=window_at is not None and t >= window_at, boost=False)
         if verdicts:
             assert len(verdicts) == 1
@@ -433,8 +435,36 @@ class TestLearnerSteps:
     def test_the_bias_is_clamped(self):
         lr = dosing.DoseLearner(CFG)
         for k in range(8):
-            _run_episode(lr, gain=0.03, pulse_s=300.0, fall_h=0.4, room0=19.5, start=T0 + k * 7200)
-        assert lr.bias_c <= CFG.bias_clamp_c + 1e-9
+            _run_episode(lr, gain=0.03, pulse_s=300.0, fall_h=0.4, room0=19.8, start=T0 + k * 7200)
+        assert 0.0 < lr.bias_c <= CFG.bias_clamp_c + 1e-9
+
+    def test_short_landings_its_dose_did_not_set_leave_the_bias(self):
+        """A landing short moves the aim towards bigger doses only when the
+        pulse's own dose ended it and it fired near the target: a capped
+        pulse or one the stop rule ended landed where they put it, and a
+        big dose landing short is a gain error (house simulation, 31 Oct
+        2026: the bias wound up to +0.25 and overdosed every small top-up)."""
+        for kwargs in ({"end_reason": "max"}, {"end_reason": "stop_rule"}, {"end_reason": None},
+                       {"room0": 19.5}):
+            lr = dosing.DoseLearner(CFG)
+            _run_episode(lr, gain=0.03, pulse_s=300.0, fall_h=0.4, **{"room0": 19.9, **kwargs})
+            judged = lr._judged[-1]
+            assert judged.peak_error_c < 0, kwargs
+            assert lr.bias_c == 0.0, kwargs
+        # A hot landing lowers it whatever the shortfall or the end.
+        hot = dosing.DoseLearner(CFG)
+        _run_episode(hot, gain=0.06, pulse_s=840.0, fall_h=0.2, room0=19.5, end_reason="max")
+        assert hot._judged[-1].peak_error_c > 0
+        assert hot.bias_c < 0.0
+
+    def test_the_end_reason_rides_along(self):
+        lr = dosing.DoseLearner(CFG)
+        lr.start_episode(T0, 20.0, 19.9, 0.0, None)
+        lr.note_end_reason(T0 + 0.4, "covered")
+        lr.note_end_reason(T0, "max")                 # the first one stands
+        back = dosing.DoseLearner(CFG)
+        back.restore(lr.to_dict(), T0 + 60)
+        assert back._episodes[-1].end_reason == "covered"
 
     def test_two_hot_landings_cut_the_doses(self):
         lr = dosing.DoseLearner(CFG)
@@ -782,7 +812,7 @@ class TestRoomDoser:
 # ---------------------------------------------------------------------------
 
 def _pulse_history(lr, pulses, *, gain, theta, tau, fall_h, room0=20.42, start=T0, end_s=7200.0,
-                   setpoint=20.5, heating=100.0):
+                   setpoint=20.5, heating=100.0, end_reason="covered"):
     """Feed the learner a FOPDT room (minute readings, 0.01 °C) with
     ``pulses`` (start, end) in seconds from ``start``, as the doser would:
     each pulse starts an episode, its open interval booked [start + 60,
@@ -802,6 +832,7 @@ def _pulse_history(lr, pulses, *, gain, theta, tau, fall_h, room0=20.42, start=T
                 lr.start_episode(now, setpoint, room[float(t)], fall_h * PER_H, 1.0)
             if t == b:
                 lr.note_pulse_end(now)
+                lr.note_end_reason(start + a, end_reason)
         lo = hi = None
         for a, b in booked:
             if a - CFG.latency_s <= t < b:
@@ -1009,6 +1040,29 @@ class TestHoldHeat:
     """A hold's heat is unbooked (M2): an episode its heat reaches is not
     learned from."""
 
+    def test_a_heat_ups_maximum_is_marked_not_booked(self):
+        """A heat-up's 25 °C (no pulse): a cold radiator's heat the model
+        does not know: marked like a hold's, not booked; a pulse's 25 °C
+        books as before."""
+        d = dosing.RoomDoser(CFG, "a")
+        d.step(T0)
+        d.note_command(T0, 25.0, min_c=5.0, max_c=25.0, ok=True, pulse=False)
+        assert d.open_interval == (None, None)
+        assert d.diagnostics()["hold_from"] == T0
+        d.note_command(T0 + 1800, 5.0, min_c=5.0, max_c=25.0, ok=True)
+        assert d.diagnostics()["hold_until"] == T0 + 1800 + CFG.close_delay_s
+        d.note_command(T0 + 4000, 25.0, min_c=5.0, max_c=25.0, ok=True)
+        assert d.open_interval == (T0 + 4000 + CFG.latency_s, None)
+
+    def test_a_pulse_a_heat_up_takes_over_stops_booking(self):
+        d = dosing.RoomDoser(CFG, "a")
+        d.step(T0)
+        d.note_command(T0, 25.0, min_c=5.0, max_c=25.0, ok=True)
+        _inputs(d, T0 + 300)
+        _after(d, T0 + 300, _result(mode="heat", dose_end="heat_up"))
+        assert d.open_interval[1] == T0 + 300 + CFG.close_delay_s
+        assert d.diagnostics()["hold_from"] == T0 + 300
+
     def test_a_hold_is_marked_from_its_command_to_the_next_off_or_maximum(self):
         d = dosing.RoomDoser(CFG, "a")
         d.step(T0)
@@ -1034,7 +1088,7 @@ class TestHoldHeat:
         d.note_command(T0 + 300, 5.0, min_c=5.0, max_c=25.0, ok=True)
         _inputs(d, T0 + 300)
         assert _after(d, T0 + 300, _result(mode="stop", dose_end="covered")).lines == []
-        d.note_command(T0 + 540, 21.2, min_c=5.0, max_c=25.0, ok=True)      # unsettled into a hold
+        d.note_command(T0 + 540, 21.2, min_c=5.0, max_c=25.0, ok=True)      # dosing paused (a window, Boost): a hold
         _inputs(d, T0 + 540)
         out = _after(d, T0 + 540, _result(mode="hold"))
         assert out.lines == ["not learned from: a hold's heat (unknown) was in the window"]
@@ -1071,19 +1125,23 @@ class TestHoldHeat:
         future.restore(dict(data, hold_from=T0 + 3600), T0 + 60)
         assert future.diagnostics()["hold_from"] is None
 
-    def test_a_pulse_then_a_hold_in_closed_loop_leaves_the_model_alone(self):
-        """The coordinator's entity trace (diag_cap.py 1.5 0.045 360): the
-        room cools 1.5 °C/h, a pulse, the room leaves the settled state into
-        a hold at 60 %.  With the hold's heat in the window the two accepted
-        episodes moved the model to gain 0.094, delay 8.3 min, spread
-        24.5 min; the plant is the default model."""
-        loop = _Loop(_Plant(T0, fall_c_per_h=1.5, hold_frac=0.6))
-        loop.run(6 * 60)
+    def test_a_hold_while_dosing_paused_leaves_the_model_alone(self):
+        """The room cools 1.5 °C/h; dosing paused (a window, Boost: the
+        ordinary modes) while a hold runs the valve at 60 %, then dosing
+        takes over again.  An episode whose window holds that heat is
+        dropped (before the fix two of them moved the model to gain 0.094,
+        delay 8.3 min, spread 24.5 min); later ones learn the plant, which
+        is the default model."""
+        loop = _Loop(_Plant(T0, room=20.2, fall_c_per_h=1.5, hold_frac=0.6), mode="hold")
+        loop.enabled = False
+        loop.run(40)
+        loop.enabled = True
+        loop.run(5 * 60)
         lr = loop.d.learner
         held = [ln for _, ln in loop.lines if "a hold's heat" in ln]
         assert held and loop.pulses
-        assert lr._accepted_total == 0, loop.lines
-        assert (lr.gain_c_per_open_min, lr.theta_s, lr.tau_s) == (0.045, 300.0, 480.0)
+        assert lr.gain_c_per_open_min == pytest.approx(0.045, rel=0.25)
+        assert 120.0 <= lr.theta_s <= 600.0 and 240.0 <= lr.tau_s <= 900.0
 
 
 class TestRoomDoserReview:
@@ -1124,6 +1182,87 @@ class TestRoomDoserReview:
         _after(d, T0 + 1020, _result(), room_c=19.87, room_fresh=False)
         _after(d, T0 + 1080, _result(), room_c=19.86)
         assert d.learner.episode.samples == [(T0 + 960, 19.88), (T0 + 1080, 19.86)]
+
+    def test_the_caps_observer_is_on_the_rooms_rate_not_the_learned_gain(self):
+        """The cap's observer subtracts Roomstat's heat at the tuner's rate,
+        the dose's at the learned gain: a learned gain twice the room's
+        makes the dose's cooling read far faster, the cap's not.  Each
+        arrival counts at the rate then, so a change of the rate is no step
+        in its history (review 3: a cumulative count rescaled by a new rate
+        read -8 °C/h)."""
+        d = dosing.RoomDoser(CFG, "a")
+        d.learner.seed(2.4)                         # 0.04 per open-minute
+        d.learner.gain_c_per_open_min = 0.08        # learned twice too high
+        d.note_command(T0, 25.0, min_c=5.0, max_c=25.0, ok=True)
+        d.note_command(T0 + 600, 5.0, min_c=5.0, max_c=25.0, ok=True)
+        room, committed = 20.0, 0.0
+        for k in range(0, 26):                      # the heat still arriving
+            now = T0 + 60 * k
+            before = d.predictor.committed_open_min()
+            booked_before = committed
+            d.step(now)
+            committed = d.predictor.committed_open_min()
+            arrived = max(0.0, before - committed) if k else 0.0
+            del booked_before
+            # The room: 0.04 per open-minute arrived, cooling 0.5 °C/h.
+            room += 0.04 * arrived - 0.5 * PER_H * 60.0
+            if k == 20:
+                d.learner.seed(2.5)                 # the tuner's rate moves
+            kw = _inputs(d, now, room_c=room)
+        assert kw["cap_gain_c_per_open_min"] == pytest.approx(2.5 / 60.0)
+        assert kw["cap_loss_slope_c_per_s"] * 3600 == pytest.approx(-0.5, abs=0.1)
+        assert kw["loss_slope_c_per_s"] * 3600 < -0.7
+        assert kw["cap_inflight_c"] == pytest.approx(2.5 / 60.0 * d.predictor.committed_open_min())
+        # Persisted with the rise it was taken against; a save from before
+        # 2.16.0 (none) starts it afresh; Reset auto-tune forgets it.
+        back = dosing.RoomDoser(CFG, "a")
+        back.restore(d.to_dict(), T0 + 1560)
+        assert back._cap_delivered_c == pytest.approx(d._cap_delivered_c, abs=1e-4)
+        assert back.cap_loss_slope_c_per_s == pytest.approx(d.cap_loss_slope_c_per_s, abs=1e-6)
+        old = d.to_dict()
+        del old["cap_delivered_c"], old["cap_loss"]
+        back.restore(old, T0 + 1560)
+        assert back.cap_loss_slope_c_per_s is None and back._cap_delivered_c == 0.0
+        d.reset()
+        assert d.cap_loss_slope_c_per_s is None and d._cap_delivered_c == 0.0
+        assert "cap_loss_slope_c_per_h" in back.diagnostics()
+
+    def test_without_a_tuner_rate_there_is_no_cap_gain(self):
+        """The learned gain is the model the cap guards against: without the
+        tuner's rate the pulse has the fixed maximum (review 3)."""
+        d = dosing.RoomDoser(CFG, "a")
+        d.learner.gain_c_per_open_min = 0.03
+        d.learner._accepted_total = 5
+        assert d.cap_gain_c_per_open_min is None
+        assert _inputs(d, T0)["cap_gain_c_per_open_min"] is None
+
+    def test_unbooked_heat_is_reported_until_it_has_stopped(self):
+        """A hold's or a heat-up's heat goes to the regulator as the time it
+        last went to the valve (now while it goes); a valve seen holding a
+        heat setpoint nothing of ours explains is marked the same way, until
+        an off of ours or the valve seen shut."""
+        d = dosing.RoomDoser(CFG, "a")
+        assert _inputs(d, T0)["unbooked_until_ts"] is None
+        d.note_valve_heating_unbooked(T0)
+        assert _inputs(d, T0 + 60)["unbooked_until_ts"] == T0 + 60
+        d.note_command(T0 + 120, 5.0, min_c=5.0, max_c=25.0, ok=True)
+        assert _inputs(d, T0 + 180)["unbooked_until_ts"] == T0 + 120 + CFG.close_delay_s
+        d.note_valve_heating_unbooked(T0 + 600)
+        d.note_valve_shut(T0 + 660)
+        assert _inputs(d, T0 + 700)["unbooked_until_ts"] == T0 + 660
+        # Not while a pulse of ours is booked open.
+        d2 = dosing.RoomDoser(CFG, "b")
+        d2.note_command(T0, 25.0, min_c=5.0, max_c=25.0, ok=True)
+        d2.note_valve_heating_unbooked(T0 + 30)
+        assert _inputs(d2, T0 + 60)["unbooked_until_ts"] is None
+
+    def test_a_pulse_resumed_without_its_booking_is_booked_from_now(self):
+        d = dosing.RoomDoser(CFG, "a")
+        d.resume_open(T0)
+        assert d.open
+        d.step(T0)
+        d.step(T0 + 120)
+        assert d.predictor.committed_open_min() == pytest.approx(2.0)
 
     def test_summary_changes_only_on_pulses_and_verdicts_diagnostics_has_the_rest(self):
         loop = _Loop(_Plant(T0, fall_c_per_h=0.4))
@@ -1211,6 +1350,7 @@ class _Loop:
     goes out on a 0.3-°C change at most every 180 s."""
 
     def __init__(self, plant, *, setpoint=20.5, mode="stop"):
+        self.enabled = True          # dosing decides (False: the ordinary modes)
         self.cfg = parameters.RegulationConfig()
         self.reg = regulation.FeedforwardPiRegulator(self.cfg)
         self.state = regulation.RegulationState(mode=mode)
@@ -1246,7 +1386,7 @@ class _Loop:
         room, trv = round(self.plant.room, 2), round(self.plant.trv(), 1)
         self.slope.add(self.now, room)
         sl = self.slope.slope_c_per_s()
-        kw = self.d.inputs(self.now, enabled=True, setpoint_c=self.sp, room_c=room,
+        kw = self.d.inputs(self.now, enabled=self.enabled, setpoint_c=self.sp, room_c=room,
                            room_slope_c_per_s=sl, state=self.state,
                            deadband_c_per_h=self.cfg.slope_deadband_c_per_h,
                            release_below_c=self.cfg.release_below_c)

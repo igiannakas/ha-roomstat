@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.15.0-blue)
+![Version](https://img.shields.io/badge/version-2.16.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -108,9 +108,10 @@ changes.
   Roomstat lowers its hold commands while the valve's reading falls, by a
   look-ahead it learns from the valve's own answers. Off by default. See
   [Valve look-ahead](#valve-look-ahead).
-- **Dosed top-ups (experimental).** Once a room has reached its target,
-  Roomstat tops it up with short full-power pulses (at least 3 minutes)
-  instead of holding the valve part-open. Each pulse is sized from the heat
+- **Dosed top-ups (experimental).** A room is either heating up (0.8 °C or
+  more short) or dosed: everything else is topped up with full-power pulses
+  (at least 3 minutes) instead of holding the valve part-open. Each pulse is
+  sized from the heat
   already on its way to the room and from how fast the room is cooling, so
   the room stays within about 0.1 °C of its target instead of overshooting
   after every top-up. What a pulse does is learned from the room's own
@@ -258,24 +259,36 @@ Turn it on per room: **Configure → Dosed top-ups**. It uses the zone's
 heating power sensor picked under **Valve look-ahead** (for a Tado zone, the
 zone's Heating sensor), to check that each pulse opened the valve.
 
-- **When:** only once the room has reached its target and stays within
-  0.5 °C of it (the "settled" state). Heat-ups, windows, presence, boost and
-  any target change work as before; a shortfall of more than 0.3 °C hands
-  back to the normal hold, and so do two pulses in a row that needed the
-  full 12 minutes (more than pulses can give), until the room is back at its
-  target.
+- **When:** a room is either heating up or dosed, never held. A shortfall
+  of 0.8 °C or more is a heat-up as before (full power, then the coast);
+  everything else is dosed: a coast that stops short, a room cooling from
+  its target, a target raised by less than 0.8. Windows, presence and boost
+  work as before (dosing waits while a window is open or a boost runs).
 - **What:** instead of a hold command, a pulse at 25 °C (a timer when
   **Full-power time limit** is set), then off. A Tado valve answers 25 °C the same
   way every time; it answers a mid-range command late and partly.
 - **How much:** Roomstat keeps a model of its own heat on its way to the
   room (a Smith predictor): the room sees a pulse only 8–12 minutes later.
   A pulse lasts until the heat on its way covers what the room is short of
-  plus what it will lose until that heat has landed, at least 3 minutes and
-  at most 12. The next pulse waits at least until the model says the last
-  one's heat has landed; heat still on its way counts as already there.
+  plus what it will lose until that heat has landed, at least 3 minutes.
+  The next pulse waits at least until the model says the last one's heat
+  has landed; heat still on its way counts as already there. A raised
+  target doesn't wait; heat from a hold or a heat-up must show first.
+- **The cap:** each pulse also has a cap from the room's own heating rate
+  (auto-tune's, learned on its heat-ups): when the pulse starts, the time
+  that rate says the room's shortfall (plus its cooling until the heat
+  lands) takes, with 0.2 °C to spare. A fast room short 0.1 °C gets a few
+  minutes at most, a slow room short 0.7 °C up to an hour. It is the
+  safety net for a model that is wrong, so a pulse can't overheat the room
+  by much; on a cold day it can end a pulse early, and the room then lands
+  a little short and gets another pulse. Until the room's heating rate is
+  known the cap is 12 minutes. A long pulse also ends like a heat-up once
+  its heat shows and the room rises onto its target.
 - **When the next:** the room fires a pulse so that it reaches 0.1 °C under
   its target just as the heat starts to show, which puts the bottom of its
-  swing at −0.1 and the landing on the target.
+  swing at −0.1 and the landing on the target. A room whose shortest pulse
+  would take it over the target waits until it needs more; a room warming
+  by itself (sun, people) gets that much less.
 - **The cooling** it covers is measured all the time: the room's cooling
   less the effect of the heat Roomstat sent. Cold nights get bigger pulses,
   mild evenings smaller ones; people and sun count as they happen.

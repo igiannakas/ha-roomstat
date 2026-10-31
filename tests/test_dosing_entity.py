@@ -371,7 +371,7 @@ class TestSettledRoom:
         assert any(t.startswith("Top-up pulse:") for t in texts)
         assert any(t.startswith("Valve off, landing:") or t.startswith("Top-up ended")
                    for t in texts)
-        assert any(t.startswith("Valve off (settled):") for t in texts)
+        assert any(t.startswith("Valve off (dosing):") for t in texts)
         attrs = ent.extra_state_attributes
         assert "topup_inflight_c" in attrs and "topup_gain" in attrs
 
@@ -532,7 +532,7 @@ def test_a_reload_mid_pulse_keeps_the_pulse_and_its_heat(monkeypatch):
         "no second 25 °C for the same pulse")
 
 
-def test_a_window_ends_the_settled_state_and_drops_the_episode(monkeypatch):
+def test_a_window_ends_the_dosing_phase_and_drops_the_episode(monkeypatch):
     ent, clock, plant = _started(monkeypatch)
     _until_pulse(ent, clock, plant)
     monkeypatch.setattr(ent, "_window_open", lambda: True)
@@ -546,14 +546,22 @@ def test_a_window_ends_the_settled_state_and_drops_the_episode(monkeypatch):
     assert any("a window opened" in t for t in events if t.startswith("Dosed top-up:")), events[-5:]
 
 
-def test_a_target_change_ends_the_settled_state(monkeypatch):
+def test_a_target_raised_under_heatup_enter_is_dosed_over_it_heats_up(monkeypatch):
+    """A heat-up or a dose, nothing in between (owner, 31 Oct 2026): the
+    target raised 0.5 gets a pulse sized for it, raised 1.0 a heat-up."""
     ent, clock, plant = _started(monkeypatch)
     _run_room(ent, clock, plant, 20)
     assert ent._last_result.settled
-    ent._target_temp = TARGET + 0.5
+    ent._target_temp = round(plant.room, 2) + 0.5
     _run_room(ent, clock, plant, 1)
-    assert not ent._last_result.settled
-    assert ent._last_result.mode in ("hold", "heat")
+    assert ent._last_result.settled and ent._last_result.mode == "dose"
+    assert ent._last_result.need_c == pytest.approx(0.5, abs=0.15)
+    reset_timers()
+    ent2, clock2, plant2 = _started(monkeypatch)
+    _run_room(ent2, clock2, plant2, 20)
+    ent2._target_temp = round(plant2.room, 2) + 1.0
+    _run_room(ent2, clock2, plant2, 1)
+    assert not ent2._last_result.settled and ent2._last_result.mode == "heat"
 
 
 # ---------------------------------------------------------------------------
@@ -608,7 +616,7 @@ def test_a_room_due_soon_fires_with_the_other_rooms_pulse(monkeypatch):
                for t in texts), texts[-6:]
 
 
-def test_a_settled_room_rides_another_zones_burn(monkeypatch):
+def test_a_dosed_room_rides_another_zones_burn(monkeypatch):
     clock, (a, pa), (b, pb) = _two_rooms(monkeypatch)
     # Let both settle (cooling, both valves shut).
     for _ in range(12):
@@ -721,31 +729,86 @@ def test_a_late_first_report_leaves_the_heat_in_flight(monkeypatch):
     assert TARGET - 0.12 <= min(later) and max(later) <= TARGET + 0.08, (min(later), max(later))
 
 
-def test_after_a_hold_the_first_pulse_lands_in_the_band(monkeypatch):
-    """A hold throttling a Tado-like valve brings the room up, stops, and
-    the room settles: the hold's heat is not booked as a pulse's (its
-    opening is unknown), so the observer sees no false fast cooling and the
-    first pulse does not land hot (2.15.0 review: +0.15)."""
+def _hold_commands(ent) -> list:
+    """Commands that are neither the maximum nor an off: holds."""
+    return [c for c in ent.hass.service_calls
+            if c[0] == "climate" and c[1] == "set_temperature" and not _is_heat(c)]
+
+
+def test_short_of_the_target_it_is_dosed_never_held(monkeypatch):
+    """0.3 below on a Tado-like valve that throttles a hold: with dosing on
+    no hold command ever goes out; the shortfall gets a pulse and the room
+    lands in the band."""
     clock = _Clock(monkeypatch)
     ent = _entity(ON)
     plant = _TadoPlant(ent, clock, room=TARGET - 0.3, fall_c_per_h=0.8, hold_open=0.5)
     plant.feed()
     _run(_start(ent))
-    settled_at = []
     rooms = []
 
     def watch():
-        r = ent._last_result
-        if r is not None and r.settled and not settled_at:
-            settled_at.append(clock.now)
-        rooms.append((clock.now, plant.room, r.mode if r is not None else None))
+        rooms.append((clock.now, plant.room, ent._last_result.mode))
 
     _run_room(ent, clock, plant, 300, on_cycle=watch)
-    assert settled_at, "the room never settled"
-    assert any(m == "hold" for _, _, m in rooms), "no hold before the settled state"
-    assert any(m == "dose" for _, _, m in rooms), "no pulse after it"
-    after = [room for t, room, _ in rooms if t >= settled_at[0]]
-    assert max(after) <= TARGET + 0.10, max(after)
+    assert not _hold_commands(ent), _hold_commands(ent)[:3]
+    assert all(m != "hold" for _, _, m in rooms)
+    assert any(m == "dose" for _, _, m in rooms)
+    later = [room for t, room, _ in rooms if t - rooms[0][0] > 3600.0]
+    assert TARGET - 0.15 <= min(later) and max(later) <= TARGET + 0.10, (min(later), max(later))
+
+
+def test_a_heat_up_then_dosing_never_a_hold(monkeypatch):
+    """1.4 below (the morning's Comfort): a heat-up at full power, its coast,
+    then pulses; no hold command at any point, and the room ends in the
+    band."""
+    clock = _Clock(monkeypatch)
+    ent = _entity(ON)
+    plant = _TadoPlant(ent, clock, room=TARGET - 1.4, fall_c_per_h=0.5, hold_open=0.5)
+    plant.feed()
+    _run(_start(ent))
+    modes = []
+
+    def watch():
+        modes.append((clock.now, plant.room, ent._last_result.mode))
+
+    _run_room(ent, clock, plant, 360, on_cycle=watch)
+    seen = [m for _, _, m in modes]
+    assert "heat" in seen and "dose" in seen and "hold" not in seen
+    assert not _hold_commands(ent)
+    later = [room for t, room, _ in modes if t - modes[0][0] > 4 * 3600.0]
+    assert TARGET - 0.15 <= min(later) and max(later) <= TARGET + 0.15, (min(later), max(later))
+
+
+def test_the_pulse_is_capped_on_the_rooms_heating_rate(monkeypatch):
+    """With the auto-tuner's heating rate known, each pulse's cap is the
+    dose worked out on that rate (the measured shortfall, the heat in
+    flight at it, the cap's own observer; no aim bias) plus the margin,
+    set when it starts; the pulse's line says so."""
+    from tests.pure_modules import parameters as P
+    from tests.pure_modules import regulation as R
+
+    ent, clock, plant = _started(monkeypatch)
+    ent._autotune_enabled = True
+    monkeypatch.setattr(ent._autotuner, "heatup_model", lambda: (2.62, 840.0))
+    rate = 2.62 / 60.0
+    caps = []
+
+    def watch():
+        r = ent._last_result
+        if r.fired_by:
+            d, lr = ent._doser, ent._doser.learner
+            need = R.dose_cap_need_c(r.error_c, d.predictor.inflight_c(rate),
+                                     d.cap_loss_slope_c_per_s, lr.theta_s + 2 * lr.tau_s,
+                                     ent._regulator.cfg.slope_deadband_c_per_h)
+            caps.append((R.dose_cap_s(need, rate, P.DoseConfig()), r.pulse_cap_s,
+                         ent._reg_state.pulse_cap_s))
+
+    _run_room(ent, clock, plant, 120, on_cycle=watch)
+    assert caps
+    for expected, reported, kept in caps:
+        assert reported == pytest.approx(expected, abs=1.0) and kept == pytest.approx(reported, abs=0.1)
+    texts = [e.text for e in ent._activity.entries() if e.decision]
+    assert any(t.startswith("Top-up pulse:") and "cap about" in t for t in texts), texts[-5:]
 
 
 def test_a_weak_radiator_is_learned_and_the_room_held(monkeypatch):
@@ -771,30 +834,26 @@ def test_a_weak_radiator_is_learned_and_the_room_held(monkeypatch):
     assert TARGET - 0.12 <= min(last) and max(last) <= TARGET + 0.08, (min(last), max(last))
 
 
-def test_capped_pulses_hand_the_room_to_the_hold(monkeypatch):
-    """A room cooling 1.5 °C/h, the most pulses can cover at the default
-    gain: each pulse needs more than the 12-min cap, so after two at the
-    cap the ordinary hold takes over (the valve throttled at 60 %), and the
-    room is not left 0.3 under (2.15.0 review: pulses at the cap held a
-    weak room at -0.37..-0.28 for 12 h)."""
+def test_a_fast_cooling_room_is_dosed_in_the_band_never_held(monkeypatch):
+    """1.5 °C/h, the most pulses covered under the old 12-min maximum: the
+    pulses are sized and capped on the room, no hold goes out, and the
+    room is not left 0.3 under (2.15.0 review: pulses at a fixed cap held
+    a weak room at -0.37..-0.28 for 12 h)."""
     clock = _Clock(monkeypatch)
     ent = _entity(ON)
     plant = _TadoPlant(ent, clock, fall_c_per_h=1.5, hold_open=0.6)
     plant.feed()
     _run(_start(ent))
-    modes = []
+    rooms = []
 
     def watch():
-        r = ent._last_result
-        modes.append((clock.now, plant.room, r.mode, r.dose_end, r.settled))
+        rooms.append((clock.now, plant.room, ent._last_result.mode))
 
     _run_room(ent, clock, plant, 6 * 60, on_cycle=watch)
-    ends = [e for _, _, _, e, _ in modes if e]
-    assert "max" in ends, ends
-    capped_at = next(t for t, _, _, e, s in modes if e == "max" and not s)
-    later = [(room, m) for t, room, m, _, _ in modes if t > capped_at]
-    assert any(m in ("hold", "heat") for _, m in later)
-    assert sum(1 for room, _ in later if room < TARGET - 0.3) <= 30, "left 0.3 under"
+    assert not _hold_commands(ent)
+    later = [room for t, room, _ in rooms if t - rooms[0][0] > 3600.0]
+    assert sum(1 for room in later if room < TARGET - 0.3) <= 10, min(later)
+    assert max(later) <= TARGET + 0.15
 
 
 def test_the_sensor_attributes_change_only_with_pulses_and_lessons(monkeypatch):
@@ -936,7 +995,7 @@ def test_the_watchdog_shutting_a_pulse_ends_it(monkeypatch):
     assert [c for c in ent.hass.service_calls if _is_off(c)]
     state = ent._reg_state
     assert not state.settled and state.pulse_start_ts is None
-    assert state.last_pulse_start_ts == start and state.capped_pulses == 0
+    assert state.last_pulse_start_ts == start and state.last_pulse_end_ts == clock.now
 
 
 def test_a_clock_going_back_mid_pulse_is_the_same_pulse(monkeypatch):
@@ -966,3 +1025,101 @@ def test_a_queued_coordinated_cycle_runs_none_after_removal(monkeypatch):
 
 async def _noop():
     return None
+
+
+# ---------------------------------------------------------------------------
+# Review 3 (31 Oct 2026): the paths into and out of the dosing phase
+# ---------------------------------------------------------------------------
+
+def test_switched_off_mid_pulse_the_pulse_ends(monkeypatch):
+    """m5: switched off during a pulse and on again a few minutes later (well
+    within any cap): the old pulse does not carry on with a new 25 °C, and
+    no spurious "Top-up ended" line is written."""
+    from homeassistant.components.climate import HVACMode
+
+    ent, clock, plant = _started(monkeypatch)
+    _until_pulse(ent, clock, plant)
+    _run(ent.async_set_hvac_mode(HVACMode.OFF))
+    assert ent._reg_state.mode != "dose" and ent._reg_state.pulse_start_ts is None
+    assert ent._reg_state.last_pulse_end_ts == clock.now
+    for _ in range(3):
+        clock.tick(60.0)
+        plant.advance(60.0)
+        plant.feed()
+        _cycle(ent)
+    heats_before = sum(1 for c in ent.hass.service_calls if _is_heat(c))
+    _run(ent.async_set_hvac_mode(HVACMode.HEAT))
+    clock.tick(30.0)
+    plant.advance(30.0)
+    plant.feed()
+    _cycle(ent)
+    assert ent._last_result.dose_end is None
+    assert ent._last_result.mode != "dose"
+    assert sum(1 for c in ent.hass.service_calls if _is_heat(c)) == heats_before
+    events = [e.text for e in ent._activity.entries() if not e.decision]
+    assert any("Roomstat was switched off" in t for t in events), events[-5:]
+
+
+def test_a_restart_longer_than_the_pulse_ends_it_as_a_pulse(monkeypatch):
+    """m3: the room comes back after its pulse should have ended; the
+    valve's 25 °C is the pulse (not a heat-up) and the first cycle ends it."""
+    ent, clock, plant = _started(monkeypatch)
+    _until_pulse(ent, clock, plant)
+    clock.tick(60.0)
+    plant.advance(60.0)
+    plant.feed()
+    _cycle(ent)
+    assert ent._last_result.mode == "dose"
+    again = _make_entity(dict(ON), window=False)
+    plant.ent = again
+    plant.seen = 0
+    clock.tick(1500.0)                     # HA down 25 min (past the 12-min fixed limit)
+    plant.advance(1500.0)
+    plant.feed()
+    again.coordinator.data = ent.coordinator.data
+    _restart_from(ent, again)
+    assert again._reg_state.mode == "dose"
+    clock.tick(30.0)
+    plant.advance(30.0)
+    plant.feed()
+    _cycle(again)
+    assert again._last_result.mode == "stop"
+    assert again._last_result.dose_end in ("max", "stop_rule", "covered", "landing")
+    assert not [c for c in again.hass.service_calls if _is_heat(c)]
+
+
+def test_a_dosed_target_step_is_no_heat_up_for_the_tuner(monkeypatch):
+    """M4: a target raised 0.6 is dosed; the auto-tuner starts no heat-up
+    episode on it (its "coast" would be a pulse's landing)."""
+    ent, clock, plant = _started(monkeypatch)
+    ent._autotune_enabled = True
+    _run_room(ent, clock, plant, 30)
+    assert ent._last_result.settled
+    ent._target_temp = round(plant.room, 2) + 0.6
+    _run_room(ent, clock, plant, 5)
+    assert ent._last_result.settled
+    assert ent._autotuner._heatup is None
+
+
+def test_a_hold_on_the_valve_must_show_before_the_first_pulse(monkeypatch):
+    """m9: dosing turned on (or the upgrade from 2.15.0) with a hold command
+    on the valve: no pulse fires on top of the hold's heat; Roomstat shuts
+    the valve and waits for that heat to show first."""
+    clock = _Clock(monkeypatch)
+    ent = _entity(ON)
+    plant = _TadoPlant(ent, clock, room=TARGET - 0.25, fall_c_per_h=0.5, hold_open=0.5)
+    plant.setpoint = 21.3                  # the valve holds a hold command
+    plant.timeline = [(clock.now - 600.0, 21.3)]
+    plant.feed()
+    _run(_start(ent))
+    first = []
+
+    def watch():
+        if ent._last_result is not None and ent._last_result.fired_by and not first:
+            first.append(clock.now)
+
+    start = clock.now
+    _run_room(ent, clock, plant, 60, on_cycle=watch)
+    assert first, "never dosed"
+    lead = ent._doser.learner.visible_dead_time_s
+    assert first[0] - start >= lead - 60.0

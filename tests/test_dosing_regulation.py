@@ -1,7 +1,9 @@
-"""The regulator's dosed top-ups (regulation.py, 2.15.0): the settled state,
-the dead-time release, the pulse and its end, the coordinator's early fire
-with its floor-landing guard, and the steady state the rule produces on a
-room that matches its model.  HA-free (tests/pure_modules.py)."""
+"""The regulator's dosed top-ups (regulation.py, 2.15.0): the two phases (a
+heat-up from heatup_enter_c, the dosing phase below it, no hold), the
+dead-time release, the pulse, its end and its cap on the room's own heating
+rate, the coordinator's early fire with its floor-landing guard, and the
+steady state the rule produces on a room that matches its model.  HA-free
+(tests/pure_modules.py)."""
 from __future__ import annotations
 
 import dataclasses
@@ -25,14 +27,17 @@ def _reg(**overrides) -> R.FeedforwardPiRegulator:
 
 
 def _settled(mode=R.MODE_STOP, **kw) -> R.RegulationState:
-    """A state settled on 20.0 (the room reached it), shut unless told."""
-    base = dict(mode=mode, settled=True, settled_setpoint_c=20.0, last_room_c=None)
+    """A state in the dosing phase on 20.0 (the room reached it), shut
+    unless told."""
+    base = dict(mode=mode, settled=True, last_room_c=None)
     base.update(kw)
     return R.RegulationState(**base)
 
 
 def _dose(reg, state, room, *, sp=20.0, slope_c_per_h=0.0, now=NOW, inflight=0.0,
-          tail=0.0, gain=GAIN, fire_now=None, bias=0.0, dosing=True, trv=None, dt=60.0):
+          tail=0.0, gain=GAIN, fire_now=None, bias=0.0, dosing=True, trv=None, dt=60.0,
+          cap_gain=None, cap_inflight=0.0, cap_slope_c_per_h=None, unbooked_until=None,
+          loss_slope_c_per_h=None):
     res = reg.compute(
         setpoint_c=sp, room_temp_c=room,
         tado_internal_c=room - 3.0 if trv is None else trv,
@@ -40,6 +45,10 @@ def _dose(reg, state, room, *, sp=20.0, slope_c_per_h=0.0, now=NOW, inflight=0.0
         room_slope_c_per_s=None if slope_c_per_h is None else slope_c_per_h / H,
         dosing=dosing, inflight_c=inflight, tail_c=tail, gain_c_per_open_min=gain,
         theta_s=THETA, tau_s=TAU, bias_c=bias, now_ts=now, fire_now=fire_now,
+        cap_gain_c_per_open_min=cap_gain, cap_inflight_c=cap_inflight,
+        cap_loss_slope_c_per_s=None if cap_slope_c_per_h is None else cap_slope_c_per_h / H,
+        unbooked_until_ts=unbooked_until,
+        loss_slope_c_per_s=None if loss_slope_c_per_h is None else loss_slope_c_per_h / H,
     )
     return res, res.new_state
 
@@ -52,8 +61,8 @@ class TestOff:
     def test_dose_is_a_mode(self):
         assert R.MODE_DOSE in R.MODES
         s = R.RegulationState()
-        assert (s.settled, s.settled_setpoint_c, s.pulse_start_ts, s.last_pulse_start_ts) == (
-            False, None, None, None)
+        assert (s.settled, s.pulse_start_ts, s.last_pulse_start_ts, s.last_pulse_end_ts,
+                s.pulse_cap_s) == (False, None, None, None, None)
 
     def test_the_dose_inputs_change_nothing_while_off(self):
         """A scripted random day (heat-ups, coasts, holds, stops, full
@@ -104,7 +113,7 @@ class TestOff:
         res, new = _dose(_reg(), st, 19.9, slope_c_per_h=0.5, dosing=False)
         assert res.mode == R.MODE_COAST                   # below, rising: a coast
         assert new.last_pulse_start_ts == NOW - 100 and new.pulse_start_ts is None
-        assert not new.settled and new.settled_setpoint_c is None
+        assert new.last_pulse_end_ts == NOW and not new.settled
         res, _ = _dose(_reg(), st, 20.05, dosing=False)
         assert res.mode == R.MODE_STOP                    # at or above: a stop
         quiet = R.RegulationState(mode=R.MODE_STOP, last_pulse_start_ts=NOW - 900)
@@ -113,80 +122,110 @@ class TestOff:
 
 
 # ---------------------------------------------------------------------------
-# The settled state
+# The two phases: a heat-up from heatup_enter_c, the dosing phase below it
 # ---------------------------------------------------------------------------
 
-class TestSettled:
-    def test_entered_from_a_stop_within_the_band(self):
+ENTER = P.RegulationConfig().heatup_enter_c
+
+
+class TestPhases:
+    def test_a_stop_is_the_dosing_phase(self):
         res, st = _dose(_reg(), R.RegulationState(mode=R.MODE_STOP), 20.1)
-        assert res.settled and st.settled and st.settled_setpoint_c == 20.0
-        assert res.mode == R.MODE_STOP
+        assert res.settled and st.settled and res.mode == R.MODE_STOP
 
-    def test_not_entered_from_a_hold(self):
+    def test_a_hold_resumed_is_the_dosing_phase_never_a_hold(self):
         res, st = _dose(_reg(), R.RegulationState(mode=R.MODE_HOLD), 19.95)
-        assert not res.settled and res.mode == R.MODE_HOLD
+        assert res.settled and res.mode == R.MODE_STOP
 
-    def test_not_entered_far_from_the_target(self):
-        res, _ = _dose(_reg(), R.RegulationState(mode=R.MODE_STOP), 20.6)
-        assert not res.settled
+    def test_far_above_the_target_too(self):
+        res, _ = _dose(_reg(), R.RegulationState(mode=R.MODE_STOP), 21.5)
+        assert res.settled and res.mode == R.MODE_STOP and res.fired_by is None
 
-    def test_a_small_target_move_keeps_it_a_bigger_one_ends_it(self):
-        _, st = _dose(_reg(), _settled(), 20.0, sp=20.2)
-        assert st.settled and st.settled_setpoint_c == 20.0  # the original target is kept
-        _, st2 = _dose(_reg(), st, 20.0, sp=20.4)            # 0.4 from where it settled
-        assert not st2.settled
-        res, _ = _dose(_reg(), _settled(), 20.0, sp=21.0)
-        assert not res.settled
+    def test_a_shortfall_just_under_heatup_enter_is_dosed(self):
+        """0.79 below: one pulse sized for it, not a hold (owner, 31 Oct
+        2026: a heat-up or a dose, nothing in between)."""
+        res, st = _dose(_reg(), _settled(), 20.0 - (ENTER - 0.01))
+        assert res.settled and res.mode == R.MODE_DOSE and res.fired_by == "release"
+        assert res.need_c == pytest.approx(ENTER - 0.01, abs=1e-6)
+        assert st.pulse_start_ts == NOW
 
-    def test_left_outside_the_band(self):
-        res, st = _dose(_reg(), _settled(), 20.55)            # 0.55 above
-        assert not res.settled and not st.settled
-        assert res.mode == R.MODE_STOP                        # today's stop holds
+    def test_from_heatup_enter_it_is_a_heat_up(self):
+        res, st = _dose(_reg(), _settled(), 20.0 - ENTER)
+        assert not res.settled and not st.settled and res.mode == R.MODE_HEAT
+        assert res.target_for_tado_c == 25.0
 
-    def test_a_real_cold_event_hands_over_to_the_hold(self):
-        res, st = _dose(_reg(), _settled(), 19.65)            # 0.35 below
-        assert not res.settled and res.mode == R.MODE_HOLD
-        assert res.target_for_tado_c > 5.0
+    def test_a_heat_up_runs_to_its_coast_then_dosing_takes_the_rest(self):
+        """This morning's case (31 Oct 2026, living room): the heat-up's
+        coast stalled 0.2 short; the second go is a dosed pulse, not a hold."""
+        reg = _reg()
+        res, st = _dose(reg, R.RegulationState(mode=R.MODE_HEAT), 19.6, slope_c_per_h=2.6)
+        assert res.mode == R.MODE_COAST and not res.settled      # its coast lands it
+        res, st = _dose(reg, st, 19.7, slope_c_per_h=1.0)
+        assert res.mode == R.MODE_COAST and not res.settled      # still rising: coasting
+        res, st = _dose(reg, st, 19.8, slope_c_per_h=0.0)        # stalled 0.2 short
+        assert res.settled and res.mode == R.MODE_DOSE and res.fired_by == "release"
+        assert res.need_c == pytest.approx(0.2, abs=1e-6)
+
+    def test_a_coast_that_reaches_the_target_is_the_dosing_phase(self):
+        res, _ = _dose(_reg(), R.RegulationState(mode=R.MODE_COAST), 20.02, slope_c_per_h=0.5)
+        assert res.settled and res.mode == R.MODE_STOP
+
+    def test_a_pulse_that_meets_heatup_enter_becomes_the_heat_up(self):
+        """A window the sensor missed, a cold blast: the shortfall reaches
+        heatup_enter_c mid-pulse; the 25 °C carries on as a heat-up."""
+        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 240, pulse_cap_s=900.0)
+        res, new = _dose(_reg(), st, 20.0 - ENTER - 0.05, slope_c_per_h=-1.0)
+        assert res.mode == R.MODE_HEAT and res.dose_end == "heat_up" and not res.settled
+        assert res.target_for_tado_c == 25.0
+        assert new.pulse_start_ts is None and new.last_pulse_start_ts == NOW - 240
+        assert new.last_pulse_end_ts == NOW and new.pulse_cap_s is None
+
+    def test_never_a_hold_command_with_dosing_on(self):
+        """Any mode, any room from 2 below to 2 above, any slope: with
+        dosing on there is no hold, only the maximum or off."""
+        reg, rnd = _reg(), random.Random(3)
+        for _ in range(2000):
+            st = R.RegulationState(
+                mode=rnd.choice(list(R.MODES)), settled=rnd.random() < 0.5,
+                pulse_start_ts=rnd.choice([None, NOW - 120, NOW - 900]),
+                last_pulse_start_ts=rnd.choice([None, NOW - 300, NOW - 4000]),
+                last_pulse_end_ts=rnd.choice([None, NOW - 60, NOW - 2000]),
+                integral_c=rnd.uniform(-0.5, 0.5),
+            )
+            room = 20.0 + rnd.uniform(-2.0, 2.0)
+            res, new = _dose(reg, st, room, slope_c_per_h=rnd.uniform(-3.0, 3.0),
+                             inflight=rnd.choice([0.0, 0.01, 0.1, 0.5]),
+                             fire_now=rnd.choice([None, "burn", "together"]),
+                             cap_gain=rnd.choice([None, 0.02, 0.05, 0.1]))
+            assert res.mode != R.MODE_HOLD
+            assert res.target_for_tado_c in (5.0, 25.0)
+            assert new.integral_c == pytest.approx(st.integral_c * (
+                1.0 if abs(20.0 - room) < 0.3 else P.RegulationConfig().integral_decay))
+            assert res.settled == (res.mode in (R.MODE_STOP, R.MODE_DOSE))
+
+    def test_a_target_move_stays_in_the_dosing_phase(self):
+        """The target raised 0.4 (by hand or a schedule): dosed, not
+        handed to a hold."""
+        res, _ = _dose(_reg(), _settled(), 20.0, sp=20.4)
+        assert res.settled and res.mode == R.MODE_DOSE
 
     def test_the_heat_in_flight_counts(self):
-        """0.25 below, but 0.1 still in flight: a virtual 0.15, still settled
-        (and below the band's floor: a pulse)."""
+        """0.25 below, but 0.1 still in flight: a virtual 0.15, a pulse."""
         res, _ = _dose(_reg(), _settled(), 19.75, inflight=0.1)
         assert res.settled and res.virtual_error_c == pytest.approx(0.15, abs=1e-6)
         assert res.mode == R.MODE_DOSE
+        assert res.need_c == pytest.approx(0.15, abs=1e-6)
 
-    def test_a_measured_cold_event_hands_over_too(self):
-        """0.35 below with 0.1 in flight: a virtual 0.25, but the room itself
-        is 0.3 under: a model that under-doses must not keep it settled
-        while it sinks (2.15.0 review)."""
-        res, st = _dose(_reg(), _settled(), 19.65, inflight=0.1)
-        assert not res.settled and not st.settled
-        assert res.mode == R.MODE_HOLD
-
-    def test_a_running_pulse_ends_on_a_measured_cold_event(self):
-        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 240, pulse_setpoint_c=20.0)
-        res, new = _dose(_reg(), st, 19.69, inflight=0.2)
-        assert not res.settled and res.dose_end == "unsettled"
-        assert new.last_pulse_start_ts == NOW - 240 and new.pulse_start_ts is None
-
-    def test_never_a_hold_command_while_settled(self):
-        reg, rnd = _reg(), random.Random(3)
-        for _ in range(400):
-            st = _settled(mode=rnd.choice([R.MODE_STOP, R.MODE_HOLD, R.MODE_COAST]),
-                          last_pulse_start_ts=rnd.choice([None, NOW - 300, NOW - 4000]))
-            room = 20.0 + rnd.uniform(-0.29, 0.45)
-            res, _ = _dose(reg, st, room, slope_c_per_h=rnd.uniform(-1.0, 1.0),
-                           inflight=rnd.choice([0.0, 0.01, 0.1]), fire_now=rnd.choice(
-                               [None, "burn", "together"]))
-            if res.settled:
-                assert res.mode in (R.MODE_STOP, R.MODE_DOSE)
-                assert res.target_for_tado_c in (5.0, 25.0)
-
-    def test_no_integration_while_settled(self):
-        reg = _reg()
-        st = _settled(integral_c=0.2)
-        res, new = _dose(reg, st, 19.95)                       # 0.05 below, inside the deadband
-        assert res.settled and new.integral_c == pytest.approx(0.2)
+    def test_a_room_rising_by_itself_needs_less(self):
+        """0.3 below but warming 0.6 °C/h by itself (sun, people): the dose
+        is what it will not reach by itself, 0.3 - 0.6 x 21 min."""
+        res, _ = _dose(_reg(), _settled(), 19.7, slope_c_per_h=0.6)
+        assert res.mode == R.MODE_DOSE
+        assert res.need_c == pytest.approx(0.3 - 0.6 / H * HORIZON, abs=1e-6)
+        # Warming fast enough to get there by itself: no pulse, even a
+        # minimum one would overshoot.
+        res, _ = _dose(_reg(), _settled(), 19.7, slope_c_per_h=1.5)
+        assert res.mode == R.MODE_STOP and res.fired_by is None
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +302,27 @@ class TestRelease:
             res, _ = _dose(_reg(), _settled(mode=mode), 19.88)
             assert res.mode == R.MODE_DOSE
 
+    def test_after_a_long_pulse_its_heat_must_show_first(self):
+        """A 20-min pulse ended 5 min ago: its start is past the refractory,
+        but its last minutes' heat has not started to show (theta + tau / 2
+        after its end)."""
+        reg = _reg()
+        st = _settled(last_pulse_start_ts=NOW - 1500, last_pulse_end_ts=NOW - 300)
+        res, _ = _dose(reg, st, 19.85)
+        assert res.mode == R.MODE_STOP and res.ready_in_s is None
+        st = _settled(last_pulse_start_ts=NOW - 1500, last_pulse_end_ts=NOW - LEAD)
+        res, _ = _dose(reg, st, 19.85)
+        assert res.mode == R.MODE_DOSE
+
+    def test_a_minimum_pulse_that_would_overshoot_waits(self):
+        """A fast room (by its heating rate 0.1 °C per open-minute): a
+        minimum pulse gives 0.35, so at 0.15 below it would land 0.2 over;
+        it waits until the room needs it (here 0.3 below)."""
+        res, _ = _dose(_reg(), _settled(), 19.85, cap_gain=0.1)
+        assert res.mode == R.MODE_STOP and res.fired_by is None
+        res, _ = _dose(_reg(), _settled(), 19.7, cap_gain=0.1)
+        assert res.mode == R.MODE_DOSE
+
 
 # ---------------------------------------------------------------------------
 # The coordinator's early fire
@@ -304,9 +364,6 @@ class TestFireNow:
         assert res.mode == R.MODE_STOP                         # within the refractory time
         res, _ = _dose(reg, _settled(), 20.0, slope_c_per_h=-0.5, fire_now="please")
         assert res.mode == R.MODE_STOP
-        res, _ = _dose(reg, R.RegulationState(mode=R.MODE_HOLD), 20.0, slope_c_per_h=-0.5,
-                       fire_now="burn")
-        assert res.mode != R.MODE_DOSE                         # not settled
 
 
 # ---------------------------------------------------------------------------
@@ -339,9 +396,15 @@ class TestPulse:
         res, _ = _dose(_reg(), self._pulsing(200), 19.92, inflight=0.05, tail=0.0675)
         assert res.mode == R.MODE_STOP and res.dose_end == "covered"
 
-    def test_at_most_the_maximum(self):
+    def test_at_most_its_cap(self):
+        """A room nothing is known about: the fixed maximum.  Otherwise the
+        cap the pulse started with."""
         res, _ = _dose(_reg(), self._pulsing(720), 19.8)
         assert res.mode == R.MODE_STOP and res.dose_end == "max"
+        res, _ = _dose(_reg(), self._pulsing(400, pulse_cap_s=400.0), 19.8, cap_gain=0.01)
+        assert res.mode == R.MODE_STOP and res.dose_end == "max"
+        res, _ = _dose(_reg(), self._pulsing(399, pulse_cap_s=400.0), 19.8, cap_gain=0.01)
+        assert res.mode == R.MODE_DOSE and res.pulse_cap_s == 400.0
 
     def test_the_stop_rule_ends_it_at_once(self):
         res, _ = _dose(_reg(), self._pulsing(60), 20.05, slope_c_per_h=2.0)
@@ -358,12 +421,13 @@ class TestPulse:
         res, _ = _dose(_reg(), new, 19.9, now=NOW + 60)
         assert res.mode == R.MODE_DOSE and res.fired_by is None
 
-    def test_a_cold_event_mid_pulse_unsettles(self):
+    def test_a_bigger_shortfall_mid_pulse_is_dosed_on(self):
+        """0.4 below 2 min in (the room cooled faster): the pulse goes on,
+        sized for what it now needs."""
         st = self._pulsing(120, last_pulse_start_ts=NOW - 5000)
-        res, new = _dose(_reg(), st, 19.6)                      # 0.4 below
-        assert not res.settled and res.dose_end == "unsettled"
-        assert res.mode in (R.MODE_HOLD, R.MODE_COAST, R.MODE_HEAT)
-        assert new.pulse_start_ts is None and new.last_pulse_start_ts == NOW - 120
+        res, new = _dose(_reg(), st, 19.6)
+        assert res.settled and res.mode == R.MODE_DOSE and res.dose_end is None
+        assert new.pulse_start_ts == NOW - 120
 
     def test_a_big_dose_in_flight_stays_settled(self):
         """Cooling 2 °C/h: a pulse carries more than 0.5 °C in flight to
@@ -375,9 +439,8 @@ class TestPulse:
         assert res.settled and new.settled and res.dose_end != "unsettled"
 
     def test_a_lowered_target_ends_it_before_the_minimum(self):
-        """A target cut by hand by 0.1 (within the settled tolerance, short
-        of the stop rule) 1 min into a pulse: covered at once, not 25 °C
-        until the minimum."""
+        """A target cut by hand by 0.1 (short of the stop rule) 1 min into a
+        pulse: covered at once, not 25 °C until the minimum."""
         st = self._pulsing(60, pulse_setpoint_c=20.0)
         res, new = _dose(_reg(), st, 19.95, sp=19.9, inflight=0.05)
         assert res.settled and res.mode == R.MODE_STOP and res.dose_end == "covered"
@@ -393,38 +456,209 @@ class TestPulse:
         assert res.mode == R.MODE_DOSE and st.pulse_setpoint_c == 20.0
 
 
-class TestCappedPulses:
-    """Pulses at their maximum length, in a row: more than pulses can give;
-    the ordinary modes take over until the room is back at its target."""
+class TestCap:
+    """A pulse's cap (owner, 31 Oct 2026: the safety net): the dose worked
+    out on the room's own heating rate, with no aim bias and on its own
+    cooling observer, plus cap_margin_c, so it cannot grow with the model
+    it guards."""
 
-    def test_the_count(self):
-        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 720)
-        res, new = _dose(_reg(), st, 19.85)
-        assert res.dose_end == "max" and res.settled and new.capped_pulses == 1
-        # Another pulse ending covered starts the count again.
-        st = dataclasses.replace(new, mode=R.MODE_DOSE, pulse_start_ts=NOW - 200)
-        res, new = _dose(_reg(), st, 20.0, inflight=0.2)
-        assert res.dose_end == "covered" and new.capped_pulses == 0
+    CFG = P.DoseConfig()
+    RATE = 2.62 / 60.0          # the living room's tuner rate, per open-minute
 
-    def test_two_in_a_row_hand_over(self):
-        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 720, capped_pulses=1)
-        res, new = _dose(_reg(), st, 19.85)
-        assert res.dose_end == "max" and not res.settled and not new.settled
-        assert new.capped_pulses == 2 and new.last_pulse_start_ts == NOW - 720
-        # A just-ended maximum: a coast, then the ordinary modes.
-        assert res.mode in (R.MODE_COAST, R.MODE_HOLD)
+    @staticmethod
+    def _horizon():
+        return THETA + 2.0 * TAU
 
-    def test_not_entered_again_until_back_at_the_target(self):
-        stop = R.RegulationState(mode=R.MODE_STOP, capped_pulses=2)
-        res, new = _dose(_reg(), stop, 19.9)
-        assert not res.settled and new.capped_pulses == 2
-        res, new = _dose(_reg(), stop, 20.0)                     # at the target
-        assert res.settled and new.capped_pulses == 0
+    def test_on_the_rooms_own_heating_rate(self):
+        """0.5 to cover at the living room's 2.62 °C/h: (0.5 + 0.2) / 0.0437
+        = 16.0 open-min, a 15.5-min pulse."""
+        cap = R.dose_cap_s(0.5, self.RATE, self.CFG)
+        open_min = (0.5 + self.CFG.cap_margin_c) / self.RATE
+        assert cap == pytest.approx(60.0 * open_min + 60.0 - 90.0)
 
-    def test_carried_while_dosing_is_off(self):
-        stop = R.RegulationState(mode=R.MODE_STOP, capped_pulses=2)
-        _, new = _dose(_reg(), stop, 19.9, dosing=False)
-        assert new.capped_pulses == 2
+    def test_a_slow_room_short_a_lot_runs_long_a_fast_room_short_a_little_short(self):
+        slow = R.dose_cap_s(0.8, 1.0 / 60.0, self.CFG)        # 1 °C/h: 60 open-min
+        fast = R.dose_cap_s(0.0, 6.0 / 60.0, self.CFG)        # 6 °C/h: 2 open-min
+        assert slow == pytest.approx(60.0 * 60.0 - 30.0)
+        assert R.dose_cap_s(1.5, 1.0 / 60.0, self.CFG) == self.CFG.pulse_ceiling_s
+        assert fast == self.CFG.pulse_min_s                    # never under the minimum
+        living_01 = R.dose_cap_s(0.1, self.RATE, self.CFG)
+        living_08 = R.dose_cap_s(0.8, self.RATE, self.CFG)
+        assert 5.5 * 60 < living_01 < 7 * 60 and 22 * 60 < living_08 < 23 * 60
+
+    def test_an_unknown_room_gets_the_fixed_maximum(self):
+        for gain in (None, 0.0, -1.0, float("nan")):
+            assert R.dose_cap_s(0.5, gain, self.CFG) == self.CFG.pulse_max_s
+
+    def test_its_need_is_the_rooms_not_the_models(self):
+        """The cap's need: the measured shortfall less the heat in flight at
+        the room's rate, plus the cooling from the cap's own observer over
+        the landing horizon (a room rising by itself: less), no bias."""
+        h = self._horizon()
+        assert R.dose_cap_need_c(0.3, 0.1, -0.6 / H, h, 0.1) == pytest.approx(0.2 + 0.6 * h / H)
+        assert R.dose_cap_need_c(0.3, 0.0, 0.6 / H, h, 0.1) == pytest.approx(0.3 - 0.6 * h / H)
+        assert R.dose_cap_need_c(0.3, 0.0, 0.05 / H, h, 0.1) == pytest.approx(0.3)   # deadband
+        assert R.dose_cap_need_c(0.3, float("nan"), None, h, 0.1) == pytest.approx(0.3)
+
+    def test_set_when_the_pulse_starts_and_kept(self):
+        """With the room's heating rate known the cap is worked out when the
+        pulse fires (the cooling while it runs counted at the net rise) and
+        kept; without the rate, the fixed maximum (the model's own gain is
+        no guard against itself); a held-back pulse takes it afresh."""
+        res, st = _dose(_reg(), _settled(), 19.6, cap_gain=self.RATE, cap_slope_c_per_h=-0.5)
+        assert res.fired_by == "release"
+        need = R.dose_cap_need_c(0.4, 0.0, -0.5 / H, self._horizon(), 0.1)
+        cap = R.dose_cap_s(need, self.RATE, self.CFG)
+        assert st.pulse_cap_s == pytest.approx(cap) and res.pulse_cap_s == pytest.approx(cap, abs=0.1)
+        res2, st2 = _dose(_reg(), st, 19.62, now=NOW + 60, cap_gain=0.5, cap_slope_c_per_h=-3.0)
+        assert res2.mode == R.MODE_DOSE and st2.pulse_cap_s == st.pulse_cap_s
+        res3, st3 = _dose(_reg(), _settled(), 19.6, gain=0.01)
+        assert res3.fired_by == "release"
+        assert st3.pulse_cap_s == res3.pulse_cap_s == self.CFG.pulse_max_s
+        held = _settled(mode=R.MODE_DOSE, pulse_start_ts=None, pulse_cap_s=200.0)
+        res4, st4 = _dose(_reg(), held, 19.6, cap_gain=self.RATE)
+        assert res4.fired_by == "release"
+        assert st4.pulse_cap_s == pytest.approx(R.dose_cap_s(0.4, self.RATE, self.CFG))
+
+    def test_still_to_run_once_open(self):
+        """What is left from now with the valve open (a target raised mid-
+        pulse): no latency to come, the close delay still adds its heat."""
+        assert R.dose_cap_s(0.5, self.RATE, self.CFG, running=True) == pytest.approx(
+            R.dose_cap_s(0.5, self.RATE, self.CFG) - 60.0)
+        assert R.dose_cap_s(-1.0, self.RATE, self.CFG, running=True) == pytest.approx(
+            60.0 * 0.2 / self.RATE - 90.0)
+
+    def test_without_a_rate_it_ends_at_the_fixed_maximum(self):
+        reg = _reg()
+        res, st = _dose(reg, _settled(), 19.6, gain=0.002)        # a model far too weak
+        t = NOW
+        while res.dose_end is None and t < NOW + 3600:
+            t += 60.0
+            res, st = _dose(reg, st, 19.6, gain=0.002, now=t)
+        assert res.dose_end == "max" and t - NOW == pytest.approx(self.CFG.pulse_max_s, abs=60)
+
+    def _run_pulse(self, *, model_gain, room_gain, fall_c_per_h=0.0, room0=19.6, sp=20.0,
+                   sp_at=None, minutes=90, delay_s=THETA):
+        """One pulse on a room cooling ``fall_c_per_h``, its heat showing
+        ``delay_s`` after it was sent (a pure delay), the model and the cap
+        told their own heat in flight, the room's slope and its cooling.
+        Returns (end, minutes run)."""
+        reg = _reg()
+        res, st = _dose(reg, _settled(), room0, gain=model_gain, cap_gain=room_gain,
+                        cap_slope_c_per_h=-fall_c_per_h, loss_slope_c_per_h=-fall_c_per_h,
+                        slope_c_per_h=-fall_c_per_h, sp=sp)
+        assert res.fired_by == "release"
+
+        def opened(t):
+            return max(0.0, (t - NOW - 60.0) / 60.0)
+
+        t = NOW
+        while res.dose_end is None and t < NOW + 60 * minutes:
+            t += 60.0
+            sent, arrived = opened(t), opened(t - delay_s)
+            room = room0 - fall_c_per_h * (t - NOW) / H + room_gain * arrived
+            slope = -fall_c_per_h + (60.0 * room_gain if arrived > 0 else 0.0)
+            target = sp_at[1] if sp_at is not None and t - NOW >= sp_at[0] else sp
+            res, st = _dose(reg, st, room, sp=target, gain=model_gain, cap_gain=room_gain,
+                            now=t, inflight=model_gain * (sent - arrived),
+                            cap_inflight=room_gain * (sent - arrived), slope_c_per_h=slope,
+                            loss_slope_c_per_h=-fall_c_per_h, cap_slope_c_per_h=-fall_c_per_h)
+        return res.dose_end, (t - NOW) / 60.0
+
+    def test_the_cap_stops_a_model_that_under_counts(self):
+        """A model whose gain is half the room's, its heat showing after 12
+        min: its own dose would run the valve on; the cap on the room's own
+        rate ends it once the heat sent covers what the room needs plus the
+        margin (0.4 + 0.2 at 0.044 per open-minute, the close delay's 1.5
+        open-minutes included)."""
+        end, ran = self._run_pulse(model_gain=0.022, room_gain=0.044, delay_s=720.0)
+        assert end == "max"
+        assert ran == pytest.approx(1.0 + (0.6 / 0.044 - 1.5), abs=1.01)
+
+    def test_a_correct_model_ends_on_its_own_dose_before_its_cap(self):
+        """The model right (the room's own gain), cooling 0.5 °C/h: the pulse
+        ends on its dose, not at its cap.  (Cooling much faster, the cap
+        without the cooling while the pulse runs cuts it short: deliberate,
+        see dose_cap_s.)"""
+        reg = _reg()
+        res, _ = _dose(reg, _settled(), 19.7, cap_gain=0.044, cap_slope_c_per_h=-0.5,
+                       slope_c_per_h=-0.5, loss_slope_c_per_h=-0.5, gain=0.044)
+        cap = res.pulse_cap_s / 60.0
+        end, ran = self._run_pulse(model_gain=0.044, room_gain=0.044, fall_c_per_h=0.5,
+                                   room0=19.7, delay_s=720.0)
+        assert end in ("covered", "landing") and ran < cap
+
+    def test_a_target_raised_mid_pulse_widens_it(self):
+        """Review 3 (M3): a target raised 0.3 at 4 min into a pulse: the cap
+        follows (judged on the error now), the pulse covers the new need."""
+        end, ran = self._run_pulse(model_gain=0.044, room_gain=0.044, sp_at=(240.0, 20.3),
+                                   delay_s=720.0)
+        assert end == "covered"
+        end0, ran0 = self._run_pulse(model_gain=0.044, room_gain=0.044, delay_s=720.0)
+        assert end0 == "covered" and ran > ran0 + 4.0
+
+    def test_a_heat_up_exit_ends_a_long_pulse_once_its_heat_shows(self):
+        """Review 3 (m1): a model too weak keeps a pulse going; once its heat
+        shows and the room rises onto the target, the heat-up's own exit
+        (error - Td x rise <= 0.1) ends it, as a full push ends."""
+        reg = _reg()
+        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 900, pulse_setpoint_c=20.0,
+                      pulse_cap_s=3600.0)
+        # The room rises 1.5 °C/h on the pulse's heat; the room as if unheated
+        # (the observer) still cools 0.5: 0.25 - 10 min x 1.5 <= 0.1.
+        res, _ = _dose(reg, st, 19.75, slope_c_per_h=1.5, loss_slope_c_per_h=-0.5, gain=0.01,
+                       cap_gain=0.044, cap_slope_c_per_h=-0.5)
+        assert res.dose_end == "landing"
+        st_early = dataclasses.replace(st, pulse_start_ts=NOW - 240)    # within its dead time
+        res, _ = _dose(reg, st_early, 19.75, slope_c_per_h=1.5, loss_slope_c_per_h=-0.5,
+                       gain=0.01, cap_gain=0.044, cap_slope_c_per_h=-0.5)
+        assert res.dose_end is None and res.mode == R.MODE_DOSE
+
+
+class TestReadiness:
+    """When the next pulse may fire (Review 3: M3, m4, m7, m9)."""
+
+    def test_a_raised_target_skips_the_refractory(self):
+        st = _settled(last_pulse_start_ts=NOW - 300, last_pulse_end_ts=NOW - 60,
+                      last_pulse_setpoint_c=20.0)
+        res, _ = _dose(_reg(), st, 20.0, sp=20.7)
+        assert res.fired_by == "release"
+        res, _ = _dose(_reg(), st, 19.3)                 # the same 0.7 short, target unmoved
+        assert res.fired_by is None and res.ready_in_s is None
+
+    def test_the_pulse_end_records_its_target(self):
+        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 600, pulse_setpoint_c=20.0,
+                      pulse_cap_s=3600.0)
+        res, new = _dose(_reg(), st, 20.0, inflight=0.5)
+        assert res.dose_end == "covered" and new.last_pulse_setpoint_c == 20.0
+
+    def test_times_from_the_future_count_as_now(self):
+        """The clock went back 46 min: the refractory runs from now, not
+        from the saved future times."""
+        st = _settled(last_pulse_start_ts=NOW + 2760, last_pulse_end_ts=NOW + 2800)
+        res, new = _dose(_reg(), st, 19.8, slope_c_per_h=-0.5)
+        assert res.fired_by is None
+        assert new.last_pulse_start_ts == NOW and new.last_pulse_end_ts == NOW
+        later = NOW + min(HORIZON, P.DoseConfig().refractory_max_s)
+        res, _ = _dose(_reg(), new, 19.8, slope_c_per_h=-0.5, now=later)
+        assert res.fired_by == "release"
+
+    def test_unbooked_heat_must_show_first(self):
+        """A hold's or a heat-up's heat is in no virtual error: the first
+        pulse waits theta + tau / 2 after it (the upgrade from 2.15.0 with a
+        hold on the valve, the option turned on)."""
+        res, _ = _dose(_reg(), _settled(), 19.7, unbooked_until=NOW)
+        assert res.fired_by is None
+        res, _ = _dose(_reg(), _settled(), 19.7, unbooked_until=NOW - LEAD + 60)
+        assert res.fired_by is None
+        res, _ = _dose(_reg(), _settled(), 19.7, unbooked_until=NOW - LEAD)
+        assert res.fired_by == "release"
+
+    def test_a_negative_bias_does_not_hold_back_the_first_pulse(self):
+        """Review 3 (m7): with the aim at -0.25 a flat room was first topped
+        up at 0.30 below; the floor guard now leaves a negative bias out."""
+        res, _ = _dose(_reg(), _settled(), 19.88, bias=-0.25, cap_gain=2.52 / 60.0)
+        assert res.fired_by == "release"
 
 
 # ---------------------------------------------------------------------------
