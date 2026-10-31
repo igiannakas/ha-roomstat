@@ -51,6 +51,8 @@ class TuningSensorDescription(SensorEntityDescription):
     needs_autotune: bool = False
     # Only while the valve look-ahead option is on.
     needs_lookahead: bool = False
+    # Only while the dosed top-ups option is on.
+    needs_dosing: bool = False
 
 
 def _gain_attrs(name: str) -> Callable[[Any], dict[str, Any]]:
@@ -220,6 +222,23 @@ TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
         attrs_fn=lambda c: c.valve_lookahead_summary(),
         needs_lookahead=True,
     ),
+    # Dosed top-ups: the learned room rise per open-minute of the valve (the
+    # model's gain), with the delay, spread, aim bias, how many episodes it
+    # learned from, the last lesson and the pulses of the last 24 h.  Its
+    # attributes change only when an episode is judged or a pulse starts
+    # (the recorder writes a row for each change): the heat in flight is on
+    # the thermostat (unrecorded), the episodes are in the diagnostics.
+    TuningSensorDescription(
+        key="topup_dose",
+        translation_key="topup_dose",
+        native_unit_of_measurement="°C/min",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda c: c.topup_gain,
+        attrs_fn=lambda c: c.topup_dose_summary(),
+        needs_dosing=True,
+    ),
     TuningSensorDescription(
         key="autotune_last_overshoot",
         translation_key="autotune_last_overshoot",
@@ -291,6 +310,8 @@ class RoomstatTuningSensor(CoordinatorEntity, SensorEntity):
         if self.entity_description.needs_autotune and not climate.autotune_enabled:
             return False
         if self.entity_description.needs_lookahead and not climate.lookahead_enabled:
+            return False
+        if self.entity_description.needs_dosing and not climate.dosing_enabled:
             return False
         return True
 

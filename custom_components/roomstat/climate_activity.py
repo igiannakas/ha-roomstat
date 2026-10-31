@@ -177,6 +177,8 @@ class ActivityMixin:
                 facts.trv_fall_c_per_h = (
                     -trv_slope * 3600.0 if trv_slope is not None else None
                 )
+            # Dosed top-ups: the settled state, the pulse, the heat on its way.
+            self._dosing_activity_facts(facts, result)
         return facts
 
     def _activity_tado(self, trv: Any, floor: float) -> tuple[str, float | None]:

@@ -36,6 +36,7 @@ from .climate_controllers import (
     replace_entity_setting,
 )
 from .const import (
+    CONF_DOSED_TOPUPS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEATING_POWER_ENTITY_ID,
@@ -89,7 +90,7 @@ ROLE_BY_KEY = {role.key: role for role in ROLES}
 PREHEAT_ROLES = frozenset({
     CONF_PREHEAT_ARRIVAL_ENTITY_ID, CONF_PREHEAT_CLOSE_ENTITY_ID, CONF_PREHEAT_NEARBY_ENTITY_ID,
 })
-# Read only while the valve look-ahead is on.
+# Read only while the valve look-ahead or dosed top-ups are on.
 LOOKAHEAD_ROLES = frozenset({CONF_HEATING_POWER_ENTITY_ID})
 
 
@@ -97,7 +98,10 @@ def configured_entities(entry: ConfigEntry) -> dict[str, str]:
     """Setting key -> entity id, for every entity setting in use."""
     out: dict[str, str] = {}
     preheat_off = entry.options.get(CONF_PREHEAT_MODE, "off") == "off"
-    lookahead_off = not entry.options.get(CONF_VALVE_LOOKAHEAD, False)
+    lookahead_off = not (
+        entry.options.get(CONF_VALVE_LOOKAHEAD, False)
+        or entry.options.get(CONF_DOSED_TOPUPS, False)
+    )
     for role in ROLES:
         if preheat_off and role.key in PREHEAT_ROLES:
             continue

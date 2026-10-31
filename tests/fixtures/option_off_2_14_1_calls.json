@@ -1,0 +1,161 @@
+[
+[
+540.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 17.3
+}
+],
+[
+840.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 17.6
+}
+],
+[
+1380.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.0
+}
+],
+[
+1860.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.3
+}
+],
+[
+2160.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.6
+}
+],
+[
+3480.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 19.0
+}
+],
+[
+5940.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.7
+}
+],
+[
+8100.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.4
+}
+],
+[
+10620.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.7
+}
+],
+[
+10860.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 25.0
+}
+],
+[
+12840.0,
+"climate",
+"set_hvac_mode",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "off"
+}
+],
+[
+14640.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 18.9
+}
+],
+[
+15060.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 19.2
+}
+],
+[
+15600.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 19.5
+}
+],
+[
+16140.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 19.8
+}
+],
+[
+21600.0,
+"climate",
+"set_temperature",
+{
+"entity_id": "climate.trv",
+"hvac_mode": "heat",
+"temperature": 19.5
+}
+]
+]

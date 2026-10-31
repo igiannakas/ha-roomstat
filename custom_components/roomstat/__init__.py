@@ -26,7 +26,6 @@ from .const import (
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEATING_POWER_ENTITY_ID,
-    CONF_VALVE_LOOKAHEAD,
     DOMAIN,
     safe_float,
 )
@@ -156,18 +155,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 reg_entry is not None and reg_entry.platform in CLOUD_TRV_PLATFORMS
             )
 
-        # The zone's heating power (Tado's heating %), for the valve
-        # look-ahead's learning: the value and when it last changed (a new
-        # report of the cloud's polling).
+        # The zone's heating power (Tado's heating %): what the valve
+        # look-ahead learns from, what dosed top-ups check each pulse with,
+        # and the room's share of the boiler-call signal the pulse
+        # coordinator lets other rooms ride (every room reports it, dosing or
+        # not).  The value and when it last changed (a new report of the
+        # cloud's polling).  Read whenever the sensor is set: one state
+        # lookup.
         data["heating_power"] = None
         data["heating_power_ts"] = None
+        data["heating_power_reported_ts"] = None
         power_id = entry.options.get(CONF_HEATING_POWER_ENTITY_ID)
-        if power_id and entry.options.get(CONF_VALVE_LOOKAHEAD):
+        if power_id:
             state = hass.states.get(power_id)
             value = safe_float(state.state) if state is not None else None
             if value is not None and 0.0 <= value <= 100.0:
                 data["heating_power"] = value
                 data["heating_power_ts"] = state.last_changed.timestamp()
+                # When the value was last reported, a repeat of the same one
+                # included (the lost-off check: a valve still at 100 % three
+                # minutes after an off reports no change).
+                reported = getattr(state, "last_reported", None) or state.last_updated
+                data["heating_power_reported_ts"] = reported.timestamp()
 
         async_check_entities(
             hass, entry, missing_watch, time.time(),

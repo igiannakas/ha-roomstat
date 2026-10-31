@@ -99,6 +99,10 @@ TADO_SERVICE_TIMER = "set_climate_timer"
 # Off by default.
 CONF_VALVE_LOOKAHEAD = "valve_lookahead"
 CONF_HEATING_POWER_ENTITY_ID = "heating_power_entity_id"
+# Dosed top-ups (2.15.0): in the settled state, full-power pulses sized by a
+# Smith predictor replace the hold (dosing.py).  Needs the heating power
+# sensor above, to check each pulse opened the valve.
+CONF_DOSED_TOPUPS = "dosed_topups"
 
 # Out-of-band alarm (binary_sensor.<room>_out_of_band; parameters.OutOfBandConfig)
 CONF_BAND_C = "band_c"

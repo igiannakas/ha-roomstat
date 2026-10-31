@@ -23,6 +23,7 @@ from .const import (
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
+    CONF_DOSED_TOPUPS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEAT_TIMER_S,
@@ -461,6 +462,17 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 lookahead_section_schema, {CONF_HEATING_POWER_ENTITY_ID: heating_power_entity}
             )
 
+        # --- Build the dosed top-ups section schema (2.15.0) ---
+        # It uses the heating power sensor picked in the look-ahead section.
+        dosing_section_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_DOSED_TOPUPS,
+                    default=bool(opts.get(CONF_DOSED_TOPUPS, False)),
+                ): selector.BooleanSelector(),
+            }
+        )
+
         # --- Main options schema with sections ---
         options_schema = vol.Schema(
             {
@@ -594,6 +606,12 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 # Section: Valve look-ahead
                 vol.Required("valve_lookahead"): section(
                     lookahead_section_schema,
+                    {"collapsed": True},
+                ),
+
+                # Section: Dosed top-ups
+                vol.Required("dosed_topups"): section(
+                    dosing_section_schema,
                     {"collapsed": True},
                 ),
 

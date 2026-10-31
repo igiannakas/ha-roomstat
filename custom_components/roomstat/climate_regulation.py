@@ -37,6 +37,7 @@ from .climate_controllers import (
     integration_step,
     is_maximum,
     is_off_command,
+    lost_off_due,
     off_confirm_after,
     pending_command,
     resend_grace_s,
@@ -51,6 +52,9 @@ from .const import (
 )
 from .parameters import (
     FALLBACK_DRIFT_GRACE_S,
+    LOST_OFF_AFTER_S,
+    LOST_OFF_MAX_RESENDS,
+    LOST_OFF_MIN_PCT,
     MANUAL_SETTLE_S,
     MAX_INTEGRATION_STEP_S,
     OFF_CONFIRM_S,
@@ -59,7 +63,7 @@ from .parameters import (
     TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
 )
-from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD, resume_mode
+from .regulation import MODE_COAST, MODE_DOSE, MODE_HEAT, MODE_HOLD, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -227,6 +231,7 @@ class RegulationMixin:
                     room_temp_ts=self.coordinator.data.get("room_temp_ts"),
                     window=self._window_open(),
                     lookahead_c=held_lookahead,
+                    dosed=bool(getattr(result, "settled", False)),
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop
@@ -358,6 +363,9 @@ class RegulationMixin:
             self._last_heat_command_ts = None
         if self._off_confirm_ts is not None and self._off_confirm_ts - OFF_CONFIRM_S > now:
             self._off_confirm_ts = now
+        # A valve that kept heating after an off it took: the off goes again
+        # (in whichever off path this cycle takes).
+        self._check_lost_off(now)
 
         # Preheat on the way home: what the room would aim for while nobody
         # is home (shadow: only shown and logged, never sent; it never
@@ -394,6 +402,9 @@ class RegulationMixin:
         trv = self._active_trv()
         self._note_trv_source(trv)
         tado_internal = trv.internal_c
+        # This room's zone heating, for the house's pulse coordinator (dosed
+        # rooms ride any zone's call for heat): every room, dosing or not.
+        self._dosing_note_zone(now, trv)
 
         # The TRV had no setpoint when the entity was added (its integration
         # still loading after a restart): decide the resume mode now, from
@@ -406,6 +417,7 @@ class RegulationMixin:
         if held is not None:
             self._resume_pending = False
             self._reg_state.mode = resume_mode(held, self._config)
+            self._dosing_resume()
             self._last_sent_was_max = is_maximum(held, self._config.max_target_c)
             _LOGGER.debug(
                 "%s: resuming as %s from %.1f held by the valve",
@@ -465,7 +477,9 @@ class RegulationMixin:
             # or any maximum the TRV took (a hold clamped at 25), is ended
             # (coast).  Until the TRV has taken the stop, it is tried again
             # (once per rate-limit interval).
-            if self._reg_state.mode == MODE_HEAT or self._last_sent_was_max:
+            # A dosed room is no longer settled, and a running pulse ends.
+            self._dosing_interrupted()
+            if self._reg_state.mode in (MODE_HEAT, MODE_DOSE) or self._last_sent_was_max:
                 await self._async_decide_and_send(
                     now, trv, self._config.min_target_c, strong=True
                 )
@@ -518,18 +532,34 @@ class RegulationMixin:
         # reading and the look-ahead learned so far (None, 0 while off).
         trv_slope, valve_lookahead_s = self._lookahead_inputs(now, trv)
 
-        # 4. Compute regulation
-        prev_mode = self._reg_state.mode
-        result = self._regulator.compute(
-            setpoint_c=setpoint,
-            room_temp_c=room_temp,
-            tado_internal_c=tado_internal,
-            time_delta_s=dt,
-            state=self._reg_state,
-            room_slope_c_per_s=slope,
-            trv_slope_c_per_s=trv_slope,
-            valve_lookahead_s=valve_lookahead_s,
+        # 3d. Dosed top-ups (option): the heat still on its way, the learned
+        # model and the pulse coordinator's verdict ({} while off).
+        room_fresh = not self._sensor_degraded
+        dose_kwargs = self._dosing_inputs(
+            now, trv, setpoint, room_temp, slope, room_fresh=room_fresh
         )
+
+        # 4. Compute regulation.  The dosed step never stops the cycle: if
+        # it raises, dosing is off for the session and the cycle is
+        # computed without it (compute does not change the state it reads).
+        prev_mode = self._reg_state.mode
+        compute_args = {
+            "setpoint_c": setpoint,
+            "room_temp_c": room_temp,
+            "tado_internal_c": tado_internal,
+            "time_delta_s": dt,
+            "state": self._reg_state,
+            "room_slope_c_per_s": slope,
+            "trv_slope_c_per_s": trv_slope,
+            "valve_lookahead_s": valve_lookahead_s,
+        }
+        try:
+            result = self._regulator.compute(**compute_args, **dose_kwargs)
+        except Exception as err:
+            if not dose_kwargs:
+                raise
+            self._dosing_fail(err)
+            result = self._regulator.compute(**compute_args)
         self._reg_state = result.new_state
         self._last_result = result
         self._lookahead_note_result(result)
@@ -547,6 +577,10 @@ class RegulationMixin:
         )
         self._lookahead_after_send(now, trv, result, was_shut)
         self._lookahead_observe(now, trv)
+        # Dosed top-ups: episodes, the coordinator, a running pulse's end.
+        self._dosing_after_compute(
+            now, result, setpoint, room_temp, slope, trv, room_fresh=room_fresh
+        )
 
         # The braking time this cycle decided with (the tuner may change it).
         td_used_s = self._config.tuning.td_s
@@ -668,6 +702,8 @@ class RegulationMixin:
         self._last_attempt_ok = ok
         self._last_attempt_shown = False
         self._last_attempt_entity = trv.entity_id
+        # Dosed top-ups book the valve's open time from the commands tried.
+        self._dosing_note_command(now, command_c, ok)
         # What the sending cycle saw: a state that already looked like the
         # command can't tell whether it arrived (it may be a stale one).
         self._last_attempt_seen_other = not self._trv_holds(command_c, trv)
@@ -678,6 +714,8 @@ class RegulationMixin:
             # Heat wanted again: no off to confirm.
             self._last_heat_command_ts = now
             self._off_confirm_ts = None
+            self._off_confirm_reason = "heat"
+            self._lost_off_resends = 0
         elif ok:
             self._clear_heat_attempt()
             # An off seconds after a heat command is sent once more a minute
@@ -686,6 +724,29 @@ class RegulationMixin:
             self._off_confirm_ts = off_confirm_after(
                 now, self._last_heat_command_ts, OFF_CONFIRM_S
             )
+
+    def _check_lost_off(self, now: float) -> None:
+        """The valve kept heating after an off it took (lost_off_due): the
+        off is due again at once (sent by whichever off path the cycle
+        takes, as the confirmation off is)."""
+        data = self.coordinator.data or {}
+        floor = self._config.min_target_c
+        last = self._last_attempt_c
+        if not lost_off_due(
+            off_ts=self._last_command_sent_ts,
+            off_taken=last is not None and is_off_command(last, floor) and self._last_attempt_ok,
+            heat_since_off=self._last_heat_attempt_ts is not None,
+            confirm_pending=self._off_confirm_ts is not None,
+            heating_pct=data.get("heating_power"),
+            reported_ts=data.get("heating_power_reported_ts"),
+            resends=self._lost_off_resends,
+            after_s=LOST_OFF_AFTER_S, min_pct=LOST_OFF_MIN_PCT,
+            max_resends=LOST_OFF_MAX_RESENDS,
+        ):
+            return
+        self._off_confirm_ts = now
+        self._off_confirm_reason = "lost"
+        self._lost_off_resends += 1
 
     def _off_confirm_due(self, now: float) -> bool:
         """An off seconds after a heat command is due to be sent once more
@@ -701,11 +762,21 @@ class RegulationMixin:
     async def _async_send_off_confirm(self, now: float, trv: TrvReading) -> bool:
         """Send the off once more (see _off_confirm_due); returns whether the
         TRV took it."""
-        self._log(_LOGGER).info(
-            "sending the off again: the last one came within %d s of a heat command, "
-            "and a Tado valve can keep the heat and drop such an off",
-            int(OFF_CONFIRM_S),
-        )
+        if self._off_confirm_reason == "lost":
+            data = self.coordinator.data or {}
+            self._log(_LOGGER).warning(
+                "sending the off again: the valve still reports heating (%.0f %%) "
+                "%d min after the last off",
+                data.get("heating_power") or 0.0,
+                int((now - self._last_command_sent_ts) / 60),
+            )
+        else:
+            self._log(_LOGGER).info(
+                "sending the off again: the last one came within %d s of a heat command, "
+                "and a Tado valve can keep the heat and drop such an off",
+                int(OFF_CONFIRM_S),
+            )
+        self._off_confirm_reason = "heat"
         sent = await self._async_send_off_to_tado(trv.entity_id)
         self._note_attempt(now, self._config.min_target_c, trv, sent)
         return sent
@@ -1417,6 +1488,9 @@ class RegulationMixin:
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST
+                # A dosed pulse it shut has ended: not settled, and the next
+                # one waits its refractory from this one.
+                self._dosing_interrupted()
                 self._log(_LOGGER).warning(
                     "watchdog switched %s off",
                     trv.entity_id,

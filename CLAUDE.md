@@ -39,20 +39,26 @@ climate_controllers.py              ├─ climate_presets.py (PresetMixin)
 regulation.py → activity.py         ├─ climate_schedule.py (ScheduleMixin)
 parameters.py → preheat.py          ├─ climate_summer.py (SummerMixin)
 parameters.py → lookahead.py        ├─ climate_activity.py (ActivityMixin)
-                                    ├─ climate_preheat.py (PreheatMixin)
+regulation.py → dosing.py           ├─ climate_preheat.py (PreheatMixin)
                                     ├─ climate_lookahead.py (LookaheadMixin)
+                                    ├─ climate_dosing.py (DosingMixin)
                                     └─ __init__.py (coordinator), config_flow.py
 ```
 
 Build new logic in the HA-free modules first (`parameters.py`,
 `regulation.py`, `autotune.py`, `climate_controllers.py`, `activity.py`,
-`preheat.py`, `lookahead.py`), then wire it into the HA modules.
+`preheat.py`, `lookahead.py`, `dosing.py`), then wire it into the HA
+modules.
 
 ### Key files
 
 - `parameters.py`: all defaults (RegulationConfig, PresetConfig,
-  CorrectionTuning, BehaviourConfig, AutotuneConfig, LookaheadConfig).
-- `regulation.py`: the controller (modes heat / coast / hold / stop);
+  CorrectionTuning, BehaviourConfig, AutotuneConfig, LookaheadConfig,
+  DoseConfig).
+- `regulation.py`: the controller (modes heat / coast / hold / stop, and
+  dose: `_dose_step`, the settled state and its pulses, with the pure
+  helpers `dose_need_c`, `dose_ready_in_s`, `dose_fall_c_per_s`,
+  `dose_floor_landing_c`, see "Dosed top-ups" below);
   `outlook()` holds the predictions a mode is decided on, which the
   activity log explains with; `lookahead_correction_c` (the valve
   look-ahead's lowering of a hold command; it stays in this module so
@@ -60,6 +66,12 @@ Build new logic in the HA-free modules first (`parameters.py`,
   it on its own rely on).
 - `lookahead.py`: the valve look-ahead's learner (`LookaheadLearner`, see
   "Valve look-ahead" below), HA-free.
+- `dosing.py`: dosed top-ups, HA-free (see "Dosed top-ups" below): the
+  model (`fopdt_response`, `fit_episode`), the heat in flight
+  (`TopupPredictor`), the learner (`DoseLearner`), the house's pulse
+  coordinator (`PulseCoordinator`), and the per-room glue the entity and
+  the simulators share (`RoomDoser`: booking, the disturbance observer,
+  the regulator's inputs, episodes, `summary` / `diagnostics`).
 - `autotune.py`: background tuning of Kp, Ki and the braking time Td. Each
   judged episode leaves a verdict (`last_verdict`, `last_verdict_until`,
   `verdicts`): what it changed, or why it changed nothing (a vote short, on
@@ -108,6 +120,13 @@ Build new logic in the HA-free modules first (`parameters.py`,
   regulator (`_lookahead_inputs`), releases and their answers
   (`_lookahead_after_send`, `_lookahead_observe`), persistence
   (`lookahead`, with the TRV it was learned on), the sensor's values.
+- `climate_dosing.py`: dosed top-ups on the entity (`DosingMixin`): the
+  house's `PULSE_COORDINATOR`, every command tried booked
+  (`_dosing_note_command`), the zone's heating reported every cycle
+  (`_dosing_note_zone`), the regulator's inputs (`_dosing_inputs`), the
+  episodes and the pulse-end timer after the send (`_dosing_after_compute`,
+  `_async_dose_wake`), the coordinated wake (`_dosing_wake`), persistence
+  (`dosing`, with the TRV it was learned on), the sensor's values.
 - `climate_activity.py`: the room's activity log on the entity: a decision
   line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
   verdicts, the sensor's state and attributes, persistence (`activity`).
@@ -117,7 +136,8 @@ Build new logic in the HA-free modules first (`parameters.py`,
   the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
   an enum), the activity log (`RoomstatActivitySensor`), preheat's
   decision (`preheat`, an enum) and 30-minute recovery (`preheat_recovery`),
-  and the valve look-ahead in use (`valve_lookahead`, only while its option
+  the valve look-ahead in use (`valve_lookahead`, only while its option
+  is on) and the dosed top-ups' gain (`topup_dose`, only while its option
   is on).
   `button.py`: resume schedule, reset auto-tune.
   `binary_sensor.py`: sensor degraded, out of band.
@@ -214,6 +234,9 @@ Read this before changing `regulation.py` or `parameters.py`.
     0.030 → 0.025 °C RMS, generic living room +0.01, commands unchanged);
     the simulator does not reproduce the trickle, so the live traces are
     the evidence.
+  - `dose` (2.15.0, the option `dosed_topups`): in the *settled* state a
+    full-power pulse sized by a Smith predictor replaces the hold; see
+    "Dosed top-ups" below.
 
   Everything but hold is a strong command: it skips the rate limit once
   (not on retries). A reload resumes from what the TRV holds
@@ -567,6 +590,24 @@ is updating.
   were the only two valves heating while told off; an off half an hour
   after the heat is taken within 5 min. 19 Oct: 20 → 22 → 20 within 10 s
   had sent 25 °C too.
+- **A lost off (2.15.0, every room with a heating power sensor, dosed or
+  not; `lost_off_due`, `_check_lost_off`):** a zone still reporting
+  heating ≥ `LOST_OFF_MIN_PCT` (20 %) in a report made `LOST_OFF_AFTER_S`
+  (8 min) or more after an off the valve took, with no heat command since,
+  gets the off again at once through the confirmation-off path
+  (`_off_confirm_reason` "lost": a warning, "Sending the off again: the
+  valve still reports heating …"), at most `LOST_OFF_MAX_RESENDS` (2) per
+  heat command (the count is not kept across a reload; the command record
+  is only taken back within 360 s, so a reload ends the check anyway). The
+  report time is the heating sensor's `last_reported`
+  (`heating_power_reported_ts`), so a report from before the off never
+  counts. 8 min, not 3: the zone's heating % reaches HA 10–276 s after the
+  valve and the valve takes 1.5 min to close; at 3 min a zone whose reports
+  came 200 s late got every off twice, stock rooms after a heat-up too, and
+  at 7 min again with 370 s (2.15.0 reviews). The 25 Oct valves heated
+  13–15 min. The confirmation off covers offs within a minute of a
+  heat command; this covers any later one, which dosed pulses (an off
+  3–12 min after each 25 °C) make the normal case.
 - **Room sensor lost:** the room sensor is meant to be reliable (owner's
   decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
@@ -1079,6 +1120,215 @@ doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
   with the traceback, and switches the look-ahead off for the session
   (`lookahead_active`).
 
+## Dosed top-ups (2.15.0)
+
+Read this before changing `dosing.py`, `climate_dosing.py`, `DoseConfig`,
+the `dose` mode or `_dose_step` in `regulation.py`.  Design, fit and
+evidence: project docs
+`claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md` and
+`claude/roomstat-dosed-topups-implementation-guide-2026-10-30.md`.
+
+- **The owner's request (30 Oct 2026):** once a room has landed, hold it in
+  a 0.2 °C band centred on the target (±0.1; short rather than hot, but in
+  the band), with full-power pulses of at least 3 minutes rather than the
+  valve modulating, no extra gas, and no more boiler cycles (an on/off
+  boiler). An option per room (`dosed_topups`, off by default) that needs
+  the zone's heating power sensor (`heating_power_entity_id`, shared with
+  the valve look-ahead; the options form refuses it without one,
+  `dosing_needs_heating_power`). With 2.15.0 it is on in the living room
+  only, a live trial (owner, 31 Oct 2026, after the simulation below
+  failed his gate): judge it on the living room's trace sensors and boiler
+  calls. 2.14.1 (commit f293136) is the rollback point; the option off is
+  2.14.1's regulation (below).
+- **The problem it fixes:** in the settled state a release re-opens the
+  valve and the room shows the heat only 8–12 min later (cloud latency,
+  water, radiator, sensor), so the valve runs until the stop rule sees the
+  rise: a 0.1 °C shortfall worth ~2.4 open-minutes got 10–30. Living room,
+  25–30 Oct 2026, 19 settled top-ups: peaks median +0.23 (quartiles
+  +0.09 / +0.42, worst +0.94). Nothing acting on the measured room (PI, a
+  derivative, the valve look-ahead) can dose less than the dead time
+  dictates.
+- **The Smith predictor:** a first-order-plus-dead-time model of Roomstat's
+  own heat (delay θ, spread τ, gain in °C per *open-minute*) runs beside
+  the room (`TopupPredictor`), and the settled state decides on the virtual
+  error `e* = setpoint − room − rise still in flight`. An open-minute is a
+  minute the valve is commanded fully open, booked from our own commands
+  (`RoomDoser.note_command`, every attempt through `_note_attempt`): a
+  maximum (≥ max − 0.05) opens from send + `latency_s` (60), any other
+  command closes at send + `close_delay_s` (90). Never from the heating %:
+  it lags the valve and the valve is strongly non-linear, which scattered
+  the gain 10× in the fit (open-minutes 2×). The heating % only checks
+  that a pulse opened the valve (a pulse with no report above 0 by its end
+  + `opened_check_s` is not learned from; its heat stays booked) and tells
+  the house that a zone burns.
+- **Hold heat is not booked** (2.15.0 review): a hold command's opening is
+  unknown (the Tado throttles, 30–40 % on average), and booking it as fully
+  open made the observer read a false −2.7…−3.0 °C/h for 20 min after a
+  hold (first pulse +0.15). Unbooked, the room after a hold reads as
+  warming (smaller doses, the safe side). Hold commands are marked as
+  unbooked heat, and any learner episode whose window (widened by θ + 2τ)
+  meets one is dropped.
+- **The settled state** (`RegulationState.settled`, `_dose_step`): entered
+  from a stop with |e*| < `settled_window_c` (0.5); left on a shortfall of
+  `unsettle_c` (0.3), virtual or measured (a model that under-doses keeps
+  the virtual one small while the room sinks), on the room itself 0.5
+  above, a target move over 0.3, a window, Boost (`_dosing_allowed`), dosing
+  off, or `capped_pulses_unsettle` (2) pulses in a row at the 12-min cap
+  (more than pulses can give; not entered again until the room is back at
+  its target, `RegulationState.capped_pulses`). Not on a virtual excess:
+  in cold weather a correct pulse carries more than 0.5 °C in flight, and
+  that exit turned every pulse into a hold at 2 °C/h. While settled with
+  dosing on there is never a hold command: `stop` (off) or `dose` (25 °C),
+  and the integral does not integrate. The ordinary modes decide
+  otherwise, a pulse still running counting as a just-ended maximum (a
+  coast).
+- **Firing:** ready once `min(θ + 2τ, 30 min)` has passed since the last
+  pulse started (the refractory: its heat has landed); then a pulse starts
+  when `e* + (θ + τ/2) × fall ≥ release_below_c` (0.1): the release looks
+  one visible dead time ahead, so the trough is about −0.1 and the landing
+  on the target. No "never above the target" check: in cold weather it
+  fires at or above the target, and a 25 °C pulse cannot trickle as a hold
+  command there would. An in-flight gate (no pulse while heat is still
+  arriving) was tried and dropped: the virtual error already counts it, and
+  the gate broke the band above 0.5 °C/h (B's check, perfect model: with
+  it troughs to −0.18 at 0.8 °C/h; without, −0.09…−0.01 at 0.2,
+  −0.10…+0.02 at 1.0).
+- **Sizing:** `need = dose_need_c(e* − tail, fall, θ + 2τ, aim 0, bias)`,
+  the shortfall plus the cooling until the heat has landed; the pulse ends
+  once the heat committed covers it (`covered`, not before `pulse_min_s`
+  180 s, the owner's minimum, unless the target was lowered since it
+  started, `RegulationState.pulse_setpoint_c`), at `pulse_max_s` (720 s,
+  `max`), or at once when the measured stop rule fires (`stop_rule`). A
+  running pulse is re-judged at the second it should end
+  (`_async_dose_wake`, `async_call_later`), not at the next minute. A
+  pulse held back (a change by hand settling, a failed call) starts when it
+  goes out: the regulator reports it as fired again on the cycle its start
+  is unknown, and only a cycle that sent it (`after_compute(sent=True)`)
+  starts its episode, counts it and wakes other rooms. A failed call is not
+  held back: the pulse keeps its clock and the failed 25 °C is booked as
+  open (it may have landed; at worst more heat in flight, a smaller dose),
+  so it still ends by its need or its maximum (2.15.0 second review:
+  restarted every cycle, a call that timed out but landed ran the valve
+  15 min, +0.39). A clock that went back counts the pulse from now, the
+  same pulse. The watchdog shutting the valve ends a pulse like the room
+  sensor lost (`_dosing_interrupted`).
+- **The cooling rate** is a disturbance observer
+  (`RoomDoser.loss_slope_c_per_s`): the 15-min Theil–Sen slope of room −
+  the rise of Roomstat's booked heat that has arrived, so the last pulse's
+  heat does not hide the room's real loss (the plain room slope left
+  troughs at −0.13…−0.19 in the entity tests; with the observer
+  −0.06…+0.02). Bridged room readings feed neither it nor the learner.
+- **The learner** (`DoseLearner`): each pulse is an episode up to the
+  room's first peak, judged 5 min after it over [start − 15 min, landing +
+  5 min] from 90 min of kept readings and open intervals (`fit_history_s`,
+  persisted). The fit is joint: gain, θ, τ (grids, closed-form gain) and
+  the room's loss in one least squares (`fit_episode(fit_loss=True)`); a
+  fixed loss (the pre-pulse slope continued) coupled the fit to the
+  learner's own gain and drifted it to 0.08–0.09 for a 0.045 plant.
+  Episodes overlap (up to 3 open): a new pulse cuts the open one's landing
+  search at its own opening + θ, and the fit models every booked opening
+  (2.15.0 review: dropping the open episode when the next pulse started —
+  the refractory is shorter than the time to judge — meant a model that
+  under-doses never learned, the room 0.08–0.13 under all day; now 53 of
+  55 learned in 24 h, the room −0.10…+0.08). Rejected: RMS > 0.06, a gain
+  outside 0.2–4× the gain in use, a loss below −0.05 °C/h ("a room warming
+  by itself") or above 3.0. Dropped: a window, Boost, a target change, hold
+  heat in the window, a pulse that never opened. Steps towards the median
+  of the last six: the gain up (smaller doses) half the way at once, down
+  15 % at most every 12 h (the owner prefers short landings); θ and τ half
+  the way either way (neither direction is safe: longer is an earlier,
+  bigger pulse, shorter a second pulse before the first has landed). An
+  aim bias moves 0.3 of each landing's miss (±0.25); two landings above
+  +0.3: the gain ×1.5 and the bias −0.1 at once. Seeds while nothing is
+  learned: the auto-tuner's heating rate / 60 for the gain only; θ and τ
+  start at the top-ups' own 5 and 8 min (the tuner's dead time comes from
+  cold-radiator heat-ups, 15+ min in the living room and study; seeded
+  from it the sim landed +0.15). Fitted on the living room's 19 top-ups:
+  gain 0.041 median (0.021 / 0.062), θ 4 min, τ 6 min, every episode within
+  0.044 °C RMS; with the loss fitted, 0.036 and a loss of 0.34 °C/h. D1's
+  refit on 23–30 Oct (32 settled top-ups): living 0.041 / θ 4 / τ 8,
+  master 0.023 / 6 / 11, second 0.038 / 3.5 / 24 (6 top-ups), study too
+  few to trust.
+- **The pulse coordinator** (`PulseCoordinator`, one per process,
+  `climate_dosing.PULSE_COORDINATOR`): every room reports its zone's heating
+  every cycle that reads the TRV, dosed or not (`_dosing_note_zone`, at the
+  report's time). A ready dosed room rides another zone's burn (`burn`; a
+  report at most `zone_report_max_age_s`, 5 min, old), and one due within
+  its visible dead time fires
+  with a room that has just started a pulse (`together`; that room wakes it,
+  `_dosing_wake` runs a cycle), only when a minimum pulse would land at
+  most +0.05 above the target (`fire_max_overshoot_c`). The boiler is
+  on/off: a single-radiator call already cycles it on its flow thermostat,
+  so the lever is how many radiators share each burn (23–30 Oct 2026: 10
+  calls a day, median 18 min, 72 % of them one radiator). It only picks the
+  moment; each room sizes its own pulse. Wakes and pulse-end timers of a
+  removed entity run no cycle (`_dosing_live`).
+- **Interactions:** a pulse is a strong command (it skips the rate limit
+  once, like a heat-up), and so is its off; at most one pulse per
+  refractory, so about 2 commands per pulse. The change-by-hand settle, the
+  window's delay and the command spacing hold a pulse back like any heat.
+  The look-ahead never applies (no hold while settled). The auto-tuner
+  sees pulses as top-ups (they end a heat-up's coast) and takes no hold
+  window on dosed cycles (`AutotuneSample.dosed`; Kp and Ki are judged on
+  the hold they drive). A reload resumes a pulse still running
+  (`_dosing_resume`: a 25 °C held by the valve is the pulse, not a
+  heat-up) and keeps the heat in flight, the observer and the learner
+  (restore-state `dosing`, with the TRV it was learned on; another TRV
+  starts afresh). The room sensor lost ends a pulse and the settled state.
+  Reset auto-tune forgets it.
+- **On the entity:** the sensor `topup_dose` ("Top-up gain", °C per
+  open-minute, only while the option is on): its attributes
+  (`RoomDoser.summary`) change only on a pulse start or a judged episode
+  (the recorder writes a row per change; the first version changed them
+  on 489 of 504 cycles, ~2.9 MB a day per room); the heat in flight and
+  the rest are the thermostat's `topup_*` attributes (unrecorded) and the
+  diagnostics (`RoomDoser.diagnostics`). The mode `dose` ("Top-up pulse")
+  on the regulation-mode sensor; activity lines (`Top-up pulse: …`,
+  `Top-up ended (…)`, `Valve off, landing: …`, `Valve off (settled): …;
+  next top-up …`, the learner's `dosed top-up: …` lessons).
+- **Never stops the regulation:** every step catches everything, logs once
+  with the traceback and switches dosing off for the session
+  (`_dosing_failure`); a dosed `compute()` that raises is computed again
+  without the dose arguments. The room is then regulated as without it.
+- **Option off is 2.14.1:** `tests/test_dosing_entity.py`
+  `test_option_off_is_2_14_1s_regulation` replays six hours on a Tado-like
+  valve and compares every command and its time with the run recorded on
+  commit f293136 (`tests/fixtures/option_off_2_14_1_calls.json`); the
+  regulator alone matched 2.14.1 on 200,000 random cycles (review).
+- **Simulated: the owner's gate failed** (31 Oct 2026; scratch
+  `dosing/house/`, project doc
+  `claude/roomstat-dosed-topups-simulation-results-2026-10-31.md`). The
+  real entity code ran the four rooms in one process, sharing the
+  coordinator, with the live options (look-ahead and auto-tune on, 150-s
+  rate limit, timer overlays). Plants were refitted on 23–30 Oct (D1:
+  `dosing/sim/plants.py`). Tado cloud semantics. Each room's real 7-day
+  targets, 8 days, metrics from day 3, 4 seeds × (real outdoor, real −
+  4 °C). Stock gives 10.5 boiler calls a day against 10.1 measured. House,
+  today → dosed:
+  - settled time within ±0.1: 0.46 → 0.48 (colder 0.33 → 0.40);
+  - time below −0.2: 138 → 116 min/day (240 → 171);
+  - mean daily peak: +0.17 → +0.21;
+  - boiler calls: 10.5 → 15.4 a day, median 39 → 7 min, under 10 min
+    1 → 9 a day;
+  - heat: equal; TRV commands: 88 → 68 a day.
+
+  Calls were worse in 8 of 8 scenarios, the mean peak in 7. Without the
+  coordinator it is the same: it had nothing to share at mild
+  temperatures (no burn ridden). Why:
+  - each settled living-room pulse is its own boiler call, and pulses come
+    every θ + 2τ (under 30 min); matching today's calls needs pulses about
+    60 min apart, a 0.3 °C sawtooth;
+  - full output lifts the sensor through the radiator's plume (+0.42 °C in
+    the fit).
+
+  Tried and failed: 6-min pulses, 10–15-min pulses with a 60-min
+  refractory, capping the gain. The simulator cannot count burner starts:
+  if today's long low-% calls already cycle the on/off boiler on its flow
+  thermostat (design §12), stock's starts are undercounted. Its learned
+  gain also came out 2–3× high, because the plants' after-peak decay goes
+  into the fitted loss; on the real living-room top-ups the fit is right
+  (0.036).
+
 ## Auto-tune
 
 Read this before changing `autotune.py` or `AutotuneConfig`.
@@ -1244,6 +1494,20 @@ ruff check .
   a release and its answer, the lowered command, the tuner's sample, an off
   before the answer, no heating sensor, persistence with its TRV, reset, a
   failure that leaves the room regulated).
+- `tests/test_dosing.py` (the model, the fit, the learner on the 19 real
+  top-ups of `tests/fixtures/living_room_topups_2026_10.json`, the
+  coordinator, the doser's booking and observer, closed loops on plants
+  that do not match the model: a weak or slow radiator, a long delay, late
+  heating reports, a hold into the settled state),
+  `tests/test_dosing_regulation.py` (the settled state, the release, the
+  pulse and its ends, capped pulses, the coordinator's early fire, the
+  steady state on a perfect model, the option off unchanged) and
+  `tests/test_dosing_entity.py` (through the entity: pulses in the band,
+  learning in closed loop, the option off against the recorded 2.14.1
+  trace, reload, window, target change, two rooms on one boiler, the lost
+  off, late reports, hold heat, a weak radiator, capped pulses, the
+  sensor's churn, removal, the room sensor lost mid-pulse, failures).
+  Its `_TadoPlant` holds every command as a Tado does.
 - `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
   Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
   replayed, restarts and pre-2.12 snapshots).

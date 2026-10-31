@@ -798,6 +798,24 @@ class TestSafety:
         t._on_hold(_hold(DAY + 4 * 3600, mean=0.3), DAY + 4 * 3600)
         assert t._trim["ki"] > 1.0
 
+    def test_dosed_cycles_make_no_hold_window(self):
+        """A room settled under dosed top-ups: pulses, not the PI, are in
+        charge, so no hold window is collected or judged on its cycles
+        (2.15.0); the same cycles undosed start one."""
+        def feed(t, dosed):
+            for k in range(6 * 60):
+                ts = DAY + 60.0 * k
+                room = 20.0 - 0.05 * math.sin(k / 9.0)
+                t.observe(A.AutotuneSample(
+                    ts, 20.0, room, room - 3.0, 25.0 if k % 30 < 4 else 5.0,
+                    room_temp_ts=ts, dosed=dosed,
+                ))
+        dosed, plain = _tuner(), _tuner()
+        feed(dosed, True)
+        feed(plain, False)
+        assert dosed._hold is None and not dosed._holds
+        assert plain._hold is not None or plain._holds
+
     def test_observe_survives_garbage(self):
         t = _tuner()
         for ts, sp, room, tado, cmd in [

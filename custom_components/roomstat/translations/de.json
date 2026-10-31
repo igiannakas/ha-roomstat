@@ -186,6 +186,16 @@
               "heating_power_entity_id": "Die Heizleistung der Zone in % (bei einer Tado-Zone ihr Heating-Sensor). Roomstat lernt die Vorausschau aus der ersten Antwort des Ventils auf jedes Nachheizen. Erforderlich, solange die Vorausschau eingeschaltet ist."
             }
           },
+          "dosed_topups": {
+            "name": "Dosierte Nachheizung",
+            "description": "Experimentell. Hat der Raum seine Zieltemperatur erreicht, heizt Roomstat mit kurzen Impulsen bei voller Leistung nach, statt das Ventil halb offen zu halten. Jeder Impuls wird aus der Wärme berechnet, die schon auf dem Weg in den Raum ist, und daraus, wie schnell der Raum abkühlt, so dass der Raum etwa 0,1 °C um seine Zieltemperatur bleibt, statt nach jedem Nachheizen zu überschwingen. Was ein Impuls in diesem Raum bewirkt, wird aus den eigenen Impulsen des Raums gelernt. Räume mit dieser Option legen ihre Impulse nach Möglichkeit zusammen, damit der Kessel für mehrere Heizkörper nur einmal startet. Verwendet den Heizleistungs-Sensor aus dem Abschnitt Ventil-Vorausschau.",
+            "data": {
+              "dosed_topups": "Dosierte Nachheizung"
+            },
+            "data_description": {
+              "dosed_topups": "Impulse dauern mindestens 3 Minuten. Aufheizen, Fenster, Anwesenheit und Boost arbeiten wie bisher, und ab 0,3 °C Unterschreitung übernimmt wieder die normale Regelung. Das Zurücksetzen der automatischen Anpassung vergisst auch das Gelernte."
+            }
+          },
           "out_of_band": {
             "name": "Alarm außerhalb des Bereichs",
             "description": "Der Sensor „Außerhalb des Bereichs“ des Raums schaltet ein, wenn der Raum zu warm oder zu kalt bleibt, während geheizt wird (nicht im Sommermodus, kein Fenster offen, Raumsensor funktioniert). Für eine Benachrichtigung gedacht.",
@@ -218,7 +228,8 @@
     "error": {
       "temp_entity_not_found": "Externer Temperatursensor nicht gefunden.",
       "temp_not_temperature": "Bitte einen Temperatursensor (device_class: temperature) auswählen.",
-      "lookahead_needs_heating_power": "Wähle den Heizleistungs-Sensor des Ventils: Die Vorausschau lernt aus ihm."
+      "lookahead_needs_heating_power": "Wähle den Heizleistungs-Sensor des Ventils: Die Vorausschau lernt aus ihm.",
+      "dosing_needs_heating_power": "Wähle den Heizleistungs-Sensor des Ventils im Abschnitt Ventil-Vorausschau: die dosierte Nachheizung prüft jeden Impuls damit."
     },
     "abort": {
       "trv_in_use": "Dieses Thermostat wird bereits von einem anderen Roomstat-Raum verwendet."
@@ -313,6 +324,9 @@
       "valve_lookahead": {
         "name": "Vorausschau des Ventils"
       },
+      "topup_dose": {
+        "name": "Nachheiz-Verstärkung"
+      },
       "regulation_command": {
         "name": "Befehl an das Ventil"
       },
@@ -325,7 +339,8 @@
           "heat": "Aufheizen",
           "coast": "Ausrollen",
           "hold": "Halten",
-          "stop": "Stopp"
+          "stop": "Stopp",
+          "dose": "Nachheiz-Impuls"
         }
       },
       "activity": {

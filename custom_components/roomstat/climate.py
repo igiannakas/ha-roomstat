@@ -61,6 +61,7 @@ from .climate_controllers import (
     resolve_boost_restore,
     window_startup_action,
 )
+from .climate_dosing import DosingMixin
 from .climate_lookahead import LookaheadMixin
 from .climate_preheat import PREHEAT_LIVE_ATTRIBUTES, PreheatMixin
 from .climate_presets import PresetMixin
@@ -134,8 +135,9 @@ class _AutomationExtraData(ExtraStoredData):
     last change by hand under ``manual_change_ts`` (a preset temperature
     change reloads the room; it still settles before it adds heat),
     preheat's state under ``preheat`` (a heading-home start, an Away held
-    cold, the learned 30-minute recovery, the decision last logged), and the
-    valve look-ahead's learning under ``lookahead``.
+    cold, the learned 30-minute recovery, the decision last logged), the
+    valve look-ahead's learning under ``lookahead``, and dosed top-ups'
+    model, heat in flight and settled state under ``dosing``.
     """
 
     def __init__(
@@ -149,6 +151,7 @@ class _AutomationExtraData(ExtraStoredData):
         manual_change_ts: float | None = None,
         preheat: dict[str, Any] | None = None,
         lookahead: dict[str, Any] | None = None,
+        dosing: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
@@ -159,6 +162,7 @@ class _AutomationExtraData(ExtraStoredData):
         self._manual_change_ts = manual_change_ts
         self._preheat = preheat
         self._lookahead = lookahead
+        self._dosing = dosing
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -179,6 +183,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["preheat"] = self._preheat
         if self._lookahead is not None:
             data["lookahead"] = self._lookahead
+        if self._dosing is not None:
+            data["dosing"] = self._dosing
         return data
 
 
@@ -202,6 +208,7 @@ class RoomstatClimate(
     ActivityMixin,
     PreheatMixin,
     LookaheadMixin,
+    DosingMixin,
     RegulationMixin,
     PresetMixin,
     ScheduleMixin,
@@ -218,7 +225,11 @@ class RoomstatClimate(
     # the Preheat sensor records each decision with what it was made with.
     # The valve look-ahead's correction changes every cycle too.
     _unrecorded_attributes = frozenset(
-        {"activity", "valve_lookahead_c", *PREHEAT_LIVE_ATTRIBUTES}
+        {
+            "activity", "valve_lookahead_c", *PREHEAT_LIVE_ATTRIBUTES,
+            "topup_gain", "topup_inflight_c", "topup_virtual_error_c",
+            "topup_ready_in_min",
+        }
     )
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_TENTHS
@@ -278,6 +289,7 @@ class RoomstatClimate(
         self._slope = SlopeEstimator()
         # The valve look-ahead (climate_lookahead.py; off unless the option is on).
         self._lookahead_setup()
+        self._dosing_setup()
         # The activity log (climate_activity.py): set up before anything logs.
         self._activity_setup()
         # Preheat on the way home (climate_preheat.py, shadow only).
@@ -326,6 +338,11 @@ class RoomstatClimate(
         # one is to be sent once more (OFF_CONFIRM_S, off_confirm_after).
         self._last_heat_command_ts: float | None = None
         self._off_confirm_ts: float | None = None
+        # Why the off is due again: "heat" (it came seconds after a heat
+        # command) or "lost" (the valve kept heating after it), and how many
+        # lost-off resends went out since the last heat command.
+        self._off_confirm_reason: str = "heat"
+        self._lost_off_resends: int = 0
         # Back-off for a TRV that keeps not showing a command it took: how
         # many times in a row it was sent again (resend_grace_s), and whether
         # the next attempt is such a resend.
@@ -515,11 +532,12 @@ class RoomstatClimate(
 
     async def async_reset_autotune(self) -> None:
         """Forget learned values and return to the configured ones (the
-        valve look-ahead's too)."""
+        valve look-ahead's and dosed top-ups' too)."""
         self._autotuner.reset()
         self._apply_active_tuning()
         self._log(_LOGGER).info("auto-tune reset to configured values")
         self._lookahead_reset()
+        self._dosing_reset()
         self._write_state_with_binary_sensor()
 
     @staticmethod
@@ -584,6 +602,9 @@ class RoomstatClimate(
                 self._preheat_restore(extra_dict.get("preheat"), now)
                 # The valve look-ahead learned on this room's TRV.
                 self._lookahead_restore(extra_dict.get("lookahead"), now)
+                # Dosed top-ups: the model learned on this room's TRV, the
+                # heat in flight and the settled state.
+                self._dosing_restore(extra_dict.get("dosing"), now)
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
                 if self._slope.restore(extra_dict.get("slope"), now):
@@ -598,6 +619,8 @@ class RoomstatClimate(
             "" if extra is not None else "; nothing saved to take back",
         )
         self._lookahead_check_setup()
+        self._dosing_check_setup()
+        self._dosing_start()
 
         # Carry on a heat burst (or stop) the TRV is still holding.  What
         # the TRV holds is the last command it took (or one still on its
@@ -607,6 +630,7 @@ class RoomstatClimate(
         # sees it (_resume_pending).
         held = self._held_command(now, self._active_trv())
         self._reg_state.mode = resume_mode(held, self._config)
+        self._dosing_resume()
         self._resume_pending = held is None
         self._last_sent_was_max = held is not None and is_maximum(
             held, self._config.max_target_c
@@ -978,6 +1002,7 @@ class RoomstatClimate(
             self._manual_change_ts,
             self._preheat_as_dict(),
             self._lookahead_state(),
+            self._dosing_state(),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
@@ -1017,6 +1042,7 @@ class RoomstatClimate(
             self._boost_cancel()
             self._boost_cancel = None
         self._cancel_settled_cycle()
+        self._dosing_stop()
         await super().async_will_remove_from_hass()
 
     async def _async_config_entry_updated(self, hass, entry) -> None:
@@ -1361,6 +1387,10 @@ class RoomstatClimate(
         if self._lookahead_enabled:
             attrs["valve_lookahead_min"] = self.valve_lookahead_min
             attrs["valve_lookahead_c"] = round(self._cycle_lookahead_c, 2)
+        # Dosed top-ups (only with the option on): the model's gain, the heat
+        # still on its way, the room as the regulator judges it, and when the
+        # next pulse is due.
+        attrs.update(self._dosing_attributes())
 
         # Sensor resilience diagnostics
         if self._last_valid_room_temp is not None:

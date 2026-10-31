@@ -60,7 +60,7 @@ class TestTraceSensors:
         assert cmd.native_unit_of_measurement == "°C"
         assert err.device_class is None                 # a difference, not a temperature
         assert mode.device_class == "enum"
-        assert set(mode.options) == {"heat", "coast", "hold", "stop"}
+        assert set(mode.options) == {"heat", "coast", "hold", "stop", "dose"}
         assert all(d.entity_category == "diagnostic" for d in (cmd, err, mode))
         assert all(d.key.startswith("regulation_") and not d.needs_autotune
                    for d in (cmd, err, mode))

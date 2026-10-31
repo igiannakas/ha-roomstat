@@ -1084,10 +1084,15 @@ def change_trv(
 def options_form_errors(flat: Mapping[str, Any]) -> dict[str, str]:
     """What the options form must refuse (``base`` error keys, strings.json).
 
-    The valve look-ahead learns from the zone's heating power sensor, so it
-    cannot be switched on without one.  (Keys as in const.py.)"""
-    if flat.get("valve_lookahead") and not flat.get("heating_power_entity_id"):
+    The valve look-ahead learns from the zone's heating power sensor, and
+    dosed top-ups check with it that each pulse opened the valve, so neither
+    can be switched on without one.  (Keys as in const.py.)"""
+    if flat.get("heating_power_entity_id"):
+        return {}
+    if flat.get("valve_lookahead"):
         return {"base": "lookahead_needs_heating_power"}
+    if flat.get("dosed_topups"):
+        return {"base": "dosing_needs_heating_power"}
     return {}
 
 
@@ -1254,6 +1259,25 @@ def off_confirm_after(
     if heat_ts is None or not 0.0 <= off_ts - heat_ts < window_s:
         return None
     return off_ts + window_s
+
+
+def lost_off_due(
+    *, off_ts: float | None, off_taken: bool, heat_since_off: bool,
+    confirm_pending: bool, heating_pct: float | None, reported_ts: float | None,
+    resends: int, after_s: float, min_pct: float, max_resends: int,
+) -> bool:
+    """An off the valve took has been dropped: the zone still reports
+    heating (at least *min_pct*) in a report made *after_s* or more after
+    the off (*reported_ts*: when the state was last reported, a repeat of
+    the same value included), no heat command of ours went out since, no
+    confirmation off is already due, and fewer than *max_resends* were sent
+    for this heat command (parameters.LOST_OFF_AFTER_S)."""
+    values = (off_ts, heating_pct, reported_ts)
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
+        return False
+    if not off_taken or heat_since_off or confirm_pending or resends >= max_resends:
+        return False
+    return heating_pct >= min_pct and reported_ts - off_ts >= after_s
 
 
 @dataclass(frozen=True)

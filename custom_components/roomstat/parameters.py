@@ -62,6 +62,24 @@ MANUAL_SETTLE_S: float = 15.0
 # the zones' heating % after one.
 OFF_CONFIRM_S: float = 60.0
 
+# A valve that still reports heating (the zone's heating %, at least
+# LOST_OFF_MIN_PCT) in a report made LOST_OFF_AFTER_S or more after an off it
+# took, with no heat command of ours since, kept the heat and dropped the
+# off: the off is sent again, at most LOST_OFF_MAX_RESENDS times per heat
+# command (2.15.0, climate_controllers.lost_off_due).  25 Oct 2026: two zones
+# showed off at once while their valves heated at 100 % for 13-15 min; the
+# confirmation off above covers only offs within a minute of a heat command.
+# 8 min: the zone's heating % reaches HA up to 4.6 min after the valve
+# (first reports 10-276 s after a command, 25-30 Oct 2026), and the valve
+# takes 1.5 min to close: a report that late still at 20 % is a valve that
+# kept heating, with 2 min to spare.  3 min sent every off twice on a zone
+# whose reports came 200 s late (2.15.0 review), 7 min again at 370 s.
+# The 25 Oct valves heated 13-15 min.  Needs the zone's heating power
+# sensor.
+LOST_OFF_AFTER_S: float = 480.0
+LOST_OFF_MIN_PCT: float = 20.0
+LOST_OFF_MAX_RESENDS: int = 2
+
 # A TRV whose setpoint still differs from the last command this long after it
 # was sent did not take it (lost on the way, or a Tado schedule block ended
 # the override): the command is sent again.  This replaces blind periodic
@@ -465,6 +483,11 @@ class RegulationConfig:
     lookahead_deadband_c_per_h: float = 0.3
     lookahead_cap_c: float = 1.5
 
+    # Dosed top-ups (dosing.py, an option per room, 2.15.0): in the settled
+    # state the hold is replaced by full-power pulses sized by a Smith
+    # predictor.  See DoseConfig.
+    dose: DoseConfig = field(default_factory=lambda: DoseConfig())
+
     # Fail cold (see CLAUDE.md "Failure handling").  Every command is an
     # overlay that lasts until the next one, so a maximum command left in
     # place by a dead Home Assistant, network or cloud keeps the valve open
@@ -527,6 +550,143 @@ class LookaheadConfig:
     slope_window_s: float = 720.0
     slope_min_samples: int = 4
     slope_max_gap_s: float = 400.0
+
+
+# ---------------------------------------------------------------------------
+# Dosed top-ups (dosing.py, climate_dosing.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DoseConfig:
+    """Dosed top-ups: a Smith predictor sizes full-power pulses in the
+    settled state (2.15.0; design: project doc
+    claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md).
+
+    The model is first order plus dead time on *open-minutes* (minutes the
+    valve is commanded open, booked from Roomstat's own commands): a delay
+    ``theta``, then a first-order spread ``tau``, times a gain in °C of room
+    rise per open-minute.  Fitted on the living room's 19 settled top-ups of
+    25-30 Oct 2026 (tests/fixtures/living_room_topups_2026_10.json): gain
+    median 0.041 (quartiles 0.021 / 0.062), theta 4 min (2 / 9), tau 6 min
+    (4 / 12), every episode within 0.044 °C RMS.  The heat shows after
+    about theta + tau / 2 (the release lead) and has landed after about
+    theta + 2 tau (the loss horizon and the refractory time).
+    """
+
+    # The model.  The auto-tuner's heating rate / 60 replaces the default
+    # gain when known (a heat-up's rise at full power, the same unit).  The
+    # delay and spread start at the top-ups' own values: the tuner's dead
+    # time and coast come from heat-ups on a cold radiator (living room and
+    # study 15+ min against a top-up's 4).  The learner moves them from
+    # there.
+    default_gain_c_per_open_min: float = 0.045
+    default_theta_s: float = 300.0
+    default_tau_s: float = 480.0
+    # Cloud latency (command -> valve moving) and the valve's tail after an
+    # off (off latency + valve travel): the open interval booked for a
+    # command sent at t0 and an off sent at t1 is [t0 + latency, t1 + close].
+    latency_s: float = 60.0
+    close_delay_s: float = 90.0
+    # A pulse whose zone reports no heating % above 0 within this of the
+    # send did nothing: its episode is dropped (not learned from).  Real
+    # first reports came 10-276 s after the command (25-30 Oct 2026; the
+    # cloud polls every ~3 min), so 6 min leaves a slow poll room.
+    opened_check_s: float = 360.0
+
+    # The controller (regulation.py).  The band is centred on the target
+    # (owner, 30 Oct 2026): the dose aims at the target itself; "land short
+    # rather than hot" lives in the learner's asymmetry, not in the aim.
+    aim_under_c: float = 0.0
+    # The minimum pulse is the owner's decision (30 Oct 2026); the maximum
+    # is 0.5 °C at the default gain (anything bigger is a hold or heat-up).
+    pulse_min_s: float = 180.0
+    pulse_max_s: float = 720.0
+    # "Nothing left in flight": the landing phrase only (readiness is the refractory).
+    inflight_min_c: float = 0.02
+    # No new pulse until theta + 2 tau after the last one started, at most
+    # this long.
+    refractory_max_s: float = 1800.0
+    # A shortfall this big, virtual or measured, is a real cold event: the
+    # settled state ends and the ordinary hold or heat-up takes over.  The
+    # measured one too (2.15.0 review): a model that under-doses keeps the
+    # virtual shortfall small while the room sinks (at 2 °C/h it fell to
+    # 0.62 under before the virtual one reached 0.3).
+    unsettle_c: float = 0.3
+    # A pulse that ran to pulse_max_s this many times in a row: the room
+    # needs more than pulses can give (a weak radiator, a cold spell), and
+    # the settled state ends so the ordinary hold takes over (2.15.0
+    # review: pulses at the cap left a room 0.3 °C under for 12 h).
+    capped_pulses_unsettle: int = 2
+    # The settled state's band (entered from a stop with the virtual error
+    # within it; left with the room itself this far above the target), and
+    # how far the target may move before the room is no longer settled on
+    # it.
+    settled_window_c: float = 0.5
+    settled_setpoint_tolerance_c: float = 0.3
+    # A pulse fired early (riding another zone's burn, or with another
+    # room) only when a minimum pulse would land at most this far above
+    # the target.
+    fire_max_overshoot_c: float = 0.05
+
+    # The pulse coordinator (dosing.PulseCoordinator; the boiler is an
+    # on/off type, so radiators should share its burns).  Ride another
+    # zone's burn once at or below the target; fire with another room's
+    # pulse when due within this fraction of the visible dead time; a pulse
+    # counts as just started for together_window_s; a zone's heating report
+    # counts while it is at most zone_report_max_age_s old.  5 min: the
+    # cloud polls about every 3 min, so at 3 min another zone's burn often
+    # read as stale; simulated (four rooms, real - 4 °C, two seeds) 300 s
+    # was equal or better on every count: boiler calls 3.3 -> 3.0 and
+    # 4.3 -> 3.5 a day, single-radiator calls 0.50 -> 0.44 and 0.62 -> 0.48,
+    # peaks no higher.
+    ride_burn_min_error_c: float = 0.0
+    fire_together_lead_frac: float = 1.0
+    together_window_s: float = 120.0
+    zone_report_max_age_s: float = 300.0
+
+    # The learner (dosing.DoseLearner): each episode (a pulse to the room's
+    # first peak) is fitted by a grid over theta and tau with the
+    # closed-form gain and the room's loss fitted with it.
+    episode_max_s: float = 3600.0
+    episodes_kept: int = 6
+    min_open_min: float = 2.0
+    fit_theta_s: tuple[float, float, float] = (120.0, 1200.0, 60.0)
+    fit_tau_s: tuple[float, ...] = (
+        240.0, 360.0, 480.0, 600.0, 720.0, 900.0, 1080.0, 1320.0, 1560.0, 1800.0,
+    )
+    fit_max_rms_c: float = 0.06
+    # The learner keeps this much of the room's readings and the valve's
+    # open intervals, so each episode's fit can include the heat of earlier
+    # pulses still arriving and estimate the room's loss with it.
+    fit_history_s: float = 5400.0
+    # Bounds: the gain within these multiples of the default (seeded) gain;
+    # an episode's gain is accepted within these multiples of the gain in
+    # use.
+    gain_bounds: tuple[float, float] = (0.3, 3.0)
+    gain_accept: tuple[float, float] = (0.2, 4.0)
+    theta_bounds_s: tuple[float, float] = (120.0, 1200.0)
+    tau_bounds_s: tuple[float, float] = (180.0, 1800.0)
+    # Steps towards the median of the last episodes.  The gain moves
+    # asymmetrically: up (smaller doses) half the way at once, down
+    # (bigger doses) 15 % of the way, at most every 12 h.  The delay and the
+    # spread move half the way either way: neither direction is the safe
+    # one (longer: an earlier, bigger pulse; shorter: the next pulse before
+    # this one's heat has landed), so they follow the room (2.15.0 review:
+    # a 15-min delay seeded from the heat-ups landed +0.15 and took days to
+    # walk back at the slow rate).
+    step_safe_frac: float = 0.5
+    step_more_frac: float = 0.15
+    step_more_interval_s: float = 43200.0
+    # The aim bias (°C added to the need) moves this fraction of each
+    # landing's miss, within +-bias_clamp_c.
+    bias_gain: float = 0.3
+    bias_target_c: float = 0.0
+    bias_clamp_c: float = 0.25
+    # Two landings in a row above this: the gain x 1.5 and the bias -0.1
+    # at once.
+    watchdog_peak_c: float = 0.3
+    # Stage 2 (logged only for now): the gain against the radiator's warmth.
+    radiator_term_min_episodes: int = 12
 
 
 # ---------------------------------------------------------------------------

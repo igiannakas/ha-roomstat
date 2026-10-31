@@ -268,9 +268,9 @@ class _Hass:
 
 
 class _Entry:
-    def __init__(self, options):
-        self.entry_id = "entry"
-        self.title = "Test"
+    def __init__(self, options, entry_id="entry", title="Test"):
+        self.entry_id = entry_id
+        self.title = title
         self.data = {"source_entity_id": TRV}
         self.options = options
 
@@ -298,7 +298,7 @@ _BASE_OPTIONS = {
 
 
 def _make_entity(options=None, *, window=True, presence=False, summer=False,
-                 schedule=False):
+                 schedule=False, entry_id="entry", title="Test"):
     opts = dict(_BASE_OPTIONS)
     if window:
         opts["window_sensor_id"] = WINDOW
@@ -310,7 +310,8 @@ def _make_entity(options=None, *, window=True, presence=False, summer=False,
         opts["schedule_entity_id"] = SCHEDULE
     opts.update(options or {})
     ent = _climate.RoomstatClimate(
-        coordinator=_Coordinator(), unique_id="u", config_entry=_Entry(opts)
+        coordinator=_Coordinator(), unique_id="u",
+        config_entry=_Entry(opts, entry_id=entry_id, title=title),
     )
     ent.hass = _Hass()
     return ent
@@ -357,8 +358,12 @@ def _settle(clock=None):
 
 
 def reset_timers() -> None:
-    """Forget all recorded call_later timers (call before/after each test)."""
+    """Forget all recorded call_later timers (call before/after each test),
+    and the house's pulse coordinator (one per process, like the pacer)."""
     _CALL_LATER.clear()
+    mod = sys.modules.get("roomstat_e2e.climate_dosing")
+    if mod is not None:
+        mod.PULSE_COORDINATOR.reset()
 
 
 async def _start(ent, *, last_state=None, extra=None):

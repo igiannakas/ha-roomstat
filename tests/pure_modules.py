@@ -1,5 +1,5 @@
 """Load the HA-free modules (parameters, lookahead, regulation, autotune,
-climate_controllers, activity, preheat) for tests.
+climate_controllers, activity, preheat, dosing) for tests.
 
 Not a test module.  Loads them as ``roomstat_pure.*`` so relative imports
 work without importing the package ``__init__`` (which needs Home Assistant).
@@ -38,3 +38,4 @@ autotune = _load("autotune")
 climate_controllers = _load("climate_controllers")
 activity = _load("activity")
 preheat = _load("preheat")
+dosing = _load("dosing")

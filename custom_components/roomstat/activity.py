@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .parameters import RegulationConfig
-from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD, MODE_STOP, outlook
+from .regulation import MODE_COAST, MODE_DOSE, MODE_HEAT, MODE_HOLD, MODE_STOP, outlook
 
 MAX_LINES = 30
 # While a decision stays the same and only its numbers move (the room, the
@@ -259,6 +259,16 @@ class CycleFacts:
     # and how fast the valve's reading was falling.
     lookahead_c: float = 0.0
     trv_fall_c_per_h: float | None = None
+    # Dosed top-ups (dosing.py): the settled state, the pulse and the heat
+    # still on its way (the Smith predictor's in-flight rise).
+    dose_settled: bool = False
+    dose_pulse_s: float | None = None     # how long the running pulse has run
+    dose_need_c: float | None = None      # what it still has to cover
+    dose_inflight_c: float = 0.0
+    dose_fired_by: str | None = None      # "release" / "burn" / "together" (the cycle a pulse starts)
+    dose_with: str | None = None          # the other room, when the coordinator chose the moment
+    dose_end: str | None = None           # why a pulse ended (the cycle it ends)
+    dose_ready_in_s: float | None = None  # until the next pulse is due, while nothing is in flight
 
 
 def _signed(value: float, digits: int) -> str:
@@ -300,6 +310,43 @@ def _minutes(seconds: float) -> str:
     return f"{seconds / 60:.0f} min"
 
 
+_DOSE_ENDS = {
+    "covered": "the dose is on its way",
+    "max": "the longest pulse",
+    "stop_rule": "the room rose sooner than expected",
+    "unsettled": "no longer settled",
+}
+
+
+def _dose_phrase(f: CycleFacts, e: float, trend: str, cfg: RegulationConfig) -> str:
+    """A dosed top-up (dosing.py): a pulse, its end, the landing, or the
+    settled room waiting for its next pulse."""
+    inflight = max(0.0, f.dose_inflight_c)
+    need = f.dose_need_c if f.dose_need_c is not None else 0.0
+    if f.mode == MODE_DOSE:
+        if f.dose_fired_by is not None:
+            why = {
+                "burn": f"riding the {f.dose_with or 'other room'}'s call for heat",
+                "together": f"with the {f.dose_with or 'other room'}'s pulse",
+            }.get(f.dose_fired_by, trend)
+            return (f"Top-up pulse: {_gap(e, 2)}, {why}; full power until "
+                    f"{need:.2f} is on its way (the cooling until it lands included)")
+        ran = (f.dose_pulse_s or 0.0) / 60.0
+        return (f"Top-up pulse: {ran:.1f} min at full power, {inflight:.2f} on its way, "
+                f"{max(0.0, need):.2f} still to cover")
+    if f.dose_end is not None:
+        return (f"Top-up ended ({_DOSE_ENDS.get(f.dose_end, f.dose_end)}): valve off, "
+                f"{inflight:.2f} on its way")
+    if inflight >= cfg.dose.inflight_min_c:
+        return f"Valve off, landing: {inflight:.2f} still on its way, {_gap(e, 2)}, {trend}"
+    if f.dose_ready_in_s is not None:
+        when = ("now" if f.dose_ready_in_s < 60.0
+                else f"in about {_minutes(f.dose_ready_in_s)}")
+        return f"Valve off (settled): {_gap(e, 2)}, {trend}; next top-up {when}"
+    return (f"Valve off (settled): {_gap(e, 2)}, {trend}; next top-up once it cools "
+            "and the last pulse has landed")
+
+
 def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
     """What the regulator did and why (the regulated path)."""
     e = f.error_c if f.error_c is not None else 0.0
@@ -318,6 +365,9 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
                     "leftover heat covers the rest")
         return (f"Full heat: {_gap(e)}, {trend}; stops once the leftover heat covers "
                 f"the rest (stopping now would leave {o.landing_c:.1f})")
+
+    if f.mode == MODE_DOSE or (f.mode == MODE_STOP and f.dose_settled):
+        return _dose_phrase(f, e, trend, cfg)
 
     over = (f.setpoint_c or 0.0) + cfg.stop_over_c       # the stop's line
     if f.mode == MODE_COAST:
@@ -443,7 +493,9 @@ def decision_key(f: CycleFacts, cfg: RegulationConfig) -> str:
     missing = ("room" if f.room_c is None else "valve") if f.path == PATH_WAITING else ""
     # An open window or its re-warm wait reads the same whatever the mode.
     mode = "" if f.window in (WINDOW_OPEN, WINDOW_REWARM) else (
-        (f.mode or "") + ("+push" if f.full_push else ""))
+        (f.mode or "") + ("+push" if f.full_push else "")
+        + ("+landing" if f.dose_settled and f.dose_inflight_c >= cfg.dose.inflight_min_c
+           else "+settled" if f.dose_settled else ""))
     return "|".join((
         f.path, missing, mode, f.window or "", _num(f.setpoint_c), f.target_label,
         f.tado, note_kind, "held" if f.room_held else "", "gap" if f.room_bridged else "",
