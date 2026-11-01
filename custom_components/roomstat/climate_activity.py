@@ -38,6 +38,7 @@ from .activity import (
     preset_name,
 )
 from .climate_controllers import is_off_command
+from .preheat import PREHEAT_LABELS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -204,6 +205,10 @@ class ActivityMixin:
         label = preset_name(self._preset_mode)
         if self._presence_ctrl.is_active:
             label += ", nobody home"
+            preheat = self._preheat_target_c()
+            if preheat is not None:
+                state = self._preheat_decision.state if self._preheat_decision else None
+                label += f", preheat: {PREHEAT_LABELS.get(state, 'on')}"
         elif self._presence_ctrl.override_active:
             label += (
                 ", until someone is home"

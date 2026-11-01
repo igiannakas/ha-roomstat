@@ -1,10 +1,12 @@
-"""Preheat on the way home: what each room would aim for while nobody is home.
+"""Preheat on the way home: what each room aims for while nobody is home.
 
 HA-free, like regulation.py and autotune.py.  The climate entity
 (climate_preheat.py) gathers the inputs every regulation cycle and whenever
 one of the three Home ETA entities changes, and logs every change of
-decision.  In this version the decision is only observed ("shadow"): the
-room stays at Away and no command changes.
+decision.  Three modes (option ``preheat_mode``): **off**; **shadow**, the
+decision only observed (the room stays at Away; 2.11.0, a week of decisions
+gathered first); **on** (2.18.0), the decision's target is the room's
+setpoint while away mode is in charge (:func:`target_in_use`).
 
 The rule, per room, while away mode is in charge (nobody home, no change by
 hand, no window, heating on):
@@ -55,10 +57,11 @@ from typing import Any
 from .parameters import PreheatConfig, RecoveryConfig
 
 # Modes (option ``preheat_mode``).  Shadow works everything out and logs
-# it, and leaves the room at Away.
+# it, and leaves the room at Away; on heats to the decision's target.
 MODE_OFF = "off"
 MODE_SHADOW = "shadow"
-MODES = (MODE_OFF, MODE_SHADOW)
+MODE_ON = "on"
+MODES = (MODE_OFF, MODE_SHADOW, MODE_ON)
 
 # Decisions (the preheat sensor's states).
 STATE_OFF = "off"               # preheat switched off for this room
@@ -70,6 +73,14 @@ STATE_DUE = "due"               # heading home, within the heat-up time
 STATES = (
     STATE_OFF, STATE_INACTIVE, STATE_WAITING, STATE_NEARBY, STATE_CLOSE, STATE_DUE,
 )
+# The decisions that aim warmer than Away, and what the activity log's
+# decision line calls them in mode on (``Away, nobody home, preheat: …``).
+HEATING_STATES = (STATE_NEARBY, STATE_CLOSE, STATE_DUE)
+PREHEAT_LABELS = {
+    STATE_NEARBY: "someone nearby",
+    STATE_CLOSE: "someone close",
+    STATE_DUE: "heading home",
+}
 
 # Why away mode is not in charge (``PreheatInputs.inactive_reason``).
 INACTIVE_SUMMER = "summer"
@@ -390,6 +401,11 @@ class RecoveryLearner:
             and prev is not None
             and target - prev >= cfg.min_step_c - 1e-9
             and target - room >= cfg.min_deficit_c - 1e-9
+            # Not a step during a heat-up to the previous target (preheat's
+            # nearby -> close, 2.18.0 review: 0.93 °C on a hot radiator for a
+            # room that recovers 0.16 from cold).  The usual steps start from
+            # a room at or near its previous target (06:00, within 0.1-0.2).
+            and prev - room < cfg.min_deficit_c - 1e-9
             and (
                 self._last_window_ts is None
                 or ts - self._last_window_ts >= cfg.window_settle_s
@@ -771,17 +787,43 @@ def _min(seconds: float) -> int:
     return int(round(seconds / 60.0))
 
 
+def target_in_use(decision: PreheatDecision | None, away_c: float) -> float | None:
+    """The setpoint preheat gives the room in mode on, or None (Away stays).
+
+    Only a decision that aims warmer than Away (nearby, close, due) with a
+    finite target above ``away_c`` sets one; anything else, a missing
+    decision included, leaves the room at Away.  The caller checks that away
+    mode is in charge right now (the decision is from the last evaluation).
+    """
+    if decision is None or decision.state not in HEATING_STATES:
+        return None
+    target = decision.target_c
+    if not _finite(target) or not _finite(away_c) or target <= away_c + _TEMP_EPS:
+        return None
+    return float(target)
+
+
+def _verb(live: bool, base: str) -> str:
+    """'would heat' in shadow, 'heats' in mode on."""
+    return f"{base}s" if live else f"would {base}"
+
+
 def describe(
     decision: PreheatDecision,
     previous: PreheatDecision | None,
     cfg: PreheatConfig,
     hhmm: Callable[[float], str],
+    *,
+    live: bool = False,
 ) -> str | None:
     """The log line for a change of decision (None: nothing worth a line).
 
     ``previous``: the decision last logged.  Coming from off or inactive to
-    inactive (another reason) is not worth a line.
+    inactive (another reason) is not worth a line.  ``live``: mode on, the
+    room does what the line says ("it heats to"); otherwise it only would
+    ("it would heat to").
     """
+    heat, stop, start = (_verb(live, v) for v in ("heat", "stop", "start"))
     d = decision
     state = d.state
     prev_state = previous.state if previous is not None else None
@@ -802,25 +844,25 @@ def describe(
         parts.append(
             f"the expected arrival slipped to {hhmm(d.arrival_ts)}"
             + (f" ({late} min later than when it started)" if late is not None else "")
-            + ", so it would stop heating"
+            + f", so it {stop} heating"
         )
     elif d.ended == ENDED_LOST:
         parts.append(
             f"the trip home is over (no expected arrival for "
-            f"{_min(cfg.arrival_grace_s)} min), so it would stop heating"
+            f"{_min(cfg.arrival_grace_s)} min), so it {stop} heating"
         )
     elif d.ended == ENDED_CAP:
         parts.append(
-            f"it would stop: {_min(cfg.cap_s)} min since it first started for "
+            f"it {stop}: {_min(cfg.cap_s)} min since it first started for "
             f"this trip home"
         )
 
     target = d.target_c if d.target_c is not None else 0.0
     if state == STATE_DUE:
-        parts.append(_due_text(d, cfg, hhmm))
+        parts.append(_due_text(d, cfg, hhmm, heat))
     elif state == STATE_CLOSE:
         parts.append(
-            f"someone is close to home: it would heat to {target:.1f} °C, the "
+            f"someone is close to home: it {heat} to {target:.1f} °C, the "
             f"temperature coming home restores"
         )
     elif state == STATE_NEARBY:
@@ -830,7 +872,7 @@ def describe(
             else "the default until it has learned what it recovers in 30 min"
         )
         parts.append(
-            f"someone is nearby: it would heat to {target:.1f} °C "
+            f"someone is nearby: it {heat} to {target:.1f} °C "
             f"({_c(d.scheduled_c)} less {rec:.2f} °C, {learned})"
         )
     else:  # STATE_WAITING
@@ -847,7 +889,7 @@ def describe(
         # has had its longest preheat (then it won't start again).
         if d.arrival_ts is not None and d.due_ts is not None and not d.capped:
             parts.append(
-                f"for the expected arrival at {hhmm(d.arrival_ts)} it would start "
+                f"for the expected arrival at {hhmm(d.arrival_ts)} it {start} "
                 f"at {hhmm(d.due_ts)}"
             )
     if d.arrival_ignored:
@@ -862,11 +904,17 @@ def _c(value: float | None) -> str:
     return "?" if value is None else f"{value:.1f}"
 
 
-def _due_text(d: PreheatDecision, cfg: PreheatConfig, hhmm: Callable[[float], str]) -> str:
+def _due_text(
+    d: PreheatDecision,
+    cfg: PreheatConfig,
+    hhmm: Callable[[float], str],
+    heat: str = "would heat",
+) -> str:
     """'heading home: it would heat to 20.0 °C now for the expected arrival at
     18:42: from 17.4 °C it needs 106 min (start-up 22 min, 2.6 °C at 0.8 ×
-    2.5 °C/h, lead 5 min)' (the living room on 23 Oct 2026)."""
-    head = f"heading home: it would heat to {_c(d.target_c)} °C now"
+    2.5 °C/h, lead 5 min)' (the living room on 23 Oct 2026; in mode on 'it
+    heats to')."""
+    head = f"heading home: it {heat} to {_c(d.target_c)} °C now"
     if d.arrival_ts is not None:
         head += f" for the expected arrival at {hhmm(d.arrival_ts)}"
     if d.needed_s is None or d.room_c is None or d.scheduled_c is None:

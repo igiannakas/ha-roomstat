@@ -6,12 +6,16 @@ home would restore, the room's temperature, the auto-tuner's heating rate
 and dead time, the learned 30-minute recovery) and three Home ETA entities
 (the first expected arrival, someone close to home, someone nearby).
 
-**Shadow only (2.11.0).**  The decision is worked out at the start of every
-regulation cycle and whenever one of the three entities changes, shown (the
+**Modes.**  The decision is worked out at the start of every regulation
+cycle and whenever one of the three entities changes, shown (the
 thermostat's ``preheat_*`` attributes, the room's Preheat sensor) and logged
-(the activity log and the HA log, one line per change of decision), but the
-room stays at Away: nothing here touches the setpoint or a command.  The
-owner gathers a week of decisions first (25 Oct 2026).
+(the activity log and the HA log, one line per change of decision).  In
+**shadow** (2.11.0, a week of decisions gathered first) that is all: the
+room stays at Away.  In **on** (2.18.0, owner, 1 Nov 2026) the decision's
+target is the room's setpoint while away mode is in charge
+(:meth:`_preheat_target_c`, read by ``_effective_setpoint``), and a change
+between cycles that moves it (a Home ETA entity, the schedule while away,
+back to automatic) runs a cycle at once (:meth:`_preheat_refresh`).
 
 **Changes by hand while nobody is home** (2.12.0, owner, 27 Oct 2026):
 Away or Resume schedule is back to automatic, which is where preheat works;
@@ -51,6 +55,7 @@ from .const import (
     CONF_PRESENCE_SENSOR_ID,
     PRESET_FROST_PROTECTION,
 )
+from .parameters import PREHEAT_SETTLE_S
 from .preheat import (
     INACTIVE_CHANGE_BY_HAND,
     INACTIVE_HOME,
@@ -61,6 +66,7 @@ from .preheat import (
     INACTIVE_SUMMER,
     INACTIVE_WINDOW,
     MODE_OFF,
+    MODE_ON,
     MODE_SHADOW,
     MODES,
     LoggedDecision,
@@ -73,6 +79,7 @@ from .preheat import (
     describe,
     parse_arrival,
     parse_on_off,
+    target_in_use,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,8 +95,8 @@ PREHEAT_ENTITY_KEYS = (
 # with.
 PREHEAT_LIVE_ATTRIBUTES = frozenset({
     "preheat_mode", "preheat_state", "preheat_inactive_reason", "preheat_target_c",
-    "preheat_recovery_temp_c", "preheat_needed_min", "preheat_due_at",
-    "preheat_arrival_at", "preheat_since",
+    "preheat_heating_to_c", "preheat_recovery_temp_c", "preheat_needed_min",
+    "preheat_due_at", "preheat_arrival_at", "preheat_since",
 })
 
 
@@ -132,11 +139,40 @@ class PreheatMixin:
         # Set by the regulated path of each cycle: a cycle that never fed the
         # learner drops the episode being measured (_async_regulation_cycle).
         self._recovery_fed: bool = False
+        # When the target preheat gives the room last changed (mode on): more
+        # heat waits PREHEAT_SETTLE_S from then (_preheat_settle_remaining_s).
+        self._preheat_change_ts: float = 0.0
+        # The entity was removed (a reload): a retarget's cycle queued just
+        # before runs nothing (as dosing's wakes, _dosing_live).
+        self._preheat_removed: bool = False
 
     @property
     def preheat_mode(self) -> str:
-        """off / shadow."""
+        """off / shadow / on."""
         return self._preheat_mode
+
+    def _preheat_target_c(self) -> float | None:
+        """The setpoint preheat gives the room right now, or None (Away).
+
+        Mode on only, and only while away mode itself is in charge: nobody
+        home, the room at Away (a change by hand, or a window's frost
+        protection and its close delay, are another preset), heating on, no
+        summer lock.  The decision is the one last evaluated (at the start
+        of every cycle, and on a change of its inputs), so these are checked
+        here too: a window or a change by hand between evaluations takes the
+        room off it at once, and the thermostat and the activity line never
+        show a target the room is not getting.
+        """
+        if self._preheat_mode != MODE_ON:
+            return None
+        if (
+            self._summer_active
+            or self._hvac_mode != HVACMode.HEAT
+            or self._preset_mode != PRESET_AWAY
+            or not self._presence_ctrl.is_active
+        ):
+            return None
+        return target_in_use(self._preheat_decision, self._config.presets.away_target_c)
 
     def _preheat_prefix(self) -> str:
         return "preheat (shadow)" if self._preheat_mode == MODE_SHADOW else "preheat"
@@ -222,24 +258,32 @@ class PreheatMixin:
         )
 
     # -- the decision ------------------------------------------------------
-    def _preheat_evaluate(self, now: float, *, write: bool = False) -> None:
-        """Work out what the room would aim for; log a change of decision.
+    def _preheat_evaluate(self, now: float, *, write: bool = False) -> bool:
+        """Work out what the room aims for; log a change of decision.
 
-        Never raises: preheat must not stop the regulation.  ``write``: also
-        write the thermostat's state (an input changed between cycles).
+        Returns whether the setpoint preheat gives the room
+        (:meth:`_preheat_target_c`) changed: only ever in mode on.  Never
+        raises: preheat must not stop the regulation (False then: the
+        target in use stays the last one worked out).  ``write``: also write
+        the thermostat's state (an input changed between cycles).
         """
         try:
+            before = self._preheat_target_c()
             decision = self._preheat.evaluate(self._preheat_inputs(now))
             self._preheat_decision = decision
+            changed = self._preheat_target_c() != before
+            if changed:
+                self._preheat_change_ts = now
             logged = self._preheat_logged
             if logged is not None and logged.decision.key == decision.key:
                 self._preheat_failure = None
-                return
+                return changed
             line = describe(
                 decision,
                 logged.decision if logged is not None else None,
                 self._preheat_cfg,
                 lambda ts: local_hhmm(ts, now),
+                live=self._preheat_mode == MODE_ON,
             )
             self._preheat_logged = LoggedDecision(
                 decision, now, decision_attributes(decision, _iso)
@@ -252,16 +296,52 @@ class PreheatMixin:
             if write:
                 self.async_write_ha_state()
             self._preheat_failure = None
+            return changed
         except Exception as err:  # noqa: BLE001 - preheat must never stop the regulation
             what = f"{type(err).__name__}: {err}"
             if what != self._preheat_failure:
                 self._preheat_failure = what
                 _LOGGER.exception("%s: preheat failed", self._config_entry.title)
+            # Fail cold: a decision that can't be worked out again must not
+            # keep the last one heating with no cap, slip or grace (2.18.0
+            # review: 8 h at 20.5 °C).  The room is at Away until it can.
+            heated = self._preheat_decision is not None and self._preheat_target_c() is not None
+            self._preheat_decision = None
+            if heated:
+                self._preheat_change_ts = now
+            return heated
+
+    def _preheat_settle_remaining_s(self, now: float) -> float:
+        """Seconds until a change of the target preheat gives the room has
+        stood PREHEAT_SETTLE_S (0: it has).  A clock that went back ends it."""
+        since = now - self._preheat_change_ts
+        if since < 0 or since >= PREHEAT_SETTLE_S:
+            return 0.0
+        return PREHEAT_SETTLE_S - since
+
+    def _preheat_refresh(self, trigger: str, *, write: bool = True) -> None:
+        """Decide again now, between cycles (an input changed).
+
+        In mode on, a decision that moves the setpoint preheat gives the room
+        runs a regulation cycle at once, so the valve hears of it now rather
+        than at the next minute; one that leaves it where it was runs none
+        (a new expected arrival every few minutes changes nothing for the
+        valve until the room is due).  ``write``: write the thermostat's
+        state on a new decision (False: the caller writes it next).
+        """
+        if self._preheat_evaluate(time.time(), write=write):
+            self.hass.async_create_task(self._async_preheat_cycle(trigger))
+
+    async def _async_preheat_cycle(self, trigger: str) -> None:
+        """The cycle a retarget asked for, unless the room was removed since."""
+        if self._preheat_removed or self.hass is None:
+            return
+        await self._async_regulation_cycle(trigger=trigger)
 
     @callback
     def _async_preheat_input_changed(self, event) -> None:
         """A Home ETA entity changed: decide again now, not at the next cycle."""
-        self._preheat_evaluate(time.time(), write=True)
+        self._preheat_refresh("preheat")
 
     # -- the 30-minute recovery -------------------------------------------
     def _preheat_learn(
@@ -381,6 +461,7 @@ class PreheatMixin:
             "preheat_state": d.state if d is not None else None,
             "preheat_inactive_reason": d.inactive_reason if d is not None else None,
             "preheat_target_c": d.target_c if d is not None else None,
+            "preheat_heating_to_c": self._preheat_target_c(),
             "preheat_recovery_temp_c": d.recovery_temp_c if d is not None else None,
             "preheat_needed_min": (
                 round(d.needed_s / 60.0, 1) if d is not None and d.needed_s is not None else None
@@ -394,6 +475,7 @@ class PreheatMixin:
         d = self._preheat_decision
         return {
             "mode": self._preheat_mode,
+            "heating_to_c": self._preheat_target_c(),
             "config": dict(vars(self._preheat_cfg)),
             "decision": decision_attributes(d, _iso) if d is not None else None,
             "state": d.state if d is not None else None,

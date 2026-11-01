@@ -588,6 +588,46 @@ class TestDescribe:
         assert home.key != off.key
         assert self._line(off, home) is None              # but no line for it
 
+    def test_live_says_what_it_does(self):
+        """Mode on (2.18.0): 'it heats to', 'it stops', 'it starts' — every
+        line otherwise as in shadow."""
+        due = P.PreheatController().evaluate(inputs(T0, room_c=17.0, arrival_ts=T0 + 60 * MIN))
+        assert self._line(due, live=True) == (
+            "heading home: it heats to 20.0 °C now for the expected arrival "
+            "at T+60: from 17.0 °C it needs 115 min (start-up 20 min, 3.0 °C at "
+            "0.8 × 2.5 °C/h, lead 5 min)"
+        )
+        c = P.PreheatController()
+        nearby = c.evaluate(inputs(T0, nearby=True))
+        assert self._line(nearby, live=True).startswith("someone is nearby: it heats to 19.4 °C")
+        close = c.evaluate(inputs(T0 + MIN, close=True))
+        assert self._line(close, live=True).startswith(
+            "someone is close to home: it heats to 20.0 °C")
+        c = P.PreheatController()
+        prev = c.evaluate(inputs(T0, room_c=19.0, arrival_ts=T0 + 50 * MIN))
+        slipped = c.evaluate(inputs(T0 + 5 * MIN, room_c=19.4, arrival_ts=T0 + 75 * MIN))
+        assert self._line(slipped, prev, live=True) == (
+            "the expected arrival slipped to T+75 (25 min later than when it "
+            "started), so it stops heating; back to Away 16.0 °C; for the "
+            "expected arrival at T+75 it starts at T+32"
+        )
+        c = P.PreheatController()
+        prev = c.evaluate(inputs(T0, arrival_ts=T0 + 30 * MIN))
+        c.evaluate(inputs(T0 + MIN, arrival_ts=None))
+        lost = c.evaluate(inputs(T0 + 11 * MIN, arrival_ts=None))
+        assert self._line(lost, prev, live=True).startswith(
+            "the trip home is over (no expected arrival for 10 min), so it stops heating")
+        c = P.PreheatController()
+        prev = c.evaluate(inputs(T0, room_c=5.0, rate_c_per_h=0.3, arrival_ts=T0 + 9 * 3600))
+        cap = c.evaluate(inputs(T0 + 4 * 3600, room_c=5.0, rate_c_per_h=0.3,
+                                arrival_ts=T0 + 9 * 3600))
+        assert self._line(cap, prev, live=True).startswith(
+            "it stops: 240 min since it first started for this trip home")
+        for d, before in ((due, None), (nearby, None), (close, None), (slipped, prev),
+                          (lost, prev), (cap, prev)):
+            assert "would" not in self._line(d, before, live=True)
+            assert "would" in self._line(d, before)
+
     def test_logged_decision_round_trip(self):
         d = P.PreheatController().evaluate(inputs(T0, nearby=True))
         logged = P.LoggedDecision(d, T0, {"target_c": 19.4})
@@ -804,3 +844,57 @@ class TestOptions:
     @pytest.mark.parametrize("bad", [None, True, "x", math.nan, math.inf, -1, 0.1, 99, [1]])
     def test_bad_values_keep_the_default(self, bad):
         assert P.config_from_options({"preheat_rate_factor": bad}).rate_factor == 0.8
+
+
+# ===========================================================================
+# Mode on: the setpoint a decision gives the room (2.18.0)
+# ===========================================================================
+
+class TestTargetInUse:
+    def test_the_heating_decisions_set_their_target(self):
+        for state in (P.STATE_NEARBY, P.STATE_CLOSE, P.STATE_DUE):
+            assert P.target_in_use(P.PreheatDecision(state, target_c=19.4), 16.0) == 19.4
+
+    @pytest.mark.parametrize("state", [P.STATE_OFF, P.STATE_INACTIVE, P.STATE_WAITING])
+    def test_the_others_leave_away(self, state):
+        assert P.target_in_use(P.PreheatDecision(state, target_c=20.0), 16.0) is None
+
+    @pytest.mark.parametrize("target", [None, 16.0, 16.04, 12.0, math.nan, math.inf, True])
+    def test_nothing_warmer_than_away_or_nothing_usable_leaves_away(self, target):
+        assert P.target_in_use(P.PreheatDecision(P.STATE_NEARBY, target_c=target), 16.0) is None
+
+    def test_no_decision_leaves_away(self):
+        assert P.target_in_use(None, 16.0) is None
+        assert P.target_in_use(P.PreheatDecision(P.STATE_DUE, target_c=20.0), math.nan) is None
+
+    def test_the_modes(self):
+        assert P.MODES == ("off", "shadow", "on")
+        assert set(P.PREHEAT_LABELS) == set(P.HEATING_STATES)
+
+
+class TestRecoveryFromASettledRoom:
+    """2.18.0 review: a step during a heat-up to the previous target (preheat's
+    nearby -> close) starts on a hot radiator and overstates the recovery."""
+
+    def _run(self, prev_target, room0, target, rise_per_min=0.03):
+        learner = P.RecoveryLearner()
+        learner.observe(T0, prev_target, room0, usable=True, window=False)
+        room = room0
+        for minute in range(1, 32):
+            if minute > 1:
+                room += rise_per_min
+            learner.observe(T0 + minute * MIN, target if minute >= 1 else prev_target,
+                            room, usable=True, window=False)
+        return learner
+
+    def test_a_step_from_a_settled_room_is_learned(self):
+        assert len(self._run(18.5, 18.4, 20.5).episodes) == 1      # 06:00, Night -> Comfort
+        assert len(self._run(16.0, 17.4, 20.0).episodes) == 1      # back from Away, cooled
+
+    def test_a_step_during_a_heat_up_is_not(self):
+        assert self._run(20.0, 18.5, 20.5).episodes == []          # nearby -> close mid-ramp
+        assert not self._run(18.5, 17.9, 20.5).running             # 0.6 below Night
+
+    def test_the_boundary(self):
+        assert len(self._run(18.5, 18.01, 20.5).episodes) == 1     # 0.49 below
+        assert self._run(18.5, 18.0, 20.5).episodes == []          # 0.5 below

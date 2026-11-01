@@ -580,8 +580,10 @@ class TestRestart:
 # The 30-minute recovery
 # ===========================================================================
 
-def _heat_up_at_home(ent, clock, *, rise_per_min, start=17.9):
-    """Night (18.5) to Comfort (20.5) with the room at *start*, rising."""
+def _heat_up_at_home(ent, clock, *, rise_per_min, start=18.4):
+    """Night (18.5) to Comfort (20.5) with the room at *start*, rising (by
+    default settled at Night, as at 06:00; one still 0.5 °C or more below
+    Night is mid heat-up and not learned from, 2.18.0)."""
     _feed(ent, start)
     _cycle(ent)
     ent.hass.set(SCHEDULE, "comfort")
@@ -610,7 +612,7 @@ class TestRecovery:
         assert sensor.native_value is None            # one heat-up is not enough
         line = [e.text for e in ent._activity.entries() if e.text.startswith("30-min")][0]
         assert line.startswith("30-min recovery: +0.90 °C in the first 30 min after the "
-                               "target rose to 20.5 (2.6 below); not enough yet to use")
+                               "target rose to 20.5 (2.1 below); not enough yet to use")
         clock.tick(3600)
         _heat_up_at_home(ent, clock, rise_per_min=0.02)
         assert sensor.native_value == pytest.approx(0.75, abs=0.02)
@@ -652,7 +654,7 @@ class TestRecovery:
     def test_a_window_spoils_it(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity(schedule="night")
-        _feed(ent, 17.9)
+        _feed(ent, 18.4)
         _cycle(ent)
         ent.hass.set(SCHEDULE, "comfort")
         ent._async_schedule_changed(_event("comfort"))
@@ -737,7 +739,7 @@ class TestReviewFindings:
     def test_the_room_switched_off_mid_heat_up_spoils_the_recovery(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity(schedule="night")
-        _feed(ent, 17.9)
+        _feed(ent, 18.4)
         _cycle(ent)
         ent.hass.set(SCHEDULE, "comfort")
         ent._async_schedule_changed(_event("comfort"))
@@ -758,7 +760,7 @@ class TestReviewFindings:
     def test_a_bridged_reading_spoils_the_recovery(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity(schedule="night")
-        _feed(ent, 17.9)
+        _feed(ent, 18.4)
         _cycle(ent)
         ent.hass.set(SCHEDULE, "comfort")
         ent._async_schedule_changed(_event("comfort"))

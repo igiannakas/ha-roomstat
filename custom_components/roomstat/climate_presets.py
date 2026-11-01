@@ -677,8 +677,9 @@ class PresetMixin:
             await self._async_regulation_cycle(trigger=trigger)
             return
         # No regulation cycle follows: preheat decides again now, on the
-        # preset just saved for the return.
-        self._preheat_evaluate(time.time())
+        # preset just saved for the return (in mode on a new target runs
+        # one: the valve hears of it at once).
+        self._preheat_refresh(trigger, write=False)
         self._write_state_with_binary_sensor()
 
     def _apply_quietly(self, saved: SavedState) -> None:
@@ -751,6 +752,10 @@ class PresetMixin:
             self._write_state_with_binary_sensor()
             await self._async_regulation_cycle(trigger=trigger)
         else:
+            # Saved for the return (nobody home) or for a window's close.
+            # The first is what preheat aims for: in mode on a new target
+            # is sent now, not at the next cycle.
+            self._preheat_refresh(trigger, write=False)
             self._write_state_with_binary_sensor()
 
     def _route_preset(self, preset_mode: str, *, manual: bool = False) -> bool:
@@ -764,13 +769,17 @@ class PresetMixin:
         # A preset during the window's close delay ends the wait.
         self._end_window_close_delay(f"preset changed to {preset_mode}")
 
-        if self._presence_ctrl.is_active and preset_mode != PRESET_AWAY:
+        if self._presence_ctrl.is_active and (preset_mode != PRESET_AWAY or not manual):
             if manual:
                 # Picked by hand while nobody is home: it takes effect.
                 self._presence_takeover(preset_mode)
             else:
                 # The schedule or a boost ending while away: update what
-                # coming home restores, and keep away mode.
+                # coming home restores, and keep away mode.  The schedule's
+                # own Away too (2.18.0 review; owner, 1 Nov 2026: a scheduled
+                # Away while out is followed): until then it was never saved,
+                # so coming home restored the preset from before it, and
+                # preheat in mode on heated the empty room to that.
                 self._presence_ctrl.update_saved(
                     preset_mode, self._get_preset_target(preset_mode)
                 )
@@ -917,7 +926,12 @@ class PresetMixin:
     # ------------------------------------------------------------------
 
     def _effective_setpoint(self) -> float:
-        """Calculate the effective setpoint based on HVAC mode and preset."""
+        """Calculate the effective setpoint based on HVAC mode and preset.
+
+        Away while away mode is in charge is preheat's target in mode on
+        (``_preheat_target_c``: someone close, nearby or due home), else the
+        Away temperature.
+        """
         if self._summer_active:
             return FROST_PROTECT_C
         if self._hvac_mode == HVACMode.OFF:
@@ -930,5 +944,6 @@ class PresetMixin:
         if self._preset_mode == PRESET_BOOST:
             return self._config.presets.boost_target_c
         if self._preset_mode == PRESET_AWAY:
-            return self._config.presets.away_target_c
+            preheat = self._preheat_target_c()
+            return preheat if preheat is not None else self._config.presets.away_target_c
         return self._config.presets.frost_protection_target_c

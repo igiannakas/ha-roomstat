@@ -1158,10 +1158,23 @@ class Autotuner:
                 self._prev_sp is not None
                 and sp - self._prev_sp >= self.cfg.heatup_min_step_c
             )
-            if (step_up or resumed) and after_window:
+            # Resuming after a period the tuner sat out is a heat-up only if
+            # the target was lower meanwhile (away, summer, off: the room
+            # cooled).  Preheat on the way home in mode on (2.18.0) heats the
+            # room while away, so on arrival it is mid-ramp on a hot radiator,
+            # and a Boost ends the same way: booked, the rest of that ramp
+            # gave dead times of 16-21 min for a room of 27 (2.18.0 review),
+            # which preheat then starts later on.  A gap (a restart, a valve
+            # that dropped off) resumes as before.
+            resumed_heatup = resumed and (
+                self._prev_eligible
+                or self._prev_sp is None
+                or sp - self._prev_sp >= self.cfg.heatup_min_step_c
+            )
+            if (step_up or resumed_heatup) and after_window:
                 self._hold = None
                 self.last_event = "heat-up after a window: not analysed"
-            elif step_up or resumed:
+            elif step_up or resumed_heatup:
                 self._hold = None
                 self._heatup = _HeatupTracker(s.ts, sp, self.cfg)
                 self._heatup.add(s)

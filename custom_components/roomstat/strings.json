@@ -84,7 +84,7 @@
           },
           "preheat": {
             "name": "Preheat on the way home",
-            "description": "While nobody is home, works out from Home ETA what this room should aim for: the temperature coming home restores once someone is close to home or heading home and due, a slightly lower one while someone is nearby. This version only shows and logs what it would do (Shadow): the room stays at Away and no heat is sent.",
+            "description": "While nobody is home, works out from Home ETA what this room should aim for: the temperature coming home restores once someone is close to home or heading home and due, a slightly lower one while someone is nearby. On heats the room to it; Shadow only shows and logs what it would do, and the room stays at Away.",
             "data": {
               "preheat_mode": "Mode",
               "preheat_arrival_entity_id": "Expected arrival",
@@ -92,10 +92,10 @@
               "preheat_nearby_entity_id": "Someone nearby"
             },
             "data_description": {
-              "preheat_mode": "Off: nothing. Shadow: works out what the room would do while nobody is home and logs every change of decision (the activity log and the room's Preheat sensor), but the room stays at Away and no heat is sent.",
-              "preheat_arrival_entity_id": "A timestamp of the first expected arrival home, for example Home ETA's sensor.home_eta_expected_home (unknown while nobody is heading home). Once it is within the room's heat-up time plus the lead, the room would heat to the temperature coming home restores.",
-              "preheat_close_entity_id": "On while someone is home or close to home, for example Home ETA's binary_sensor.home_eta_someone_close_to_home (800 m). The room would then heat to the temperature coming home restores, however long they stay.",
-              "preheat_nearby_entity_id": "On while someone is nearby, for example Home ETA's binary_sensor.home_eta_someone_nearby (each person's near-home radius). The room would then hold its 30-minute temperature: the temperature coming home restores, less what the room typically recovers in its first 30 minutes of heating (its 30-minute recovery sensor), rounded down to 0.1 °C. It is then back at its target about 30 minutes after someone walks in."
+              "preheat_mode": "Off: nothing. Shadow: works out what the room would do while nobody is home and logs every change of decision (the activity log and the room's Preheat sensor), but the room stays at Away and no heat is sent. On: the same, and the room heats to it while nobody is home; a change by hand, a window, Off or summer mode still win.",
+              "preheat_arrival_entity_id": "A timestamp of the first expected arrival home, for example Home ETA's sensor.home_eta_expected_home (unknown while nobody is heading home). Once it is within the room's heat-up time plus the lead, the room heats to the temperature coming home restores (in Shadow it only logs it).",
+              "preheat_close_entity_id": "On while someone is home or close to home, for example Home ETA's binary_sensor.home_eta_someone_close_to_home (800 m). The room then heats to the temperature coming home restores, however long they stay (in Shadow it only logs it).",
+              "preheat_nearby_entity_id": "On while someone is nearby, for example Home ETA's binary_sensor.home_eta_someone_nearby (each person's near-home radius). The room then holds its 30-minute temperature (in Shadow it only logs it): the temperature coming home restores, less what the room typically recovers in its first 30 minutes of heating (its 30-minute recovery sensor), rounded down to 0.1 °C. It is then back at its target about 30 minutes after someone walks in."
             }
           },
           "preheat_timing": {
@@ -243,7 +243,8 @@
     "preheat_mode": {
       "options": {
         "off": "Off",
-        "shadow": "Shadow: log only, the room stays at Away"
+        "shadow": "Shadow: log only, the room stays at Away",
+        "on": "On: the room heats to it while nobody is home"
       }
     }
   },

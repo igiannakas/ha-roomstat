@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.17.0-blue)
+![Version](https://img.shields.io/badge/version-2.18.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -159,12 +159,12 @@ changes.
   on the way home), and coming home brings back the schedule. It is the easy
   way to undo whatever was set while out, from the cards' Away or Schedule
   buttons or a script. Switching the room off and on again does the same.
-- **Preheat on the way home, in shadow for now.** While nobody is home,
-  Roomstat works out from [Home ETA](https://github.com/igiannakas/ha-home-eta)
-  what each room should aim for: the temperature coming home restores once
+- **Preheat on the way home.** While nobody is home, Roomstat works out from
+  [Home ETA](https://github.com/igiannakas/ha-home-eta) what each room should
+  aim for, and heats it there: the temperature coming home restores once
   someone is close to home or heading home in time, a little lower while
-  someone is nearby. This version only logs what it would do; the room stays
-  at Away. See [Preheat on the way home](#preheat-on-the-way-home).
+  someone is nearby, Away otherwise. A Shadow mode only logs it. See
+  [Preheat on the way home](#preheat-on-the-way-home).
 - **Fixes:**
   - the chosen mode survives restarts, reloads and window open/close;
   - a running Boost carries on after a restart;
@@ -360,14 +360,15 @@ content: >-
 
 ## Preheat on the way home
 
-Shadow only in this version: Roomstat works out what each room would do and
-logs it, and the room stays at Away. Nothing is sent to the valve. The
-point is a week of decisions to check against real arrivals before it is
-switched on.
+While nobody is home, Roomstat works out what each room should aim for and,
+in mode **On**, heats it there: the room stays in Away (coming home restores
+the schedule as always), but its target is the one below instead of the Away
+temperature. In **Shadow** it only logs what it would do and the room stays
+at Away: a way to check its decisions against real arrivals first.
 
 **Set up**, per room, under **Configure → Preheat on the way home**:
 
-- **Mode:** **Off**, or **Shadow** (log only).
+- **Mode:** **Off**, **Shadow** (log only) or **On**.
 - **Expected arrival:** a timestamp of the first expected arrival home,
   such as Home ETA's `sensor.home_eta_expected_home`.
 - **Someone close to home:** on while someone is home or within 800 m, such
@@ -380,7 +381,7 @@ preheat only works while away mode is in charge (nobody home, no change by
 hand, no window open, heating on, not summer mode). The Preheat sensor says
 **Not in charge** otherwise, with the reason in its attributes.
 
-**What each room would aim for**, the warmest that applies:
+**What each room aims for**, the warmest that applies:
 
 - **Someone close to home:** the temperature coming home restores (the
   schedule's, for example Comfort 20 °C), however long they stay.
@@ -399,6 +400,14 @@ hand, no window open, heating on, not summer mode). The Preheat sensor says
 
 If coming home would heat no more than Away (the schedule says Away or
 Frost protection), there is nothing to preheat.
+
+Coming home is the normal restore: a room preheated to its target is
+already there, so nothing more is sent. In mode On a change from Home ETA
+that moves the target reaches the valve at once (more heat after it has
+stood 15 seconds, so a burst of updates can't send heat and an off seconds
+apart); a new expected arrival that leaves it where it was sends nothing. A
+schedule that switches to Away while you're out is followed: nothing to
+preheat, and coming home during that block restores Away.
 
 **Manual control wins.** While nobody is home, **Off** keeps the room off
 with no preheat until someone is home (then the schedule comes back), and
@@ -462,11 +471,19 @@ The 800 m and the near-home radius are Home ETA's.
   is switched on.
 - The thermostat's `preheat_*` attributes: the live numbers, updated every
   minute (not recorded: the Preheat sensor's history has the decisions).
+  `preheat_heating_to_c` is the target preheat gives the room right now (mode
+  On, while it heats above Away), and the thermostat's target temperature
+  shows it.
 - The activity log: one line per change of decision, for example
   `Preheat (shadow): heading home: it would heat to 20.0 °C now for the
   expected arrival at 18:42: from 17.4 °C it needs 106 min (start-up 22 min,
-  2.6 °C at 0.8 × 2.5 °C/h, lead 5 min)`, and one per learned 30-minute
-  recovery.
+  2.6 °C at 0.8 × 2.5 °C/h, lead 5 min)` (in mode On `Preheat: heading home:
+  it heats to …`), and one per learned 30-minute recovery. In mode On the
+  room's decision lines name it too: `room 18.4 → 20.0 Away, nobody home,
+  preheat: heading home`.
+- The card, in mode On: `Nobody home · Preheating to 20 °C · ETA 18:42`,
+  `Nobody home · Someone close · 20 °C` or `Nobody home · Someone nearby ·
+  19.4 °C` while it heats; `Away · nobody home` otherwise.
 
 ## Schedule
 

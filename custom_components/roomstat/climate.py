@@ -797,6 +797,11 @@ class RoomstatClimate(
             self._startup_reconcile_window(window_sensor)
         # Schedule last: it routes into window/presence saved state if active.
         self._startup_schedule(summer_on)
+        # Preheat decides now, on what was just taken back, so a room that
+        # was preheating keeps its target from the start rather than reading
+        # Away until the first cycle (2.18.0 review: the recorded target
+        # dropped for that minute).
+        self._preheat_evaluate(time.time())
 
         # Start periodic regulation
         self.async_on_remove(
@@ -1053,6 +1058,7 @@ class RoomstatClimate(
             self._boost_cancel = None
         self._cancel_settled_cycle()
         self._dosing_stop()
+        self._preheat_removed = True
         await super().async_will_remove_from_hass()
 
     async def _async_config_entry_updated(self, hass, entry) -> None:

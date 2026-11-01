@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.4.7";
+const CARD_VERSION = "1.5.0";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -56,6 +56,42 @@ const minsUntil = (iso) => {
   const mins = Math.ceil((Date.parse(iso) - Date.now()) / 60000);
   return mins > 0 ? mins : null;
 };
+// A clock time as Home Assistant writes one (null when none): the user's
+// language, their 12/24-hour choice ("system": the browser's, "language":
+// the language's), and the server's time zone when they asked for it.
+const fmtClock = (hass, iso) => {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (isNaN(t)) return null;
+  const locale = (hass && hass.locale) || {};
+  const opts = { hour: "numeric", minute: "2-digit" };
+  if (locale.time_format === "12") opts.hour12 = true;
+  else if (locale.time_format === "24") opts.hour12 = false;
+  else if (locale.time_format === "system") {
+    opts.hour12 = Boolean(new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12);
+  }
+  if (locale.time_zone === "server" && hass.config && hass.config.time_zone) {
+    opts.timeZone = hass.config.time_zone;
+  }
+  for (const lang of [locale.language || undefined, undefined]) {
+    try {
+      return new Intl.DateTimeFormat(lang, opts).format(t);
+    } catch (e) {
+      // An unknown language tag: the browser's, with the same options.
+    }
+  }
+  return null;
+};
+// While nobody is home: what preheat on the way home heats the room to (only
+// in its mode on, while it heats above Away; null otherwise).
+const preheatStatus = (hass, a) => {
+  const to = num(a.preheat_heating_to_c);
+  if (to === null) return null;
+  const temp = `${fmtG(to)} °C`;
+  if (a.preheat_state === "close") return `Nobody home · Someone close · ${temp}`;
+  if (a.preheat_state === "nearby") return `Nobody home · Someone nearby · ${temp}`;
+  const eta = a.preheat_state === "due" ? fmtClock(hass, a.preheat_arrival_at) : null;
+  return `Nobody home · Preheating to ${temp}` + (eta ? ` · ETA ${eta}` : "");
+};
 const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -90,7 +126,7 @@ function roomState(hass, config, ids) {
   if (summer) status = "Summer lock";
   else if (off) status = "Off";
   else if (windowOpen) status = "Window open";
-  else if (a.presence_away_active) status = "Away · nobody home";
+  else if (a.presence_away_active) status = preheatStatus(hass, a) || "Away · nobody home";
   else if (awayHeld) {
     // Set by hand while nobody is home: it holds until someone is home,
     // or until the limit (then back to Away).

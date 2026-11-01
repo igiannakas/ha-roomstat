@@ -52,6 +52,13 @@ TRV_COMMAND_SPACING_S: float = 5.0
 # the heat is taken within 5 min.  The presses came 9 s apart (Comfort, then
 # Frost protection), 19 Oct 10 s (20 → 22 → 20).
 MANUAL_SETTLE_S: float = 15.0
+# Preheat in mode on (2.18.0): a change of the target it gives the room
+# holds back more heat the same way, until it has stood for this long, so a
+# burst of Home ETA updates (arrival 40 -> 90 -> 40 min within seconds) or a
+# change while a cycle waits for the bridge can't send heat and an off
+# seconds apart (2.18.0 review; the 25 Oct 2026 pattern).  Less heat and
+# off go at once.
+PREHEAT_SETTLE_S: float = MANUAL_SETTLE_S
 
 # An off sent less than this after a heat command to the same valve is sent
 # once more this long after it (climate_controllers.off_confirm_after).  The

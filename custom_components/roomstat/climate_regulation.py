@@ -309,6 +309,9 @@ class RegulationMixin:
         settle_s = self._settle_remaining_s(now)
         if settle_s > 0:
             return f"settling({math.ceil(settle_s)}s)", settle_s
+        preheat_s = self._preheat_settle_remaining_s(now)
+        if preheat_s > 0:
+            return f"preheat_settling({math.ceil(preheat_s)}s)", preheat_s
         return None
 
     def _schedule_settled_cycle(self, delay_s: float) -> None:

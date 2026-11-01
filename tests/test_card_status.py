@@ -7,6 +7,7 @@ what the card shows.  Only the pure part of the file (constants, helpers and
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,8 +30,9 @@ const out = cases.map((c) => {
   for (const key of ["presence_override_until", "schedule_override_until"]) {
     if (typeof a[key] === "number") a[key] = new Date(now + a[key] * 1000).toISOString();
   }
-  const s = roomState({ states: { "climate.x": { state: c.state || "heat", attributes: a } } },
-                      { entity: "climate.x" }, {});
+  const hass = { states: { "climate.x": { state: c.state || "heat", attributes: a } },
+                 ...(c.hass || {}) };
+  const s = roomState(hass, { entity: "climate.x" }, {});
   return { status: s.status, badge: s.badge, scheduleActive: s.scheduleActive };
 });
 process.stdout.write(JSON.stringify(out));
@@ -73,14 +75,41 @@ _CASES = [
      "Schedule · Day", None, True),
     ({"preset_mode": "comfort", "presence_override_active": True, "window_open_active": True},
      "Window open", "mdi:window-open-variant", False),
+    # Preheat on the way home, mode on (2.18.0): what it heats the room to.
+    ({"preset_mode": "away", "presence_away_active": True, "schedule_preset": "comfort",
+      "temperature": 20.0, "preheat_mode": "on", "preheat_state": "due",
+      "preheat_heating_to_c": 20.0, "preheat_arrival_at": "2026-11-01T18:42:10+00:00"},
+     "Nobody home · Preheating to 20 °C · ETA 18:42", None, False),
+    ({"preset_mode": "away", "presence_away_active": True, "temperature": 20.5,
+      "preheat_mode": "on", "preheat_state": "close", "preheat_heating_to_c": 20.5},
+     "Nobody home · Someone close · 20.5 °C", None, False),
+    ({"preset_mode": "away", "presence_away_active": True, "temperature": 19.3,
+      "preheat_mode": "on", "preheat_state": "nearby", "preheat_heating_to_c": 19.3},
+     "Nobody home · Someone nearby · 19.3 °C", None, False),
+    # Due with no arrival known (it is being lost): no ETA.
+    ({"preset_mode": "away", "presence_away_active": True,
+      "preheat_mode": "on", "preheat_state": "due", "preheat_heating_to_c": 20.0,
+      "preheat_arrival_at": None},
+     "Nobody home · Preheating to 20 °C", None, False),
+    # Waiting, or shadow (the attribute is only set while it heats): Away.
+    ({"preset_mode": "away", "presence_away_active": True, "preheat_mode": "on",
+      "preheat_state": "waiting", "preheat_heating_to_c": None},
+     "Away · nobody home", None, False),
+    ({"preset_mode": "away", "presence_away_active": True, "preheat_mode": "shadow",
+      "preheat_state": "due", "preheat_target_c": 20.0, "preheat_heating_to_c": None},
+     "Away · nobody home", None, False),
 ]
+
+# The clock in the user's language, 24-hour choice and the server's time zone.
+_HASS = {"locale": {"language": "en-GB", "time_format": "24", "time_zone": "server"},
+         "config": {"time_zone": "Europe/London"}}
 
 
 @pytest.mark.skipif(_NODE is None, reason="Node is not installed")
 def test_status_lines(tmp_path):
     runner = tmp_path / "runner.js"
     runner.write_text(_RUNNER)
-    payload = json.dumps([{"attrs": attrs} for attrs, *_ in _CASES])
+    payload = json.dumps([{"attrs": attrs, "hass": _HASS} for attrs, *_ in _CASES])
     proc = subprocess.run(
         [_NODE, str(runner), str(_CARD)], input=payload, capture_output=True,
         text=True, timeout=30, check=True,
@@ -88,3 +117,58 @@ def test_status_lines(tmp_path):
     results = json.loads(proc.stdout)
     for (_attrs, status, badge, schedule_active), got in zip(_CASES, results, strict=True):
         assert got == {"status": status, "badge": badge, "scheduleActive": schedule_active}
+
+
+@pytest.mark.skipif(_NODE is None, reason="Node is not installed")
+@pytest.mark.parametrize(("hass", "expected"), [
+    # Summer time in London: the server's zone, 24 h.
+    ({"locale": {"language": "en-GB", "time_format": "24", "time_zone": "server"},
+      "config": {"time_zone": "Europe/London"}}, "18:42"),
+    ({"locale": {"language": "en-GB", "time_format": "24", "time_zone": "server"},
+      "config": {"time_zone": "Europe/Athens"}}, "20:42"),
+    ({"locale": {"language": "en-US", "time_format": "12", "time_zone": "server"},
+      "config": {"time_zone": "Europe/London"}}, "6:42 PM"),
+    # The language's own choice, and an unknown language tag (the browser's).
+    ({"locale": {"language": "en-US", "time_format": "language", "time_zone": "server"},
+      "config": {"time_zone": "Europe/London"}}, "6:42 PM"),
+    ({"locale": {"language": "not a tag!", "time_format": "24", "time_zone": "server"},
+      "config": {"time_zone": "Europe/London"}}, "18:42"),
+])
+def test_the_eta_reads_as_the_user_asked(tmp_path, hass, expected):
+    runner = tmp_path / "runner.js"
+    runner.write_text(_RUNNER)
+    attrs = {"preset_mode": "away", "presence_away_active": True, "preheat_mode": "on",
+             "preheat_state": "due", "preheat_heating_to_c": 20.0,
+             "preheat_arrival_at": "2026-07-01T17:42:00+00:00"}
+    proc = subprocess.run(
+        [_NODE, str(runner), str(_CARD)],
+        input=json.dumps([{"attrs": attrs, "hass": hass}]),
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    (got,) = json.loads(proc.stdout)
+    assert got["status"] == f"Nobody home · Preheating to 20 °C · ETA {expected}"
+
+
+@pytest.mark.skipif(_NODE is None, reason="Node is not installed")
+@pytest.mark.parametrize(("browser", "language", "expected"), [
+    # "Use system settings": the browser's 12/24-hour choice, not the
+    # language's (Node takes its default locale from LC_ALL).
+    ("en_US.UTF-8", "en-GB", "6:42 pm"),
+    ("en_GB.UTF-8", "en-US", "18:42"),
+])
+def test_the_system_choice_is_the_browsers(tmp_path, browser, language, expected):
+    runner = tmp_path / "runner.js"
+    runner.write_text(_RUNNER)
+    attrs = {"preset_mode": "away", "presence_away_active": True, "preheat_mode": "on",
+             "preheat_state": "due", "preheat_heating_to_c": 20.0,
+             "preheat_arrival_at": "2026-07-01T17:42:00+00:00"}
+    hass = {"locale": {"language": language, "time_format": "system", "time_zone": "server"},
+            "config": {"time_zone": "Europe/London"}}
+    proc = subprocess.run(
+        [_NODE, str(runner), str(_CARD)],
+        input=json.dumps([{"attrs": attrs, "hass": hass}]),
+        capture_output=True, text=True, timeout=30, check=True,
+        env={**os.environ, "LC_ALL": browser, "LANG": browser},
+    )
+    (got,) = json.loads(proc.stdout)
+    assert got["status"] == f"Nobody home · Preheating to 20 °C · ETA {expected}"

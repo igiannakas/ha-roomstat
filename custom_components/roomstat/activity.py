@@ -483,6 +483,8 @@ def _tado_note(f: CycleFacts, cfg: RegulationConfig) -> str:
         return f" ({want} waits: rate limit)"
     if f.send.startswith("settling"):
         return f" ({want} waits: a change by hand settling)"
+    if f.send.startswith("preheat_settling"):
+        return f" ({want} waits: preheat's new target settling)"
     if f.send == "window_pending":
         return f" ({want} waits: the window's delay)"
     if f.send == "already_at_target" and not f.command_off and not told_off:

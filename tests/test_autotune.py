@@ -1124,6 +1124,45 @@ class TestWindowRecoveryIsNotLearned:
         _feed(t, 360.0, 20.0, 18.0)
         assert t.phase == A.PHASE_HEATUP
 
+    def test_resume_at_the_same_target_is_no_heat_up(self):
+        """Preheat on the way home (2.18.0) heats the room while away: on
+        arrival it is mid-ramp on a hot radiator at the target it already
+        had, which says nothing about a heat-up from cold (review: dead
+        times of 16-21 min booked for a room of 27).  A Boost ending the
+        same way."""
+        for during in (20.0, 22.0):
+            t = _tuner()
+            _feed(t, 0.0, 16.0, 16.5)
+            for k in range(1, 6):
+                _feed(t, k * 60.0, during, 17.0 + 0.2 * k, eligible=False)
+            _feed(t, 360.0, 20.0, 18.3)
+            assert t.phase != A.PHASE_HEATUP
+
+    def test_resume_a_step_above_the_target_meanwhile_counts(self):
+        t = _tuner()
+        _feed(t, 0.0, 20.0, 20.0)
+        for k in range(1, 6):
+            _feed(t, k * 60.0, 19.5, 19.0 - 0.2 * k, eligible=False)   # nearby: 19.5
+        _feed(t, 360.0, 20.0, 18.0)                                   # +0.5: a step
+        assert t.phase == A.PHASE_HEATUP
+
+    def test_resume_after_no_target_counts(self):
+        """Off (no target at all) and back to heating: the room cooled with
+        nothing to compare against, so it is a heat-up."""
+        t = _tuner()
+        _feed(t, 0.0, 20.0, 20.0)
+        for k in range(1, 6):
+            _feed(t, k * 60.0, math.nan, 19.0 - 0.2 * k)
+        _feed(t, 360.0, 20.0, 18.0)
+        assert t.phase == A.PHASE_HEATUP
+
+    def test_resume_after_a_gap_is_unchanged(self):
+        """A restart or a valve that dropped off (eligible before and after)."""
+        t = _tuner()
+        _feed(t, 0.0, 20.0, 18.0)
+        _feed(t, 60.0 + CFG.max_gap_s + 1.0, 20.0, 18.0)
+        assert t.phase == A.PHASE_HEATUP
+
     def test_window_opening_ends_the_episode_in_progress(self):
         t = _tuner()
         last = _heating(t, minutes=10)
