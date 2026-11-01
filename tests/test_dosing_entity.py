@@ -23,10 +23,12 @@ import pytest
 
 from tests.ha_harness import (
     _climate,
+    _Extra,
     _make_entity,
     _restart_from,
     _run,
     _start,
+    _State,
     drain_tasks,
     e2e,
     reset_timers,
@@ -37,6 +39,9 @@ pytestmark = e2e
 POWER = "sensor.test_zone_heating"
 ON = {"dosed_topups": True, "heating_power_entity_id": POWER}
 TARGET = 20.5            # the harness's comfort target
+# The default dosing zone (2.17.0): released 0.1 under, aimed 0.1 over,
+# nothing that would land more than 0.2 over.
+ZONE_ABOVE, ZONE_BELOW, AIM = 0.2, 0.1, 0.1
 
 
 @pytest.fixture(autouse=True)
@@ -276,6 +281,12 @@ class _Pulses:
         return [b - a for a, b in zip(self.starts, self.ends)]
 
 
+def _logged(caplog, *parts: str) -> list[str]:
+    """The room's log lines holding every part (the activity log keeps only
+    its last 30)."""
+    return [r.getMessage() for r in caplog.records if all(p in r.getMessage() for p in parts)]
+
+
 def _entity(options=None, **kw):
     ent = _make_entity(dict(options or {}), window=False, **kw)
     return ent
@@ -300,15 +311,39 @@ class TestSettledRoom:
         watch = _Pulses(ent, clock, plant)
         _run_room(ent, clock, plant, 240, on_cycle=watch)
         assert len(watch.starts) >= 4, "a settled, cooling room is topped up"
-        # Every pulse at least the minimum, and well short of an old top-up.
-        assert all(180.0 - 1 <= s <= 480.0 for s in watch.lengths), watch.lengths
+        # Every pulse at least the minimum, and well short of an old top-up
+        # (10-30 min).
+        assert all(180.0 - 1 <= s <= 600.0 for s in watch.lengths), watch.lengths
         # No second pulse before the first one's heat has landed (theta + 2 tau).
         gaps = [b - a for a, b in zip(watch.starts, watch.starts[1:])]
         assert min(gaps) >= 1260.0 - 1, gaps
-        # After the first hour the room stays in the band around the target.
+        # After the first hour the room stays in the zone: down to its floor,
+        # up to about the aim.
         later = [r for t, r in watch.rooms if t - watch.rooms[0][0] > 3600.0]
-        assert TARGET - 0.12 <= min(later) and max(later) <= TARGET + 0.05, (
+        assert TARGET - ZONE_BELOW - 0.02 <= min(later) and max(later) <= TARGET + AIM + 0.05, (
             min(later), max(later))
+
+    def test_the_zone_options_reach_the_regulator(self, monkeypatch):
+        """The two options (Dosed top-ups section) set the zone; out of
+        range keeps the default.  With 0.1 / 0.1 (2.16.0's band) the room
+        stays within 0.1 of the target, and its pulses come more often."""
+        ent = _entity({**ON, "dose_zone_above_c": 0.35, "dose_zone_below_c": 0.15})
+        dose = ent._config.dose
+        assert (dose.zone_above_c, dose.zone_below_c) == (0.35, 0.15)
+        assert dose.aim_over_c == pytest.approx(0.25) and ent._doser.cfg is dose
+        bad = _entity({**ON, "dose_zone_above_c": 0.9, "dose_zone_below_c": "x"})
+        assert (bad._config.dose.zone_above_c, bad._config.dose.zone_below_c) == (0.2, 0.1)
+        starts = {}
+        for zone in ((0.1, 0.1), (0.2, 0.1)):
+            ent, clock, plant = _started(monkeypatch, {**ON, "dose_zone_above_c": zone[0],
+                                                       "dose_zone_below_c": zone[1]})
+            watch = _Pulses(ent, clock, plant)
+            _run_room(ent, clock, plant, 360, on_cycle=watch)
+            later = [r for t, r in watch.rooms if t - watch.rooms[0][0] > 3600.0]
+            assert TARGET - zone[1] - 0.02 <= min(later), (zone, min(later))
+            assert max(later) <= TARGET + max(0.0, zone[0] - 0.1) + 0.05, (zone, max(later))
+            starts[zone] = len(watch.starts)
+        assert starts[(0.2, 0.1)] < starts[(0.1, 0.1)], starts
 
     def test_the_first_pulse_fires_on_the_dead_time_lead(self, monkeypatch):
         ent, clock, plant = _started(monkeypatch)
@@ -339,30 +374,33 @@ class TestSettledRoom:
         # The plant has the default model: the learned gain stays near it.
         assert sensor_value == pytest.approx(0.045, rel=0.35)
 
-    def test_the_learned_model_stays_on_the_plant_in_closed_loop(self, monkeypatch):
-        """Four hours of pulses in closed loop: each episode is judged with
-        the room's loss fitted alongside its gain, so the learner neither
-        drifts up (the loss taken too small, its fall booked as missing
-        heat) nor down; the plant is the default model (0.045 °C per
+    def test_the_learned_model_stays_on_the_plant_in_closed_loop(self, monkeypatch, caplog):
+        """Four hours of pulses in closed loop: the pulses are pooled and the
+        pooled fit run after each (in the executor), so the learner neither
+        drifts up nor down; the plant is the default model (0.045 °C per
         open-minute, delay 5 min, spread 8 min, cooling 0.5 °C/h)."""
         ent, clock, plant = _started(monkeypatch)
         learner = ent._doser.learner
         trajectory = []
 
         def watch():
-            if learner._judged and (not trajectory or trajectory[-1][0] != learner._judged[-1].ts):
-                trajectory.append((learner._judged[-1].ts, learner.gain_c_per_open_min,
+            fit = learner.last_fit
+            if fit is not None and (not trajectory or trajectory[-1][0] != fit.ts):
+                trajectory.append((fit.ts, fit.gain, learner.gain_c_per_open_min,
                                    learner.theta_s, learner.tau_s))
 
-        _run_room(ent, clock, plant, 240, on_cycle=watch)
+        with caplog.at_level(logging.INFO):
+            _run_room(ent, clock, plant, 240, on_cycle=watch)
         assert len(trajectory) >= 4, trajectory
-        for _, gain, theta, tau in trajectory:
+        for _, fitted, gain, theta, tau in trajectory:
             assert gain == pytest.approx(0.045, rel=0.20), trajectory
             assert 240.0 <= tau <= 840.0, trajectory
             assert 120.0 <= theta <= 540.0, trajectory
-        lessons = [e.text for e in ent._activity.entries()
-                   if not e.decision and e.text.startswith("Dosed top-up:")]
-        assert lessons and all("loss" in t for t in lessons), lessons
+        assert trajectory[-1][1] == pytest.approx(0.045, rel=0.15), trajectory
+        lessons = _logged(caplog, "dosed top-up: ", "open-min →")
+        fits = _logged(caplog, "dosed top-up: pooled over")
+        assert lessons and all("(model " in t for t in lessons), lessons
+        assert len(fits) == len(trajectory), (fits, trajectory)
 
     def test_activity_lines_name_the_pulse_and_the_landing(self, monkeypatch):
         ent, clock, plant = _started(monkeypatch)
@@ -724,9 +762,10 @@ def test_a_late_first_report_leaves_the_heat_in_flight(monkeypatch):
     watch = _Pulses(ent, clock, plant)
     _run_room(ent, clock, plant, 240, on_cycle=watch)
     assert len(watch.lengths) >= 4
-    assert max(watch.lengths) < 600.0, watch.lengths
+    assert max(watch.lengths) < 720.0, watch.lengths
     later = [r for t, r in watch.rooms if t - watch.rooms[0][0] > 3600.0]
-    assert TARGET - 0.12 <= min(later) and max(later) <= TARGET + 0.08, (min(later), max(later))
+    assert TARGET - ZONE_BELOW - 0.02 <= min(later) and max(later) <= TARGET + AIM + 0.08, (
+        min(later), max(later))
 
 
 def _hold_commands(ent) -> list:
@@ -754,7 +793,8 @@ def test_short_of_the_target_it_is_dosed_never_held(monkeypatch):
     assert all(m != "hold" for _, _, m in rooms)
     assert any(m == "dose" for _, _, m in rooms)
     later = [room for t, room, _ in rooms if t - rooms[0][0] > 3600.0]
-    assert TARGET - 0.15 <= min(later) and max(later) <= TARGET + 0.10, (min(later), max(later))
+    assert TARGET - ZONE_BELOW - 0.05 <= min(later) and max(later) <= TARGET + ZONE_ABOVE, (
+        min(later), max(later))
 
 
 def test_a_heat_up_then_dosing_never_a_hold(monkeypatch):
@@ -781,9 +821,9 @@ def test_a_heat_up_then_dosing_never_a_hold(monkeypatch):
 
 def test_the_pulse_is_capped_on_the_rooms_heating_rate(monkeypatch):
     """With the auto-tuner's heating rate known, each pulse's cap is the
-    dose worked out on that rate (the measured shortfall, the heat in
-    flight at it, the cap's own observer; no aim bias) plus the margin,
-    set when it starts; the pulse's line says so."""
+    dose worked out on that rate (the measured shortfall to the zone's aim,
+    the heat in flight at it, the cap's own observer; no aim bias) plus the
+    margin, set when it starts; the pulse's line says so."""
     from tests.pure_modules import parameters as P
     from tests.pure_modules import regulation as R
 
@@ -797,7 +837,7 @@ def test_the_pulse_is_capped_on_the_rooms_heating_rate(monkeypatch):
         r = ent._last_result
         if r.fired_by:
             d, lr = ent._doser, ent._doser.learner
-            need = R.dose_cap_need_c(r.error_c, d.predictor.inflight_c(rate),
+            need = R.dose_cap_need_c(r.error_c + AIM, d.predictor.inflight_c(rate),
                                      d.cap_loss_slope_c_per_s, lr.theta_s + 2 * lr.tau_s,
                                      ent._regulator.cfg.slope_deadband_c_per_h)
             caps.append((R.dose_cap_s(need, rate, P.DoseConfig()), r.pulse_cap_s,
@@ -831,7 +871,8 @@ def test_a_weak_radiator_is_learned_and_the_room_held(monkeypatch):
     assert learner.theta_s >= 420.0 and learner.tau_s <= 360.0, learner.summary()
     assert learner.gain_c_per_open_min < 0.045, learner.summary()
     last = [r for t, r in watch.rooms if t - watch.rooms[0][0] > 8 * 3600.0]
-    assert TARGET - 0.12 <= min(last) and max(last) <= TARGET + 0.08, (min(last), max(last))
+    assert TARGET - ZONE_BELOW - 0.02 <= min(last) and max(last) <= TARGET + AIM + 0.05, (
+        min(last), max(last))
 
 
 def test_a_fast_cooling_room_is_dosed_in_the_band_never_held(monkeypatch):
@@ -856,7 +897,7 @@ def test_a_fast_cooling_room_is_dosed_in_the_band_never_held(monkeypatch):
     assert max(later) <= TARGET + 0.15
 
 
-def test_the_sensor_attributes_change_only_with_pulses_and_lessons(monkeypatch):
+def test_the_sensor_attributes_change_only_with_pulses_and_lessons(monkeypatch, caplog):
     """The Top-up gain sensor's attributes: the recorder writes a row for
     every change, so they change when a pulse starts or an episode is
     judged, never every cycle (2.15.0 review: 489 of 504 cycles)."""
@@ -872,11 +913,16 @@ def test_the_sensor_attributes_change_only_with_pulses_and_lessons(monkeypatch):
             changes[0] += 1
             last[0] = now
 
-    _run_room(ent, clock, plant, 240, on_cycle=on_cycle)
-    judged = ent._doser.learner._accepted_total + 2
-    assert changes[0] <= len(watch.starts) + judged + 2, (changes[0], len(watch.starts), judged)
+    with caplog.at_level(logging.INFO):
+        _run_room(ent, clock, plant, 240, on_cycle=on_cycle)
+    # Each judged pulse and each applied fit is one event line.
+    events = _logged(caplog, "dosed top-up: ")
+    assert events and any("pooled over" in t for t in events)
+    assert changes[0] <= len(watch.starts) + len(events) + 1, (
+        changes[0], len(watch.starts), len(events))
     diagnostics = ent.topup_dose_diagnostics()
     assert "inflight_c" in diagnostics and "inflight_c" not in ent.topup_dose_summary()
+    assert "last_fit" in diagnostics and "last_fit" not in ent.topup_dose_summary()
 
 
 def test_no_cycle_after_the_entity_is_removed(monkeypatch):
@@ -1123,3 +1169,211 @@ def test_a_hold_on_the_valve_must_show_before_the_first_pulse(monkeypatch):
     assert first, "never dosed"
     lead = ent._doser.learner.visible_dead_time_s
     assert first[0] - start >= lead - 60.0
+
+
+# ---------------------------------------------------------------------------
+# The pooled fit on the entity (2.17.0)
+# ---------------------------------------------------------------------------
+
+def _climate_dosing():
+    return sys.modules["roomstat_e2e.climate_dosing"]
+
+
+
+def test_refits_run_in_the_executor_and_apply_at_the_next_cycle(monkeypatch, caplog):
+    """A usable pulse judged: the pooled fit runs as a background task in the
+    executor on a snapshot; its result waits for the next cycle's start, so
+    the model is the same throughout the cycle that judged the pulse."""
+    ent, clock, plant = _started(monkeypatch)
+    seen = []
+
+    def watch():
+        jobs = ent.hass.executor_jobs.count("pooled_fit")
+        if seen and jobs > seen[-1][0]:
+            # This cycle judged a pulse: the fit is back, waiting.
+            assert ent._dosing_pending_fit is not None
+            assert ent._doser.learner.last_fit is not ent._dosing_pending_fit
+        seen.append((jobs, ent._dosing_pending_fit))
+
+    with caplog.at_level(logging.INFO):
+        _run_room(ent, clock, plant, 240, on_cycle=watch)
+    jobs = ent.hass.executor_jobs.count("pooled_fit")
+    assert jobs >= 4 and len(ent.hass.background_tasks) == jobs
+    assert ent.hass.task_errors == []
+    # Every result taken up at the next cycle: none left over (bar the last).
+    applied = [p for (_, p), (_, nxt) in zip(seen, seen[1:]) if p is not None]
+    assert applied and all(p is not None for p in applied)
+    assert ent._doser.learner.last_fit is not None
+    assert len(_logged(caplog, "dosed top-up: pooled over")) >= jobs - 1
+
+
+def test_a_failing_pooled_fit_is_logged_once_and_dosing_carries_on(monkeypatch, caplog):
+    """A failed fit is no failed regulation: logged once (with its
+    traceback), the model in use stays, the room is dosed as before."""
+    ent, clock, plant = _started(monkeypatch)
+
+    def broken(_snapshot):
+        raise RuntimeError("the fit broke")
+
+    monkeypatch.setattr(_climate_dosing(), "pooled_fit", broken)
+    watch = _Pulses(ent, clock, plant)
+    with caplog.at_level(logging.ERROR):
+        _run_room(ent, clock, plant, 240, on_cycle=watch)
+    errors = [r for r in caplog.records if "the pooled fit failed" in r.getMessage()]
+    assert len(errors) == 1 and errors[0].exc_info is not None
+    assert "RuntimeError: the fit broke" in errors[0].getMessage()
+    assert ent.dosing_active and ent._dosing_failure is None
+    assert ent.hass.executor_jobs.count("broken") >= 3
+    assert len(watch.starts) >= 4
+    learner = ent._doser.learner
+    assert learner.last_fit is None and not learner.learned
+    assert learner.gain_c_per_open_min == pytest.approx(0.045)
+
+
+class _PendingTask:
+    def __init__(self):
+        self._done = False
+
+    def done(self):
+        return self._done
+
+    def cancel(self):
+        self._done = True
+        return True
+
+
+def test_a_refit_still_running_stays_due_and_runs_after(monkeypatch):
+    """One refit at a time: a usable pulse judged while one still runs in
+    the executor leaves the refit due; once the first is back, the next
+    starts (the harness otherwise runs every refit at once)."""
+    ent, clock, plant = _started(monkeypatch)
+    started = []
+
+    def background(coro, name, eager_start=True):
+        task = _PendingTask()
+        started.append((coro, task))
+        return task
+
+    monkeypatch.setattr(ent.hass, "async_create_background_task", background)
+    learner = ent._doser.learner
+    _run_room(ent, clock, plant, 240)
+    usable = sum(1 for r in learner.records if r.usable)
+    assert usable >= 2 and len(started) == 1, (usable, len(started))
+    assert learner.refit_due and learner.refit_in_flight
+    coro, task = started[0]
+    _run(coro)
+    task._done = True
+    assert ent._dosing_pending_fit is not None
+    _run_room(ent, clock, plant, 1)
+    assert learner.last_fit is not None and len(started) == 2
+    for coro, _task in started[1:]:
+        coro.close()
+
+
+def test_a_reload_between_a_fit_and_its_use_refits(monkeypatch):
+    """2.17.0 review (m1): a fit back but not yet applied when the room is
+    reloaded (every preset temperature change reloads it): the save says
+    the refit is due, and the reloaded room refits at its next cycle."""
+    ent, clock, plant = _started(monkeypatch)
+    for _ in range(400):
+        _run_room(ent, clock, plant, 1)
+        if ent._dosing_pending_fit is not None:
+            break
+    pending = ent._dosing_pending_fit
+    assert pending is not None, "no refit"
+    saved = ent.extra_restore_state_data.as_dict()["dosing"]["doser"]["learner"]
+    assert saved["refit_due"] is True
+    again = _make_entity(dict(ON), window=False)
+    plant.ent, plant.seen = again, 0
+    again.coordinator.data = ent.coordinator.data
+    _restart_from(ent, again)
+    jobs = again.hass.executor_jobs.count("pooled_fit")
+    for _ in range(3):
+        clock.tick(60.0)
+        plant.advance(60.0)
+        plant.feed()
+        _cycle(again)
+    lr = again._doser.learner
+    assert again.hass.executor_jobs.count("pooled_fit") > jobs
+    assert lr.last_fit is not None and lr.last_fit.n_pulses == pending.n_pulses
+    assert not lr.refit_due and not lr.refit_in_flight
+
+
+def test_options_changed_without_a_reload_keep_one_dose_config(monkeypatch):
+    """The options listener rebuilds the config: the regulator and the
+    doser go on sharing one dose config, with the new zone."""
+    ent, clock, plant = _started(monkeypatch)
+    entry = ent._config_entry
+    entry.options = {**entry.options, "dose_zone_above_c": 0.3, "dose_zone_below_c": 0.15}
+    _run(ent._async_config_entry_updated(ent.hass, entry))
+    assert ent._config.dose is ent._doser.cfg is ent._doser.learner.cfg
+    assert ent._regulator.cfg.dose is ent._doser.cfg
+    assert (ent._doser.cfg.zone_above_c, ent._doser.cfg.zone_below_c) == (0.3, 0.15)
+
+
+def test_a_fit_for_a_learner_reset_meanwhile_is_ignored(monkeypatch, caplog):
+    """Reset auto-tune (or anything that replaces the learner's data)
+    between a fit's snapshot and its result: the result is discarded."""
+    ent, clock, plant = _started(monkeypatch)
+    for _ in range(300):
+        _run_room(ent, clock, plant, 1)
+        if ent._dosing_pending_fit is not None:
+            break
+    pending = ent._dosing_pending_fit
+    assert pending is not None, "no refit"
+    ent._dosing_reset()
+    with caplog.at_level(logging.DEBUG):
+        _run_room(ent, clock, plant, 1)
+    learner = ent._doser.learner
+    assert ent._dosing_pending_fit is None
+    assert learner.last_fit is None and not learner.learned
+    assert any("discarded" in r.getMessage() for r in caplog.records)
+    assert pending.generation == learner.generation - 1
+
+
+def test_a_reload_keeps_the_chains_the_pulses_and_the_last_fit(monkeypatch):
+    ent, clock, plant = _started(monkeypatch)
+    _run_room(ent, clock, plant, 240)
+    lr = ent._doser.learner
+    assert lr.last_fit is not None and lr.records and lr.chains.filling_since is not None
+    again = _make_entity(dict(ON), window=False)
+    plant.ent = again
+    plant.seen = 0
+    again.coordinator.data = ent.coordinator.data
+    _restart_from(ent, again)
+    back = again._doser.learner
+    assert back.last_fit.to_dict() == lr.last_fit.to_dict()
+    assert [r.to_dict() for r in back.records] == [r.to_dict() for r in lr.records]
+    assert back.gain_c_per_open_min == pytest.approx(lr.gain_c_per_open_min)
+    assert back.summary() == lr.summary()
+    filling = back.chains.filling_since
+    assert filling == lr.chains.filling_since
+    clock.tick(60.0)
+    plant.advance(60.0)
+    plant.feed()
+    _cycle(again)
+    assert again._doser.learner.chains.filling_since == filling      # one chain across it
+
+
+def test_a_2_16_save_restarts_the_model_and_says_so(monkeypatch):
+    """The single-pulse values of 2.15/2.16 were learned on noise: they are
+    not taken back (one line says so), the gain starts from the anchor."""
+    ent, clock, plant = _started(monkeypatch)
+    _run_room(ent, clock, plant, 30)
+    extra = ent.extra_restore_state_data.as_dict()
+    extra["dosing"]["doser"]["learner"] = {
+        "gain": 0.0887, "theta_s": 180.0, "tau_s": 1512.0, "bias_c": -0.02,
+        "accepted_total": 6, "seed_args": [None], "judged": [], "last_more": {},
+        "episodes": [], "last_line": "old", "history": [], "intervals": [], "holds": [],
+    }
+    again = _make_entity(dict(ON), window=False)
+    again.coordinator.data = ent.coordinator.data
+    state = _State(ent.hvac_mode.value, {"preset_mode": ent.preset_mode,
+                                         "temperature": ent.target_temperature})
+    _run(_start(again, last_state=state, extra=_Extra(extra)))
+    lr = again._doser.learner
+    assert lr.gain_c_per_open_min == pytest.approx(0.045) and lr.bias_c == 0.0
+    assert (lr.theta_s, lr.tau_s) == (300.0, 480.0) and not lr.learned
+    events = [e.text for e in again._activity.entries() if not e.decision]
+    assert ("Dosed top-ups: 2.17 pools pulses; the single-pulse values (gain 0.089, spread "
+            "25 min) are dropped and the gain starts from the default (0.045)") in events

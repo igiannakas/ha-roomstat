@@ -222,12 +222,15 @@ TUNING_SENSORS: tuple[TuningSensorDescription, ...] = (
         attrs_fn=lambda c: c.valve_lookahead_summary(),
         needs_lookahead=True,
     ),
-    # Dosed top-ups: the learned room rise per open-minute of the valve (the
-    # model's gain), with the delay, spread, aim bias, how many episodes it
-    # learned from, the last lesson and the pulses of the last 24 h.  Its
-    # attributes change only when an episode is judged or a pulse starts
-    # (the recorder writes a row for each change): the heat in flight is on
-    # the thermostat (unrecorded), the episodes are in the diagnostics.
+    # Dosed top-ups: the room rise per open-minute of the valve in use (the
+    # model's gain), with its uncertainty, the delay, spread, aim bias, the
+    # last pooled fit (pulses pooled, span, residual and noise, effective
+    # samples, the dead-start diagnostic), the anchor (the auto-tuner's
+    # heating rate), the last lesson and the pulses of the last 24 h.  Its
+    # attributes change only when a pulse starts or is judged or a pooled
+    # fit is applied (the recorder writes a row for each change): the heat
+    # in flight is on the thermostat (unrecorded), the pulses, chains and
+    # the fit in full are in the diagnostics.
     TuningSensorDescription(
         key="topup_dose",
         translation_key="topup_dose",

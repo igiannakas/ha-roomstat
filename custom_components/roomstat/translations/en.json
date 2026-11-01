@@ -188,12 +188,16 @@
           },
           "dosed_topups": {
             "name": "Dosed top-ups",
-            "description": "Experimental. A room is either heating up (0.8 °C or more short) or topped up with short full-power pulses, instead of holding the valve part-open. Each pulse is sized from the heat already on its way to the room and from how fast the room is cooling, so the room stays within about 0.1 °C of its target instead of overshooting after every top-up. What a pulse does in this room is learned from the room's own pulses. Rooms with this on time their pulses together where they can, so the boiler fires once for several radiators. Uses the heating power sensor picked in the Valve look-ahead section.",
+            "description": "Experimental. A room is either heating up (0.8 °C or more short) or topped up with short full-power pulses, instead of holding the valve part-open. Each pulse is sized from the heat already on its way to the room and from how fast the room is cooling, so the room stays in the zone set below instead of overshooting after every top-up. What a pulse does in this room is learned from the room's own pulses. Rooms with this on time their pulses together where they can, so the boiler fires once for several radiators. Uses the heating power sensor picked in the Valve look-ahead section.",
             "data": {
-              "dosed_topups": "Dosed top-ups"
+              "dosed_topups": "Dosed top-ups",
+              "dose_zone_above_c": "Zone above the target",
+              "dose_zone_below_c": "Zone below the target"
             },
             "data_description": {
-              "dosed_topups": "Pulses last at least 3 minutes, and at most what the room's own heating rate (from auto-tune) says its shortfall needs, with 0.2 °C to spare (12 minutes until that rate is known). A shortfall of 0.8 °C or more is a normal heat-up; anything less is dosed, never held. Windows, presence and boost work as before. Auto-tune's reset forgets what was learned."
+              "dosed_topups": "Pulses last at least 3 minutes, and at most what the room's own heating rate (from auto-tune) says its shortfall needs, with 0.2 °C to spare (12 minutes until that rate is known). A shortfall of 0.8 °C or more is a normal heat-up; anything less is dosed, never held. Windows, presence and boost work as before. Auto-tune's reset forgets what was learned.",
+              "dose_zone_above_c": "How far over the target a pulse may take the room. Each pulse aims 0.1 °C less than this (never below the target), and a pulse that would go higher waits or ends early. A wider zone means fewer, longer pulses and fewer boiler starts. 0.1 with 0.1 below keeps the room centred on the target.",
+              "dose_zone_below_c": "How far under the target the room may cool before the next pulse is due. The pulse is timed so the room bottoms out about here."
             }
           },
           "out_of_band": {

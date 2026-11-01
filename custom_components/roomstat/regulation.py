@@ -70,25 +70,28 @@ Strong commands where they matter, fine ones near the target:
   +0.94 worst).  A Smith predictor (dosing.py) tracks the rise still in
   flight from heat already sent; the regulator decides on the *virtual*
   error (error - in flight), fires when that error plus the cooling over
-  the visible dead time (theta + tau / 2) reaches ``release_below_c``
-  (also at or just above the target: a 25 °C pulse cannot trickle as a
-  hold command there would) and a minimum pulse would not land more than
-  ``stop_over_c`` over, and ends the pulse once it covers the virtual
-  shortfall plus the cooling until the heat has landed (theta + 2 tau;
-  a room warming by itself needs that much less), after at least
+  the visible dead time (theta + tau / 2) reaches the dosing zone's
+  ``DoseConfig.zone_below_c`` (also at or just above the target: a 25 °C
+  pulse cannot trickle as a hold command there would) and a minimum pulse
+  would not land more than ``zone_above_c`` over, and ends the pulse once
+  it covers the virtual shortfall to the aim (``DoseConfig.aim_over_c``
+  over the target) plus the cooling until the heat has landed (theta + 2
+  tau; a room warming by itself needs that much less), after at least
   ``DoseConfig.pulse_min_s`` (unless the target was lowered since it
   started), at its cap (:func:`dose_cap_s`, set when it starts: the same
   dose worked out on the room's own heating rate, without the aim bias and
   on its own cooling observer, plus ``cap_margin_c``: a wrong model cannot
-  run past it), on the heat-up's own exit once its heat shows, or at once on
-  the measured stop rule.  The next pulse waits theta + 2 tau after the last
+  run past it), on the heat-up's own exit onto the aim once its heat shows,
+  or at once on the measured stop rule (``zone_above_c`` over).  The zone
+  is the owner's (options per room, 1 Nov 2026: +0.2 / -0.1 by default;
+  2.16.0's +-0.1 cycled the boiler too often).  The next pulse waits theta + 2 tau after the last
   one started and theta + tau / 2 after it ended: heat still in flight is
   already taken off the virtual error, so waiting for its tail to fade as
   well only let the room cool past the band (0.18 under at 0.8 °C/h).  A
   pulse may also fire early on another zone's burn or with another room's
   pulse (the boiler is on/off: radiators share its burns), only when a
   minimum pulse would land at most ``DoseConfig.fire_max_overshoot_c``
-  above the target.  Design: project doc
+  above the aim.  Design: project doc
   claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md.
 
 Valve look-ahead (lookahead.py, an option per room): a Tado valve looks
@@ -316,18 +319,18 @@ def dose_cap_need_c(
 
 def dose_need_c(
     virtual_error_c: float, fall_c_per_s: float, horizon_s: float,
-    aim_under_c: float = 0.0, bias_c: float = 0.0,
+    aim_over_c: float = 0.0, bias_c: float = 0.0,
 ) -> float:
     """What a pulse still has to cover (°C): the virtual shortfall (heat in
-    flight already taken off) less the aim, plus the room's cooling until
-    the heat has landed (``horizon_s`` = theta + 2 tau).  Non-finite inputs
-    count as 0."""
+    flight already taken off) to the aim (``aim_over_c`` over the target),
+    plus the room's cooling until the heat has landed (``horizon_s`` =
+    theta + 2 tau).  Non-finite inputs count as 0."""
     e = float(virtual_error_c) if _finite(virtual_error_c) else 0.0
     fall = max(0.0, float(fall_c_per_s)) if _finite(fall_c_per_s) else 0.0
     horizon = max(0.0, float(horizon_s)) if _finite(horizon_s) else 0.0
-    aim = float(aim_under_c) if _finite(aim_under_c) else 0.0
+    aim = float(aim_over_c) if _finite(aim_over_c) else 0.0
     bias = float(bias_c) if _finite(bias_c) else 0.0
-    return (e - aim + bias) + fall * horizon
+    return (e + aim + bias) + fall * horizon
 
 
 def dose_ready_in_s(
@@ -347,8 +350,8 @@ def dose_ready_in_s(
 
 
 def dose_floor_landing_c(need_c: float, gain_c_per_open_min: float, floor_open_min: float) -> float:
-    """Where a minimum pulse would land relative to the target (°C, positive
-    is above): the rise it delivers less what is needed."""
+    """Where a minimum pulse would land relative to what ``need_c`` aims at
+    (°C, positive is above): the rise it delivers less what is needed."""
     if not _finite(need_c, gain_c_per_open_min, floor_open_min):
         return 0.0
     return gain_c_per_open_min * max(0.0, floor_open_min) - need_c
@@ -522,18 +525,25 @@ class FeedforwardPiRegulator:
         fall = dose_fall_c_per_s(loss_slope, cfg.slope_deadband_c_per_h)
         rise = dose_rise_c_per_s(loss_slope, cfg.slope_deadband_c_per_h)
 
+        # The dosing zone (options per room): released at zone_below under
+        # the target, each pulse aimed at aim over it, nothing that would
+        # land more than zone_above over.
+        aim = dose.aim_over_c
+        zone_above = dose.zone_above_c
+        zone_below = dose.zone_below_c
+
         def need_for(virtual_error: float) -> float:
-            return (dose_need_c(virtual_error, fall, horizon_s, dose.aim_under_c, bias)
+            return (dose_need_c(virtual_error, fall, horizon_s, aim, bias)
                     - rise * horizon_s)
 
         need = need_for(e_star)
         # The cap's own dose: the room's heating rate, no aim bias, its own
-        # observer (dose_cap_need_c).
+        # observer (dose_cap_need_c), measured from the aim.
         cap_slope = (cap_loss_slope_c_per_s if _finite(cap_loss_slope_c_per_s)
                      else room_slope_c_per_s)
 
         def cap_need(error: float) -> float:
-            return dose_cap_need_c(error, cap_inflight_c, cap_slope, horizon_s,
+            return dose_cap_need_c(error + aim, cap_inflight_c, cap_slope, horizon_s,
                                    cfg.slope_deadband_c_per_h)
 
         # The longest a pulse may run whatever the cap says: the fixed
@@ -579,9 +589,10 @@ class FeedforwardPiRegulator:
                 virtual_error_c=e_star, need_c=need, dose_end=dose_end,
             )
 
-        # The dosing phase.  The measured stop rule applies here too: a room
-        # predicted to overshoot gets no heat, and a running pulse ends.
-        stop_due = o.stop_landing_c <= -cfg.stop_over_c
+        # The dosing phase.  The measured stop rule applies here too, at the
+        # zone's top: a room predicted to land over it gets no heat, and a
+        # running pulse ends.
+        stop_due = o.stop_landing_c <= -zone_above
         floor_open_min = (dose.pulse_min_s - dose.latency_s + dose.close_delay_s) / 60.0
         # A minimum pulse's landing on the stronger of the two estimates of
         # the room's rise per open-minute: a pulse that would overshoot even
@@ -625,10 +636,10 @@ class FeedforwardPiRegulator:
                 end = "covered"
             elif pulse_s >= cap:
                 end = "max"
-            elif (may_end and pulse_s >= lead_s and error_c > 0
-                  and o.rising_c_per_s > 0 and o.landing_c <= cfg.heatup_exit_c):
+            elif (may_end and pulse_s >= lead_s and error_c + aim > 0
+                  and o.rising_c_per_s > 0 and o.landing_c + aim <= cfg.heatup_exit_c):
                 # The heat-up's own exit, measured: once the pulse's heat
-                # shows and the room rises onto its target, the radiator's
+                # shows and the room rises onto its aim, the radiator's
                 # leftover heat lands it (as a full push ends, 2.10.4).
                 end = "landing"
             if end is None:
@@ -670,13 +681,16 @@ class FeedforwardPiRegulator:
         if ready and not stop_due:
             # A negative aim bias (landings above the target) shrinks the
             # dose, not the room's need of a first pulse.
+            # Relative to the aim: a minimum pulse may land up to the zone's
+            # top when the room asks for it, up to fire_max_overshoot_c over
+            # the aim when another room chose the moment.
             floor_landing = dose_floor_landing_c(need - min(0.0, bias), floor_gain,
                                                  floor_open_min)
-            if (e_star + lead_s * (fall - rise) >= cfg.release_below_c
-                    and floor_landing <= cfg.stop_over_c):
+            if (e_star + lead_s * (fall - rise) >= zone_below
+                    and floor_landing + aim <= zone_above):
                 fired_by = "release"
             elif (fire_now in ("burn", "together") and gain > 0
-                  and floor_landing <= dose.fire_max_overshoot_c):
+                  and floor_landing <= min(dose.fire_max_overshoot_c, zone_above - aim)):
                 fired_by = fire_now
         if fired_by is not None:
             cap = cap_at_start()
@@ -693,7 +707,7 @@ class FeedforwardPiRegulator:
             last_pulse_setpoint_c=last_sp,
             virtual_error_c=e_star, need_c=need,
             ready_in_s=(
-                dose_ready_in_s(e_star - lead_s * rise, fall, lead_s, cfg.release_below_c)
+                dose_ready_in_s(e_star - lead_s * rise, fall, lead_s, zone_below)
                 if ready else None
             ),
         )
@@ -766,7 +780,7 @@ class FeedforwardPiRegulator:
             "burn" or "together": the pulse coordinator asks a ready room
             to fire early (dosing.PulseCoordinator); honoured only when a
             minimum pulse would land at most
-            ``DoseConfig.fire_max_overshoot_c`` above the target.
+            ``DoseConfig.fire_max_overshoot_c`` above the aim.
         loss_slope_c_per_s:
             The slope of the room as if unheated (°C/s; the room less the
             rise of Roomstat's heat that has arrived, dosing.RoomDoser): the

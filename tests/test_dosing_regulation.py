@@ -2,8 +2,14 @@
 heat-up from heatup_enter_c, the dosing phase below it, no hold), the
 dead-time release, the pulse, its end and its cap on the room's own heating
 rate, the coordinator's early fire with its floor-landing guard, and the
-steady state the rule produces on a room that matches its model.  HA-free
-(tests/pure_modules.py)."""
+steady state the rule produces on a room that matches its model, and the
+dosing zone (2.17.0, options per room).  HA-free (tests/pure_modules.py).
+
+The mechanism tests run on 2.16.0's band, centred on the target (the zone at
++0.1 / -0.1, the aim on the target): their numbers were worked out on it, and
+2.17.0's regulator with that zone is 2.16.0's exactly (120,000 random cycles
+against d81590d, 1 Nov 2026).  TestZone and the steady state check the
+default zone (+0.2 / -0.1, the aim 0.1 over)."""
 from __future__ import annotations
 
 import dataclasses
@@ -22,8 +28,15 @@ LEAD, HORIZON = THETA + TAU / 2, THETA + 2 * TAU          # 540 s, 1260 s
 GAIN = 0.045
 
 
-def _reg(**overrides) -> R.FeedforwardPiRegulator:
-    return R.FeedforwardPiRegulator(P.RegulationConfig(**overrides))
+BAND_216 = (0.1, 0.1)                                     # 2.16.0's band
+DEFAULT_ZONE = (P.DoseConfig().zone_above_c, P.DoseConfig().zone_below_c)
+
+
+def _reg(*, zone=BAND_216, **overrides) -> R.FeedforwardPiRegulator:
+    """The regulator, its dosing zone ``zone`` (above, below)."""
+    cfg = P.RegulationConfig(**overrides)
+    cfg.dose.zone_above_c, cfg.dose.zone_below_c = zone
+    return R.FeedforwardPiRegulator(cfg)
 
 
 def _settled(mode=R.MODE_STOP, **kw) -> R.RegulationState:
@@ -710,11 +723,11 @@ class _Room:
         return self.g * 90.0 / 60.0 if mode == R.MODE_DOSE else 0.0
 
 
-def _run(fall_c_per_h, hours=6.0, dt=10.0, room_gain_x=1.0):
+def _run(fall_c_per_h, hours=6.0, dt=10.0, room_gain_x=1.0, zone=BAND_216):
     """Returns the pulses (start, length s), the room's error per step, and
     how many cycles were not settled.  ``room_gain_x``: the room's radiator
     against the model's (the regulator is given the model's in flight)."""
-    reg = _reg()
+    reg = _reg(zone=zone)
     room = _Room(fall_c_per_h, gain=GAIN * room_gain_x)
     st = _settled()
     pulses, errors, t = [], [], NOW
@@ -748,11 +761,17 @@ class TestSteadyState:
     room fell to 0.18 under at 0.8 °C/h and left the settled state at
     1.0."""
 
-    @pytest.mark.parametrize("fall, pulse_min, period_min", [
-        (0.2, 3.0, 47.0), (0.3, 3.5, 36.0), (0.5, 5.0, 30.0),
+    @pytest.mark.parametrize("zone, fall, pulse_min, period_min", [
+        (BAND_216, 0.2, 3.0, 47.0), (BAND_216, 0.3, 3.5, 36.0), (BAND_216, 0.5, 5.0, 30.0),
+        # The default zone (2.17.0): the same troughs, landings 0.1 higher,
+        # longer pulses 1.4-1.7 times further apart.
+        (DEFAULT_ZONE, 0.2, 5.3, 78.7), (DEFAULT_ZONE, 0.3, 6.0, 58.5),
+        (DEFAULT_ZONE, 0.5, 7.7, 44.0),
     ])
-    def test_pulses_trough_and_landing(self, fall, pulse_min, period_min):
-        pulses, errors, unsettled = _run(fall)
+    def test_pulses_trough_and_landing(self, zone, fall, pulse_min, period_min):
+        above, below = zone
+        aim = max(0.0, above - 0.1)
+        pulses, errors, unsettled = _run(fall, zone=zone)
         assert unsettled == 0
         later = [p for p in pulses if p[0] - NOW > 1.5 * H]
         assert len(later) >= 3
@@ -762,15 +781,24 @@ class TestSteadyState:
         gaps = [(b - a) / 60 for a, b in zip(starts, starts[1:])]
         assert all(abs(g - period_min) <= 6.0 for g in gaps), gaps
         steady = [e for ts, e in errors if ts - NOW > 1.5 * H]
-        assert max(steady) <= 0.1                       # the trough: the band's floor
-        assert -0.03 <= min(steady) <= 0.03             # the landing: on the target
-        assert all(abs(e) <= 0.1 for e in steady)
+        assert max(steady) <= below                     # the trough: the zone's floor
+        assert -aim - 0.035 <= min(steady) <= -aim + 0.035   # the landing: on the aim
+        assert all(-above <= e <= below for e in steady)
 
-    @pytest.mark.parametrize("fall, pulse_min, period_min", [(0.8, 7.7, 27.6), (1.0, 9.9, 28.3)])
-    def test_cold_weather_stays_in_the_band(self, fall, pulse_min, period_min):
-        """0.8 and 1.0 °C/h: longer pulses, still every ~28 min, the room
-        within -0.11..+0.03 of the target and never unsettled."""
-        pulses, errors, unsettled = _run(fall)
+    @pytest.mark.parametrize("zone, fall, pulse_min, period_min", [
+        (BAND_216, 0.8, 7.7, 27.6), (BAND_216, 1.0, 9.9, 28.3),
+        # The default zone: at 1.0 °C/h the pulse is held to the fixed
+        # 12-min maximum (no heating rate from the tuner here), so it lands
+        # 0.03 short of the aim.
+        (DEFAULT_ZONE, 0.8, 10.8, 38.2), (DEFAULT_ZONE, 1.0, 12.0, 33.7),
+    ])
+    def test_cold_weather_stays_in_the_band(self, zone, fall, pulse_min, period_min):
+        """0.8 and 1.0 °C/h: longer pulses, still every ~28 min (~35 in the
+        default zone), the room from the zone's floor (0.01 under it) to
+        0.03 over the aim, and never unsettled."""
+        above, below = zone
+        aim = max(0.0, above - 0.1)
+        pulses, errors, unsettled = _run(fall, zone=zone)
         assert unsettled == 0
         later = [p for p in pulses if p[0] - NOW > 1.5 * H]
         assert len(later) >= 5
@@ -779,29 +807,183 @@ class TestSteadyState:
         gaps = [(b - a) / 60 for a, b in zip(starts, starts[1:])]
         assert all(abs(g - period_min) <= 3.0 for g in gaps), gaps
         steady = [-e for ts, e in errors if ts - NOW > 1.5 * H]   # room - target
-        assert -0.11 <= min(steady) and max(steady) <= 0.03
+        assert -below - 0.01 <= min(steady) and max(steady) <= aim + 0.03
 
+    @pytest.mark.parametrize("zone", [BAND_216, DEFAULT_ZONE])
     @pytest.mark.parametrize("fall", [0.5, 0.8])
-    def test_a_weaker_radiator_than_the_model(self, fall):
+    def test_a_weaker_radiator_than_the_model(self, fall, zone):
         """The room's radiator 40 % weaker than the model (before the
-        learner has followed): the pulses come more often (every ~21 min)
-        and the room runs short, troughs no lower than -0.16 at 0.5 °C/h
-        and -0.20 at 0.8, never unsettled and never above the target."""
-        pulses, errors, unsettled = _run(fall, room_gain_x=0.6)
+        learner has followed): the pulses come more often (every ~21 min on
+        2.16.0's band, ~28 in the default zone) and the room runs short,
+        troughs no lower than -0.16 at 0.5 °C/h and -0.20 at 0.8, never
+        unsettled and never above the target."""
+        pulses, errors, unsettled = _run(fall, room_gain_x=0.6, zone=zone)
         assert unsettled == 0
         steady = [-e for ts, e in errors if ts - NOW > 1.5 * H]
         assert min(steady) >= (-0.16 if fall == 0.5 else -0.20)
         assert max(steady) <= 0.0
 
-    def test_a_stronger_radiator_than_the_model_lands_hot_but_bounded(self):
-        """40 % stronger at 0.5 °C/h: landings up to +0.10, troughs -0.08,
-        pulses every ~44 min (the learner's step towards smaller doses is the
-        fast one)."""
-        _, errors, unsettled = _run(0.5, room_gain_x=1.5)
+    @pytest.mark.parametrize("zone, hot", [(BAND_216, 0.10), (DEFAULT_ZONE, 0.13)])
+    def test_a_stronger_radiator_than_the_model_lands_hot_but_bounded(self, zone, hot):
+        """40 % stronger at 0.5 °C/h: landings up to 0.10 over the aim on
+        2.16.0's band (5-min pulses), 0.13 in the default zone (its 7.5-min
+        pulses carry more of the model's error), troughs -0.08, pulses every
+        ~44 min (~65) (the learner's step towards smaller doses is the fast
+        one)."""
+        aim = max(0.0, zone[0] - 0.1)
+        _, errors, unsettled = _run(0.5, room_gain_x=1.5, zone=zone)
         assert unsettled == 0
         steady = [-e for ts, e in errors if ts - NOW > 1.5 * H]
-        assert min(steady) >= -0.09 and max(steady) <= 0.10
+        assert min(steady) >= -0.09 and max(steady) <= aim + hot
 
     def test_every_pulse_at_least_the_minimum(self):
         pulses, _, _ = _run(0.1, hours=8)
         assert pulses and all(d >= 180.0 for _, d in pulses)
+
+
+# ---------------------------------------------------------------------------
+# The dosing zone (2.17.0, options per room)
+# ---------------------------------------------------------------------------
+
+AIM = P.DoseConfig().aim_over_c
+
+
+class TestZone:
+    """The zone the dosing phase keeps the room in (owner, 1 Nov 2026: the
+    band of +-0.1 cycled the boiler too often): released at zone_below_c
+    under the target, each pulse aimed zone_above_c - 0.1 over it, nothing
+    that would land more than zone_above_c over.  Heat-ups and the ordinary
+    modes keep their own band."""
+
+    def test_the_defaults_and_the_aim(self):
+        cfg = P.DoseConfig()
+        assert (cfg.zone_above_c, cfg.zone_below_c) == (0.2, 0.1)
+        assert cfg.aim_over_c == pytest.approx(0.1)
+        assert dataclasses.replace(cfg, zone_above_c=0.1).aim_over_c == 0.0   # 2.16.0's band
+        assert dataclasses.replace(cfg, zone_above_c=0.05).aim_over_c == 0.0  # never below
+        assert dataclasses.replace(cfg, zone_above_c=0.5).aim_over_c == pytest.approx(0.4)
+
+    @pytest.mark.parametrize("value, expected", [
+        (None, 0.2), ("", 0.2), ("x", 0.2), (float("nan"), 0.2), (float("inf"), 0.2),
+        (0.04, 0.2), (0.55, 0.2), (0.05, 0.05), (0.5, 0.5), ("0.3", 0.3),
+        (0.15000000000000002, 0.15),
+    ])
+    def test_an_option_out_of_range_keeps_the_default(self, value, expected):
+        assert P.dose_zone_option(value, 0.2) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("below", [0.1, 0.2])
+    def test_released_at_the_zones_floor(self, below):
+        reg = _reg(zone=(0.2, below))
+        res, _ = _dose(reg, _settled(), 20.0 - below + 0.01)
+        assert res.mode == R.MODE_STOP and res.ready_in_s is None   # flat: never due by itself
+        res, _ = _dose(reg, _settled(), 20.0 - below - 0.001)
+        assert res.mode == R.MODE_DOSE and res.fired_by == "release"
+        # Falling 0.5 °C/h: one visible dead time ahead.
+        res, _ = _dose(reg, _settled(), 20.0 - below + 0.02, slope_c_per_h=-0.5)
+        assert res.mode == R.MODE_DOSE
+        assert res.ready_in_s is None
+
+    def test_each_pulse_aims_over_the_target(self):
+        """A flat room 0.1 under: the pulse covers the shortfall and the aim
+        (0.2), against 0.1 on 2.16.0's band."""
+        res, _ = _dose(_reg(zone=DEFAULT_ZONE), _settled(), 19.9)
+        assert res.fired_by == "release" and res.need_c == pytest.approx(0.1 + AIM)
+        res, _ = _dose(_reg(), _settled(), 19.9)
+        assert res.fired_by == "release" and res.need_c == pytest.approx(0.1)
+
+    def test_the_stop_rule_is_at_the_zones_top(self):
+        """A pulse 4 min in, 0.05 over and rising 0.6 °C/h: predicted 0.15
+        over within the stop's 10 min.  On 2.16.0's band the stop rule ends
+        it; in the default zone it is under the top (0.2), and the pulse
+        ends by its dose instead.  Rising 1.2 °C/h (0.25 over) ends it."""
+        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 240, pulse_setpoint_c=20.0)
+        res, _ = _dose(_reg(), st, 20.05, slope_c_per_h=0.6)
+        assert res.dose_end == "stop_rule"
+        res, _ = _dose(_reg(zone=DEFAULT_ZONE), st, 20.05, slope_c_per_h=0.6)
+        assert res.dose_end == "covered"
+        res, _ = _dose(_reg(zone=DEFAULT_ZONE), st, 20.05, slope_c_per_h=1.2)
+        assert res.dose_end == "stop_rule"
+
+    @pytest.mark.parametrize("gain, fires_216, fires_default", [
+        (0.05, True, True),       # a minimum pulse lands +0.075
+        (0.08, False, True),      # +0.18: over 2.16.0's top, inside the zone
+        (0.09, False, False),     # +0.215: over the zone's top too
+    ])
+    def test_the_minimum_pulses_guard_is_at_the_zones_top(self, gain, fires_216, fires_default):
+        """A flat room at the release (0.1 under): a minimum pulse (3.5
+        open-min) at the stronger gain lands gain x 3.5 - 0.1 over the
+        target, allowed up to the zone's top."""
+        for zone, fires in ((BAND_216, fires_216), (DEFAULT_ZONE, fires_default)):
+            res, _ = _dose(_reg(zone=zone), _settled(), 19.9, gain=gain)
+            assert (res.fired_by == "release") is fires, (zone, gain)
+
+    def test_the_coordinators_early_fire_is_measured_from_the_aim(self):
+        """On target, falling so that the cooling until the heat has landed
+        is 0.05: not yet due.  A minimum pulse (0.1575) would land 0.11 over
+        the target: 0.01 over the aim (fire with the other room) in the
+        default zone, 0.11 over it on 2.16.0's band (no)."""
+        fall_c_per_h = 0.05 / HORIZON * H
+        res, _ = _dose(_reg(zone=DEFAULT_ZONE), _settled(), 20.0, slope_c_per_h=-fall_c_per_h,
+                       fire_now="together")
+        assert res.fired_by == "together"
+        res, _ = _dose(_reg(), _settled(), 20.0, slope_c_per_h=-fall_c_per_h, fire_now="together")
+        assert res.fired_by is None and res.mode == R.MODE_STOP
+
+    def test_the_cap_is_measured_from_the_aim(self):
+        rate = 2.62 / 60.0
+        for zone in (BAND_216, DEFAULT_ZONE):
+            aim = max(0.0, zone[0] - 0.1)
+            res, _ = _dose(_reg(zone=zone), _settled(), 19.6, cap_gain=rate, cap_slope_c_per_h=-0.5)
+            need = R.dose_cap_need_c(0.4 + aim, 0.0, -0.5 / H, HORIZON, 0.1)
+            assert res.fired_by == "release"
+            assert res.pulse_cap_s == pytest.approx(R.dose_cap_s(need, rate, P.DoseConfig()),
+                                                    abs=0.1)
+        # 0.1 more to cover at 0.0437 per open-minute: 2.3 min longer.
+        caps = [_dose(_reg(zone=z), _settled(), 19.6, cap_gain=rate,
+                      cap_slope_c_per_h=-0.5)[0].pulse_cap_s for z in (BAND_216, DEFAULT_ZONE)]
+        assert caps[1] - caps[0] == pytest.approx(0.1 / rate * 60.0, abs=0.5)
+
+    def test_the_landing_end_is_measured_from_the_aim(self):
+        """A long pulse on a model too weak, the room rising 1.5 °C/h on its
+        heat: the heat-up's exit (landing - Td x rise within 0.1 of the aim)
+        ends it.  0.3 under: on 2.16.0's band (0.05 short of the target);
+        in the default zone only from 0.2 under (0.05 short of the aim)."""
+        st = _settled(mode=R.MODE_DOSE, pulse_start_ts=NOW - 900, pulse_setpoint_c=20.0,
+                      pulse_cap_s=3600.0)
+        kw = dict(slope_c_per_h=1.5, loss_slope_c_per_h=-0.5, gain=0.01, cap_gain=0.044,
+                  cap_slope_c_per_h=-0.5)
+        assert _dose(_reg(), st, 19.7, **kw)[0].dose_end == "landing"
+        res, _ = _dose(_reg(zone=DEFAULT_ZONE), st, 19.7, **kw)
+        assert res.dose_end is None and res.mode == R.MODE_DOSE
+        assert _dose(_reg(zone=DEFAULT_ZONE), st, 19.8, **kw)[0].dose_end == "landing"
+
+    def test_heat_ups_and_the_ordinary_modes_keep_their_band(self):
+        """With dosing off (a window, Boost, the option off), and in the
+        heat-up phase, the zone changes nothing: random cycles give the same
+        results in any zone."""
+        legacy = [f.name for f in dataclasses.fields(R.RegulationResult)]
+        for seed in range(6):
+            rnd = random.Random(seed)
+            a, b = _reg(), _reg(zone=(0.45, 0.3))
+            sa = sb = R.RegulationState()
+            for _ in range(400):
+                room = 20.0 + rnd.uniform(-1.5, 0.5)
+                slope = rnd.uniform(-1.5, 2.0)
+                ra, sa = _dose(a, sa, room, slope_c_per_h=slope, dosing=False)
+                rb, sb = _dose(b, sb, room, slope_c_per_h=slope, dosing=False)
+                assert [getattr(ra, f) for f in legacy] == [getattr(rb, f) for f in legacy]
+        # The heat-up phase: 0.9 under and flat, a heat-up in any zone.
+        for zone in (BAND_216, DEFAULT_ZONE, (0.5, 0.5)):
+            res, _ = _dose(_reg(zone=zone), _settled(), 19.1)
+            assert res.mode == R.MODE_HEAT
+
+    @pytest.mark.parametrize("zone", [(0.2, 0.1), (0.3, 0.1), (0.2, 0.2)])
+    def test_a_wider_zone_means_fewer_pulses(self, zone):
+        """0.5 °C/h on a room that matches its model: wider zones, longer
+        pulses further apart (2.16.0's band: 5-min pulses every 30 min)."""
+        base, _, _ = _run(0.5)
+        wide, errors, unsettled = _run(0.5, zone=zone)
+        assert unsettled == 0
+        assert len(wide) < 0.75 * len(base)
+        steady = [-e for ts, e in errors if ts - NOW > 1.5 * H]
+        assert min(steady) >= -zone[1] - 0.01 and max(steady) <= zone[0]

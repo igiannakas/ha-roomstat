@@ -80,6 +80,8 @@ from .const import (
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
+    CONF_DOSE_ZONE_ABOVE_C,
+    CONF_DOSE_ZONE_BELOW_C,
     CONF_ECO_TARGET,
     CONF_FALLBACK_ENTITY_ID,
     CONF_FROST_PROTECTION_TARGET,
@@ -114,6 +116,7 @@ from .parameters import (
     OutOfBandConfig,
     PresetConfig,
     RegulationConfig,
+    dose_zone_option,
 )
 from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
@@ -456,6 +459,13 @@ class RoomstatClimate(
             heat_timer_s = safe_float(opts.get(CONF_HEAT_TIMER_S))
             if heat_timer_s is not None and heat_timer_s > 0:
                 config.heat_timer_s = max(heat_timer_s, HEAT_TIMER_MIN_S)
+            # The dosing zone (dosed top-ups): out of range keeps the default.
+            config.dose.zone_above_c = dose_zone_option(
+                opts.get(CONF_DOSE_ZONE_ABOVE_C), config.dose.zone_above_c
+            )
+            config.dose.zone_below_c = dose_zone_option(
+                opts.get(CONF_DOSE_ZONE_BELOW_C), config.dose.zone_below_c
+            )
         return config
 
     @staticmethod
@@ -1049,6 +1059,7 @@ class RoomstatClimate(
         """Called when config entry options change (e.g. from number entities)."""
         self._config_entry = entry
         self._config = self._build_config(entry)
+        self._dosing_options_changed()
         self._attr_min_temp = self._config.min_target_c
         self._attr_max_temp = self._config.max_target_c
         self.__dict__.pop("min_temp", None)

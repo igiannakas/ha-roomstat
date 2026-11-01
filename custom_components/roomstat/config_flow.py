@@ -23,6 +23,8 @@ from .const import (
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
+    CONF_DOSE_ZONE_ABOVE_C,
+    CONF_DOSE_ZONE_BELOW_C,
     CONF_DOSED_TOPUPS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
@@ -57,9 +59,13 @@ from .const import (
 )
 from .parameters import (
     DEFAULT_SENSOR_GRACE_S,
+    DOSE_ZONE_MAX_C,
+    DOSE_ZONE_MIN_C,
+    DOSE_ZONE_STEP_C,
     BehaviourConfig,
     OutOfBandConfig,
     RegulationConfig,
+    dose_zone_option,
 )
 from .preheat import MODE_OFF, MODES, TIMING_OPTIONS
 
@@ -464,12 +470,33 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
 
         # --- Build the dosed top-ups section schema (2.15.0) ---
         # It uses the heating power sensor picked in the look-ahead section.
+        # The zone (2.17.0): how far over and under the target the room may
+        # go between pulses.
+        zone_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=DOSE_ZONE_MIN_C, max=DOSE_ZONE_MAX_C, step=DOSE_ZONE_STEP_C,
+                mode=selector.NumberSelectorMode.BOX,
+                unit_of_measurement="°C",
+            )
+        )
         dosing_section_schema = vol.Schema(
             {
                 vol.Required(
                     CONF_DOSED_TOPUPS,
                     default=bool(opts.get(CONF_DOSED_TOPUPS, False)),
                 ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_DOSE_ZONE_ABOVE_C,
+                    default=dose_zone_option(
+                        opts.get(CONF_DOSE_ZONE_ABOVE_C), defaults.dose.zone_above_c
+                    ),
+                ): zone_selector,
+                vol.Required(
+                    CONF_DOSE_ZONE_BELOW_C,
+                    default=dose_zone_option(
+                        opts.get(CONF_DOSE_ZONE_BELOW_C), defaults.dose.zone_below_c
+                    ),
+                ): zone_selector,
             }
         )
 

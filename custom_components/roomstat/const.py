@@ -103,6 +103,10 @@ CONF_HEATING_POWER_ENTITY_ID = "heating_power_entity_id"
 # Smith predictor replace the hold (dosing.py).  Needs the heating power
 # sensor above, to check each pulse opened the valve.
 CONF_DOSED_TOPUPS = "dosed_topups"
+# The dosing zone (2.17.0, parameters.DoseConfig.zone_above_c / zone_below_c):
+# how far over and under the target a dosed room may go, °C.
+CONF_DOSE_ZONE_ABOVE_C = "dose_zone_above_c"
+CONF_DOSE_ZONE_BELOW_C = "dose_zone_below_c"
 
 # Out-of-band alarm (binary_sensor.<room>_out_of_band; parameters.OutOfBandConfig)
 CONF_BAND_C = "band_c"

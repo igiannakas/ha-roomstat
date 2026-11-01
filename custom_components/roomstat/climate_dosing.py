@@ -16,6 +16,11 @@ top-ups" option on, this mixin:
   send starts or ends episodes, re-judges a running pulse at the second it
   should end, and puts each episode's lesson in the activity log
   (``_dosing_after_compute``);
+* runs the pooled fit (2.17.0, dosing.pooled_fit: pure Python, 0.03-0.3 s
+  measured) after each usable pulse is judged, in an executor on an
+  immutable snapshot (``_async_dosing_refit``), and applies its result at
+  the next cycle's start, so the model is the same throughout a cycle; a
+  result for a learner reset or replaced meanwhile is discarded;
 * reports this room's zone heating to the house's pulse coordinator every
   regulated cycle, dosing or not (``_dosing_note_zone``), so dosed rooms can
   ride any zone's call for heat: the boiler is an on/off type, so radiators
@@ -26,16 +31,19 @@ top-ups" option on, this mixin:
 
 It never stops the regulation: a failure is logged once, with its
 traceback, and dosing is off for the rest of the session (the room is then
-regulated as without it).
+regulated as without it).  A failed pooled fit is no failed regulation: it
+is logged once per distinct error and the model in use stays, dosing on.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from typing import Any
 
 from homeassistant.helpers.event import async_call_later
 
+from .climate_activity import local_hhmm
 from .climate_controllers import PENDING_HEAT
 from .const import (
     CONF_DOSED_TOPUPS,
@@ -43,7 +51,7 @@ from .const import (
     CONF_SOURCE_ENTITY_ID,
     PRESET_BOOST,
 )
-from .dosing import PulseCoordinator, RoomDoser
+from .dosing import FitInput, PooledFit, PulseCoordinator, RoomDoser, pooled_fit
 from .parameters import DoseConfig
 from .regulation import MODE_DOSE, MODE_HEAT, MODE_STOP
 
@@ -53,6 +61,8 @@ _LOGGER = logging.getLogger(__name__)
 # every room reports its zone's heating to it, dosed rooms ask it when to
 # fire, and a room that starts a pulse wakes the rooms due soon.
 PULSE_COORDINATOR = PulseCoordinator(DoseConfig())
+# Distinct pooled-fit errors logged (with their traceback) per room.
+_FIT_ERRORS_LOGGED_MAX = 8
 
 
 def _finite(value: Any) -> bool:
@@ -80,6 +90,11 @@ class DosingMixin:
         self._dose_fired_with: tuple[str, str] | None = None
         # Set once anything here raised: off for the rest of the session.
         self._dosing_failure: str | None = None
+        # The pooled fit (2.17.0): the refit running in the executor, the
+        # result waiting for the next cycle's start, the errors logged.
+        self._dosing_refit_task: Any = None
+        self._dosing_pending_fit: PooledFit | None = None
+        self._dosing_fit_errors: set[str] = set()
 
     # -- properties ---------------------------------------------------------
     @property
@@ -154,10 +169,15 @@ class DosingMixin:
         PULSE_COORDINATOR.register(self._config_entry.entry_id, self._dosing_wake)
 
     def _dosing_stop(self) -> None:
-        """When the entity is removed: leave it, cancel the pulse timer."""
+        """When the entity is removed: leave it, cancel the pulse timer and
+        a refit still running (its result would be dropped anyway)."""
         self._dosing_live = False
         PULSE_COORDINATOR.unregister(self._config_entry.entry_id)
         self._dosing_cancel_wake()
+        task, self._dosing_refit_task = self._dosing_refit_task, None
+        if task is not None and not task.done():
+            task.cancel()
+        self._dosing_pending_fit = None
 
     def _dosing_check_setup(self) -> None:
         """At start: say so if it is on without a heating sensor."""
@@ -245,6 +265,10 @@ class DosingMixin:
         if not self._dosing_enabled or self._dosing_failure is not None:
             return {}
         try:
+            # A pooled fit that came back since the last cycle takes effect
+            # now, at the cycle's start (the model is the same throughout a
+            # cycle).  A result for an older learner is discarded there.
+            self._dosing_apply_pending_fit(now)
             # The valve seen shut with no heat command of ours on its way: an
             # off that was never sent (the valve already showed off, a
             # restart in between) must not leave the booking open.
@@ -265,7 +289,6 @@ class DosingMixin:
                 now, enabled=self._dosing_allowed(), setpoint_c=setpoint,
                 room_c=room_temp, room_slope_c_per_s=slope, state=self._reg_state,
                 deadband_c_per_h=self._config.slope_deadband_c_per_h,
-                release_below_c=self._config.release_below_c,
                 room_fresh=room_fresh,
             )
         except Exception as err:  # noqa: BLE001 - never stop the regulation
@@ -280,6 +303,77 @@ class DosingMixin:
         cfg = self._config
         top = trv.max_c if _finite(trv.max_c) else cfg.max_target_c
         return cfg.min_target_c + 0.05 < trv.setpoint_c < min(top, cfg.max_target_c) - 0.05
+
+    def _dosing_options_changed(self) -> None:
+        """The options changed without a reload (the config was rebuilt):
+        the doser and its learner keep the dose config they were built
+        with, one object with the regulator's, and the dosing zone, its only
+        options, is copied into it."""
+        dose = self._doser.cfg
+        dose.zone_above_c = self._config.dose.zone_above_c
+        dose.zone_below_c = self._config.dose.zone_below_c
+        self._config.dose = dose
+
+    # -- the pooled fit (2.17.0) -------------------------------------------------
+    def _dosing_start_refit(self, now: float) -> None:
+        """A usable pulse was judged: snapshot the learner's data and run
+        the pooled fit in an executor, unless one is still running (the
+        refit stays due, and the next cycle starts it)."""
+        task = self._dosing_refit_task
+        if task is not None and not task.done():
+            return
+        if self.hass is None or not self._dosing_live:
+            return
+        snapshot = self._doser.learner.fit_input(now)
+        if snapshot is None:
+            return
+        self._dosing_refit_task = self.hass.async_create_background_task(
+            self._async_dosing_refit(snapshot),
+            f"roomstat {self._config_entry.entry_id} dosed top-ups pooled fit",
+            eager_start=True,
+        )
+
+    async def _async_dosing_refit(self, snapshot: FitInput) -> None:
+        """The pooled fit off the event loop (pure Python, up to about 0.3 s
+        for a full window); its result waits for the next cycle's start.
+        A failed fit leaves the model in use and dosing on."""
+        try:
+            fit = await self.hass.async_add_executor_job(pooled_fit, snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - a failed fit is no failed regulation
+            self._dosing_fit_error(err)
+            self._doser.learner.fit_failed(snapshot.generation)
+            return
+        if not self._dosing_live or self._dosing_failure is not None:
+            return
+        self._dosing_pending_fit = fit
+
+    def _dosing_fit_error(self, err: BaseException) -> None:
+        """Log a failed pooled fit once per distinct error, with its
+        traceback (called from the except block)."""
+        what = f"{type(err).__name__}: {err}"
+        if what in self._dosing_fit_errors or len(self._dosing_fit_errors) >= _FIT_ERRORS_LOGGED_MAX:
+            _LOGGER.debug("%s: the pooled fit failed again (%s)",
+                          self._config_entry.title, what)
+            return
+        self._dosing_fit_errors.add(what)
+        self._log(_LOGGER).exception(
+            "dosed top-ups: the pooled fit failed (%s); the model in use stays", what
+        )
+
+    def _dosing_apply_pending_fit(self, now: float) -> None:
+        """Apply the pooled fit that came back (inside the caller's
+        try/except: a raise here is a glue failure)."""
+        fit, self._dosing_pending_fit = self._dosing_pending_fit, None
+        if fit is None:
+            return
+        line = self._doser.learner.apply_fit(fit, now, local_hhmm)
+        if line is None:
+            _LOGGER.debug("%s: a pooled fit for an older learner was discarded",
+                          self._config_entry.title)
+            return
+        self._log(_LOGGER).info("dosed top-up: %s", line)
 
     def _dosing_after_compute(
         self, now: float, result: Any, setpoint: float, room_temp: float,
@@ -320,6 +414,8 @@ class DosingMixin:
             self._dose_fired_with = outcome.fired_with
             for line in outcome.lines:
                 self._log(_LOGGER).info("dosed top-up: %s", line)
+            if outcome.refit_due:
+                self._dosing_start_refit(now)
             self._dosing_cancel_wake()
             if outcome.wake_in_s is not None and self.hass is not None and self._dosing_live:
                 self._dose_wake_cancel = async_call_later(
@@ -347,12 +443,17 @@ class DosingMixin:
             state.mode = MODE_STOP
         state.pulse_setpoint_c = None
         state.pulse_cap_s = None
-        if why and running and self._dosing_enabled and self._dosing_failure is None:
-            try:
+        if not self._dosing_enabled or self._dosing_failure is not None:
+            return
+        try:
+            # The readings pooled break here: the room was not left to its
+            # pulses (an interruption repeated every cycle only extends it).
+            self._doser.interrupt(now, why or "a pulse saved running was no longer on the valve")
+            if why and running:
                 for verdict in self._doser.learner.drop_all(why):
                     self._log(_LOGGER).info("dosed top-up: %s", verdict.line)
-            except Exception as err:  # noqa: BLE001 - never stop the regulation
-                self._dosing_fail(err)
+        except Exception as err:  # noqa: BLE001 - never stop the regulation
+            self._dosing_fail(err)
 
     def _dosing_resume(self, now: float) -> None:
         """After the resume mode was decided from what the valve holds: a
@@ -434,6 +535,9 @@ class DosingMixin:
             return
         try:
             self._doser.restore(data.get("doser"), now)
+            note = self._doser.learner.take_migration_note()
+            if note is not None and self._dosing_enabled:
+                self._log(_LOGGER).info("dosed top-ups: %s", note)
             cfg = self._config.dose
             state = self._reg_state
 
@@ -476,7 +580,7 @@ class DosingMixin:
             )
         except Exception as err:  # noqa: BLE001 - a bad save starts afresh
             self._doser.reset()
-            self._dosing_interrupted(now)
+            self._dosing_interrupted(now, "the saved dosed top-ups could not be taken back")
             self._log(_LOGGER).warning(
                 "the saved dosed top-ups could not be taken back (%s): learning afresh",
                 err,

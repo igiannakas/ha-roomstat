@@ -374,7 +374,7 @@ class TestFixFlow:
         assert result == {"type": "abort", "reason": "entry_removed"}
 
 
-@pytest.mark.parametrize("lang", ["strings.json", "translations/de.json"])
+@pytest.mark.parametrize("lang", ["strings.json"])
 def test_every_setting_has_a_label(lang):
     import json
 

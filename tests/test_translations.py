@@ -1,7 +1,8 @@
 """The UI strings: the frontend reads them as ICU messages, where ``<word>``
 opens a markup tag (30 Oct 2026: ``sensor.<zone>_heating`` in a help text
 showed "Translation error: UNCLOSED_TAG"), so no string may hold one;
-``strings.json`` and ``en.json`` are identical, and ``de.json`` has every key."""
+``strings.json`` and ``en.json`` are identical, and English is the only
+language (owner, 1 Nov 2026)."""
 from __future__ import annotations
 
 import json
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "roomstat"
-_FILES = ["strings.json", "translations/en.json", "translations/de.json"]
+_FILES = ["strings.json", "translations/en.json"]
 _TAG = re.compile(r"</?[A-Za-z][^>]*>?")
 
 
@@ -37,7 +38,5 @@ def test_strings_and_english_are_identical():
     assert _load("strings.json") == _load("translations/en.json")
 
 
-def test_german_has_every_key():
-    english = {path for path, _ in _strings(_load("strings.json"))}
-    german = {path for path, _ in _strings(_load("translations/de.json"))}
-    assert english - german == set()
+def test_english_is_the_only_translation():
+    assert sorted(p.name for p in (_ROOT / "translations").iterdir()) == ["en.json"]

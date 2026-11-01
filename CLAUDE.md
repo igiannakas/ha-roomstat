@@ -151,9 +151,10 @@ modules.
   after `home-assistant` is defined (scoped registry), and reads
   `boost_duration_min` and `source_entity_id` from the climate attributes.
 - `const.py`: DOMAIN, option keys, custom preset names, `safe_float()`.
-- `strings.json` + `translations/` (en, de): UI texts. Keep `strings.json`
-  and `en.json` identical, and add new keys to `de.json` too. No `<word>`
-  in a string: the frontend reads it as a markup tag and shows
+- `strings.json` + `translations/en.json`: UI texts, English only (owner,
+  1 Nov 2026: no other languages, to save tokens; German was removed in
+  2.17.0). Keep `strings.json` and `en.json` identical. No `<word>` in a
+  string: the frontend reads it as a markup tag and shows
   "Translation error: UNCLOSED_TAG" (`tests/test_translations.py`).
 - `manifest.json`: version and metadata.
 
@@ -1123,13 +1124,14 @@ doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
   with the traceback, and switches the look-ahead off for the session
   (`lookahead_active`).
 
-## Dosed top-ups (2.15.0; two phases 2.16.0)
+## Dosed top-ups (2.15.0; two phases 2.16.0; zone and pooled learner 2.17.0)
 
 Read this before changing `dosing.py`, `climate_dosing.py`, `DoseConfig`,
 the `dose` mode or `_dose_step` in `regulation.py`.  Design, fit and
 evidence: project docs
-`claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md` and
-`claude/roomstat-dosed-topups-implementation-guide-2026-10-30.md`.
+`claude/roomstat-smith-predictor-dosed-topups-2026-10-30.md`,
+`claude/roomstat-dosed-topups-implementation-guide-2026-10-30.md` and
+`claude/roomstat-pooled-dose-learner-2026-11-01.md` (2.17.0).
 
 - **The owner's request (30 Oct 2026):** once a room has landed, hold it in
   a 0.2 °C band centred on the target (±0.1; short rather than hot, but in
@@ -1142,8 +1144,45 @@ evidence: project docs
   only, a live trial (owner, 31 Oct 2026, after the simulation below
   failed his gate): judge it on the living room's trace sensors and boiler
   calls. 2.14.1 (commit f293136) is the rollback point, 2.15.0 (b504210)
-  the one before the two phases; the option off is 2.14.1's regulation
-  (below).
+  the one before the two phases, 2.16.0 (d81590d) the one before the zone
+  and the pooled learner; the option off is 2.14.1's regulation (below).
+- **The zone (2.17.0, options per room `dose_zone_above_c` 0.2 and
+  `dose_zone_below_c` 0.1, 0.05–0.5, `DoseConfig.zone_above_c` /
+  `zone_below_c`, `dose_zone_option`: out of range keeps the default;
+  owner, 1 Nov 2026: "Aim for +0.2C / -0.1C as the zone. The +/-0.1c
+  appears to be cycling the boiler too often", and "make this target an
+  option"):** the dosing phase releases at `zone_below_c` under the
+  target, aims each pulse `aim_over_c` over it (`zone_above_c` −
+  `aim_margin_c` 0.1, never below the target), and its stop rule and the
+  minimum pulse's guard sit at `zone_above_c`. The aim bias, the
+  coordinator's early fire (`fire_max_overshoot_c` over the aim, never
+  over the top), the burn ride (at or below the aim: `RoomDoser.inputs`
+  passes the virtual error to the aim), the cap's dose and the pulse's
+  `landing` end are measured from the aim; the learner's watchdog line is
+  `watchdog_line_c` (max(0.3, top + 0.1)). Heat-ups and the ordinary modes
+  (dosing off, a window, Boost) keep `stop_over_c` / `release_below_c`.
+  0.1 / 0.1 is 2.16.0's band exactly: 120,000 random regulator cycles
+  against d81590d matched in every result and state field (scratch
+  `zone/equiv.py`), so the mechanism tests in
+  `tests/test_dosing_regulation.py` run on it and `TestZone` checks the
+  default. On a room that matches its model (`_run`, 0.2–0.8 °C/h) the
+  default zone keeps the troughs at −0.09 and lands 0.02–0.03 short of the
+  aim, with pulses 1.4–1.7× further apart (0.5 °C/h: 7.7 min every 44
+  against 5.0 every 30). House simulation (living room dosed, four seeds,
+  real and −4 °C, 2.16.0 → 2.17.0): settled time within ±0.1 0.38 → 0.50 /
+  0.25 → 0.42, under −0.2 147 → 46 / 274 → 127 min a day, RMS 0.22 → 0.15 /
+  0.30 → 0.21, boiler calls 17.8 → 16.2 / 4.0 → 3.7 a day, under 10 min
+  10.1 → 6.7 / 1.0 → 0.5, heat equal; the price is higher peaks: daily
+  peak +0.24 → +0.31 / +0.16 → +0.26, per pulse median +0.10 (the aim),
+  p90 +0.28, 23 % of pulses over +0.2 (the simulator's plume, +0.42 °C at
+  full output in the fit, lifts long pulses most). The pooled learner alone
+  (zone 0.1 / 0.1) was better than 2.16.0 on every count. On the plants
+  refitted on HA data to 1 Nov 10:05 (the newest 7-day profile, scratch
+  `dosing/sim_nov1`, `house_nov1`), the same direction: living room
+  within ±0.1 0.37 → 0.49 / 0.31 → 0.44, under −0.2 169 → 67 / 191 → 103
+  min a day, daily peak +0.20 → +0.31 / +0.19 → +0.26; all four dosed,
+  mild: boiler calls 18.9 → 16.2 a day, under 10 min 12.3 → 7.4, the
+  master bedroom within ±0.1 0.60 → 0.47 (its peak +0.20 → +0.31).
 - **The problem it fixes:** in the settled state a release re-opens the
   valve and the room shows the heat only 8–12 min later (cloud latency,
   water, radiator, sensor), so the valve runs until the stop rule sees the
@@ -1228,13 +1267,13 @@ evidence: project docs
   the heat in flight; review 3: a 0.7 raise waited up to 30 min shut);
   times from the future count as now (review 3: a clock gone back blocked
   pulses for 46 min). Then a pulse starts when `e* +
-  (θ + τ/2) × (fall − rise) ≥ release_below_c` (0.1) and a minimum pulse
-  would land at most `stop_over_c` (0.1) over, on the stronger of the
+  (θ + τ/2) × (fall − rise) ≥ zone_below_c` (0.1) and a minimum pulse
+  would land at most `zone_above_c` (0.2) over, on the stronger of the
   learned and the cap gain and a need without a negative aim bias (a fast
   room 0.15 short waits for more need rather than overshoot; review 3: a
   bias of −0.25 held a flat room to 0.30 below): the release looks one
   visible dead time ahead,
-  so the trough is about −0.1 and the landing on the target. A room
+  so the trough is about the zone's bottom and the landing on the aim. A room
   rising by itself (sun, people) beyond the slope deadband needs that much
   less (`dose_rise_c_per_s`). No "never above the target" check: in cold weather it
   fires at or above the target, and a 25 °C pulse cannot trickle as a hold
@@ -1243,15 +1282,15 @@ evidence: project docs
   the gate broke the band above 0.5 °C/h (B's check, perfect model: with
   it troughs to −0.18 at 0.8 °C/h; without, −0.09…−0.01 at 0.2,
   −0.10…+0.02 at 1.0).
-- **Sizing:** `need = dose_need_c(e* − tail, fall, θ + 2τ, aim 0, bias) −
-  rise × (θ + 2τ)`, the shortfall plus the cooling until the heat has
-  landed; the pulse ends once the heat committed covers it (`covered`, not
+- **Sizing:** `need = dose_need_c(e* − tail, fall, θ + 2τ, aim, bias) −
+  rise × (θ + 2τ)`, the shortfall to the aim plus the cooling until the
+  heat has landed; the pulse ends once the heat committed covers it (`covered`, not
   before `pulse_min_s` 180 s, the owner's minimum, unless the target was
   lowered since it started, `RegulationState.pulse_setpoint_c`), at its
   cap (`max`), on the heat-up's own exit once it has run θ + τ/2 and the
-  room rises onto its target (error − Td × rise ≤ `heatup_exit_c`,
+  room rises onto its aim (error + aim − Td × rise ≤ `heatup_exit_c`,
   `landing`: the measured second net, as a full push ends, 2.10.4), or at
-  once when the measured stop rule fires (`stop_rule`).
+  once when the measured stop rule fires at the zone's top (`stop_rule`).
 - **The cap is the room's own (2.16.0, owner, 31 Oct 2026: "cap the pulse
   based on the expected behaviour of the room itself, and fall back to a
   max pulse when the room is not modelled yet")** (`dose_cap_s`,
@@ -1260,7 +1299,7 @@ evidence: project docs
   rate / 60 (`RoomDoser.cap_gain_c_per_open_min`: measured on the room's
   own heat-ups; the steepest rise of a heat-up, 5–25 % above a top-up's:
   living room 0.0437 against 0.041, master 0.029 against 0.023): the
-  measured shortfall less the heat in flight at that rate, plus the cooling
+  measured shortfall to the aim less the heat in flight at that rate, plus the cooling
   until the heat has landed from the cap's own observer (the room less
   Roomstat's heat at that rate, `_cap_delivered_c` added up per arrival so
   a new rate is no step), no aim bias. The cap is the open time that dose
@@ -1305,45 +1344,86 @@ evidence: project docs
   heat does not hide the room's real loss (the plain room slope left
   troughs at −0.13…−0.19 in the entity tests; with the observer
   −0.06…+0.02). Bridged room readings feed neither it nor the learner.
-- **The learner** (`DoseLearner`): each pulse is an episode up to the
-  room's first peak, judged 5 min after it over [start − 15 min, landing +
-  5 min] from 140 min of kept readings and open intervals (`fit_history_s`,
-  persisted). The fit is joint: gain, θ, τ (grids, closed-form gain) and
-  the room's loss in one least squares (`fit_episode(fit_loss=True)`); a
-  fixed loss (the pre-pulse slope continued) coupled the fit to the
-  learner's own gain and drifted it to 0.08–0.09 for a 0.045 plant.
-  Episodes overlap (up to 3 open): a new pulse cuts the open one's landing
-  search at its own opening + θ, and the fit models every booked opening
-  (2.15.0 review: dropping the open episode when the next pulse started —
-  the refractory is shorter than the time to judge — meant a model that
-  under-doses never learned, the room 0.08–0.13 under all day; now 53 of
-  55 learned in 24 h, the room −0.10…+0.08). Rejected: RMS > 0.06, a gain
-  outside 0.2–4× the gain in use, a loss below −0.05 °C/h ("a room warming
-  by itself") or above 3.0. Dropped: a window, Boost, a target change, hold
-  heat in the window, a pulse that never opened. Steps towards the median
-  of the last six: the gain up (smaller doses) half the way at once, down
-  15 % at most every 12 h (the owner prefers short landings); θ and τ half
-  the way either way (neither direction is safe: longer is an earlier,
-  bigger pulse, shorter a second pulse before the first has landed). An
-  aim bias moves 0.3 of each landing's miss (±0.25): down on any landing
-  above the target but a minimum pulse's, up only on a pulse its own dose
-  ended (`covered`, not its cap or the stop rule: they set that landing)
-  from a shortfall of at most `bias_max_shortfall_c` (0.3): a big dose
-  landing short is a gain error, the gain's to correct slowly (simulated:
-  the bias wound up to +0.25 once 0.3–0.8 shortfalls were dosed, and every
-  small top-up overdosed). Two landings above +0.3: the gain ×1.5 and the
-  bias −0.1 at once. An episode with no landing is judged `episode_max_s`
-  after its pulse ended (from its start, a 32-min pulse was judged before
-  it peaked), from `fit_history_s` (140 min) of readings. Seeds while nothing is
-  learned: the auto-tuner's heating rate / 60 for the gain only; θ and τ
-  start at the top-ups' own 5 and 8 min (the tuner's dead time comes from
-  cold-radiator heat-ups, 15+ min in the living room and study; seeded
-  from it the sim landed +0.15). Fitted on the living room's 19 top-ups:
-  gain 0.041 median (0.021 / 0.062), θ 4 min, τ 6 min, every episode within
-  0.044 °C RMS; with the loss fitted, 0.036 and a loss of 0.34 °C/h. D1's
-  refit on 23–30 Oct (32 settled top-ups): living 0.041 / θ 4 / τ 8,
-  master 0.023 / 6 / 11, second 0.038 / 3.5 / 24 (6 top-ups), study too
-  few to trust.
+- **The learner** (`DoseLearner`, pooled since 2.17.0; owner, 1 Nov 2026:
+  "design and implement that averaging", a rolling window). Each pulse is
+  still an episode up to the room's first peak, judged 5 min after it,
+  which teaches the aim bias and the watchdog (below); the model (gain, θ,
+  τ) comes from one fit over the room's last `fit_window_pulses` (10)
+  usable pulses within `fit_window_s` (48 h), `pooled_fit`, pure Python.
+  Why: single-pulse fits of 3–7-min pulses are noise. Night of 31 Oct –
+  1 Nov 2026, living room: six fits scattered 0.049–0.114 (gain against
+  the fitted loss, r = 0.93; three on the 30-min τ ceiling), and the
+  half-way steps took the gain in use 0.044 → 0.089 and τ 8 → 25 min,
+  while the heat balance (20.98 open-minutes over 4.4 h, the room +0.01,
+  loss 0.21–0.24 °C/h) and every pooled fit put it at 0.045–0.056 (θ 4,
+  τ 10). The fit: the room in `fit_step_s` (2-min) bins = baseline + gain
+  × S(t), S the closed-form FOPDT response of every booked opening (a
+  pulse's tail and the next pulse's heat both modelled); the baseline (the
+  room as if unheated) one value per bin with a second-difference penalty,
+  an integrated random walk whose slope wanders
+  `fit_wander_c_per_h_per_30min` (0.05 °C/h per 30 min), solved banded
+  (Cholesky), the gain in closed form, θ and τ on log grids (θ 1–18.6 min,
+  τ 3–28 min), the posterior summed over the grid. That one constant
+  decides the gain to about ±15 % (1 Nov: 0.02 → 0.043–0.052, 0.1 → 0.056,
+  free 0.07+, the g–τ ridge); independent blocks per pulse or a free
+  spline were not robust (a block boundary inside a rise reopens the
+  trade). Chosen physically, never from the data (GCV favours the
+  flexible baseline and biases the gain up). Log-normal priors: the gain
+  on the auto-tuner's rate / 60 (sd ln 1.5; ln 2 without one), θ 5 min
+  and τ 8 min (sd ln 1.5): 3–7-min pulses do not identify τ, so the prior
+  holds it unless many pulses say otherwise. Residuals are autocorrelated
+  (lag-1 0.87–0.93), so the likelihood is tempered by (1 − ρ)/(1 + ρ)
+  (at least 0.02) and the sd of ln g inflated ×1.5 (about 2×
+  overconfident on synthetic nights). A dead start per pulse (0, 90,
+  180 s) is on the grid as a diagnostic only (`dead_start_s`). A fit is
+  acted on only with sd(ln g) ≤ `fit_accept_sd_ln` (0.2) and ≥ 2 pulses;
+  then the gain moves only when the MAP is outside ±1 sd of the gain in
+  use (a dead band: without it, up-at-once and down-slowly ratchet up even
+  on pooled estimates), up (smaller doses) to the MAP at once, down at
+  most 15 % per 12 h (the owner's rule); θ and τ follow the MAP beyond a
+  1-min dead band. A fit that fails the gate but pooled 5 or more pulses
+  (`fit_step_more_min_pulses`) and whose whole 1-sd range is below the
+  gain in use still takes that slow step, to the range's top at most
+  (2.17.0 review: in the house simulation only accepted fits could step
+  down, and a room whose fits rarely passed kept a gain the watchdog or
+  one fit had raised at 1.7× the fits' for 3 days). The watchdog's ×1.5
+  and such a step make the gain the room's own (`_gain_owned`, persisted):
+  the anchor no longer overwrites it each cycle (`seed`; review M1: until
+  a fit was accepted, the next cycle undid the watchdog). Bounds: the gain 0.3–3× the anchor, θ 2–20 min, τ
+  3–30 min. A segment ([start − 20 min, next pulse or landing + 45 min])
+  whose residual is over 2× the median segment's (and 0.03) or whose
+  baseline rises more than 0.3 °C/h over it (people, sun) is dropped and
+  the fit run again without its readings (its heat stays modelled). The
+  readings come in chains (`ChainStore`) that break on a gap over 10 min,
+  a bridged reading, Roomstat off, summer, the room sensor lost or a clock
+  going back, and after a window (30 min), Boost or heat booked nowhere (a
+  hold's, a heat-up's maximum, the app's, a pulse resumed without its
+  booking: 60 min); a pulse is pooled only if its segment lies in one
+  chain and it had at least `min_open_min` (2) open-minutes. The fit runs
+  in HA's executor on an immutable snapshot after each usable pulse is
+  judged (`climate_dosing._dosing_start_refit`, one at a time per room,
+  0.03–0.3 s) and is applied at the next cycle's start, so the model is the
+  same throughout a cycle; a result for a learner reset or replaced
+  meanwhile is discarded (a generation counter; one refit at a time, so no
+  time test: one discarded every fit after the clock went back); a refit
+  taken but not yet applied (`refit_in_flight`) is saved as due, so a
+  reload in between refits (review m1); a failed fit is logged once per
+  distinct error and leaves the model and dosing on (`fit_failed`). Replayed on
+  the night of 1 Nov: the gate opens at the sixth pulse and the gain in
+  use stays 0.0437 (inside the dead band), the spread 8 → 10.4 min. The
+  aim bias moves 0.3 of each landing's miss against the aim (±0.25): down
+  on any landing above the aim but a minimum pulse's, up only on a pulse
+  its own dose ended (`covered`, not its cap or the stop rule) from a
+  shortfall of at most `bias_shortfall_line_c` (`bias_max_shortfall_c`
+  0.3, or 0.2 under the zone's bottom if lower: with a wide zone below no
+  pulse started within 0.3, review m3); two landings over the watchdog
+  line: the gain ×1.5 and the bias −0.1 at once. An episode with
+  no landing is judged `episode_max_s` after its pulse ended. Seeds while
+  nothing is learned: the auto-tuner's rate / 60 for the gain only; θ and
+  τ start at the top-ups' own 5 and 8 min (the tuner's dead time comes
+  from cold-radiator heat-ups). Persisted (restore-state `dosing`, learner
+  v2, with the TRV it was learned on): a 2.15/2.16 save is not taken back
+  (the gain restarts at the anchor, the bias at 0, logged once).
 - **The pulse coordinator** (`PulseCoordinator`, one per process,
   `climate_dosing.PULSE_COORDINATOR`): every room reports its zone's heating
   every cycle that reads the TRV, dosed or not (`_dosing_note_zone`, at the
@@ -1352,7 +1432,8 @@ evidence: project docs
   its visible dead time fires
   with a room that has just started a pulse (`together`; that room wakes it,
   `_dosing_wake` runs a cycle), only when a minimum pulse would land at
-  most +0.05 above the target (`fire_max_overshoot_c`). The boiler is
+  most +0.05 above its aim (`fire_max_overshoot_c`; each room on its own
+  zone, the coordinator's own config only for its timing). The boiler is
   on/off: a single-radiator call already cycles it on its flow thermostat,
   so the lever is how many radiators share each burn (23–30 Oct 2026: 10
   calls a day, median 18 min, 72 % of them one radiator). It only picks the
@@ -1377,8 +1458,9 @@ evidence: project docs
   Reset auto-tune forgets it.
 - **On the entity:** the sensor `topup_dose` ("Top-up gain", °C per
   open-minute, only while the option is on): its attributes
-  (`RoomDoser.summary`) change only on a pulse start or a judged episode
-  (the recorder writes a row per change; the first version changed them
+  (`RoomDoser.summary`: the model, its uncertainty, the last pooled fit,
+  the anchor) change only on a pulse start, a judged pulse or an applied
+  fit (the recorder writes a row per change; the first version changed them
   on 489 of 504 cycles, ~2.9 MB a day per room); the heat in flight and
   the rest are the thermostat's `topup_*` attributes (unrecorded) and the
   diagnostics (`RoomDoser.diagnostics`). The mode `dose` ("Top-up pulse")
@@ -1594,15 +1676,21 @@ ruff check .
   a release and its answer, the lowered command, the tuner's sample, an off
   before the answer, no heating sensor, persistence with its TRV, reset, a
   failure that leaves the room regulated).
-- `tests/test_dosing.py` (the model, the fit, the learner on the 19 real
-  top-ups of `tests/fixtures/living_room_topups_2026_10.json`, the
-  coordinator, the doser's booking and observer, closed loops on plants
-  that do not match the model: a weak or slow radiator, a long delay, late
-  heating reports, a hold into the dosing phase, heat-up heat unbooked),
+- `tests/test_dosing.py` (the model, the pooled fit and its chains, the
+  learner on the 19 real top-ups of
+  `tests/fixtures/living_room_topups_2026_10.json` and on the night of
+  1 Nov 2026 (`living_room_night_2026_11_01.json`: 0.089 / 3 / 25 rejected,
+  the gain in use kept), the landings against the aim, the coordinator, the
+  doser's booking and observer, closed loops on plants that do not match
+  the model: a weak or slow radiator, a long delay, late heating reports, a
+  hold into the dosing phase, heat-up heat unbooked),
   `tests/test_dosing_regulation.py` (the two phases and their boundaries,
   the release, the pulse and its ends, the cap, the coordinator's early
-  fire, the steady state on a perfect model, the option off unchanged) and
-  `tests/test_dosing_entity.py` (through the entity: pulses in the band,
+  fire, the steady state on a perfect model in 2.16.0's band and the
+  default zone, `TestZone`, the option off unchanged; the mechanism tests
+  run on the zone 0.1 / 0.1) and
+  `tests/test_dosing_entity.py` (through the entity: pulses in the zone,
+  the zone options,
   learning in closed loop, the option off against the recorded 2.14.1
   trace, reload, window, target change, two rooms on one boiler, the lost
   off, late reports, hold heat, a weak radiator, never a hold short of the

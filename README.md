@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.16.0-blue)
+![Version](https://img.shields.io/badge/version-2.17.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -113,9 +113,10 @@ changes.
   (at least 3 minutes) instead of holding the valve part-open. Each pulse is
   sized from the heat
   already on its way to the room and from how fast the room is cooling, so
-  the room stays within about 0.1 °C of its target instead of overshooting
-  after every top-up. What a pulse does is learned from the room's own
-  pulses. Rooms with it on time their pulses together where they can, so an
+  the room stays in a zone around its target (by default 0.1 °C under to
+  0.2 °C over) instead of overshooting after every top-up. What a pulse
+  does is learned from the room's own pulses, pooled over the last two
+  days. Rooms with it on time their pulses together where they can, so an
   on/off boiler fires once for several radiators. Off by default. See
   [Dosed top-ups](#dosed-top-ups).
 - **A trace per room.** Diagnostic sensors for the command sent to the valve,
@@ -259,6 +260,13 @@ Turn it on per room: **Configure → Dosed top-ups**. It uses the zone's
 heating power sensor picked under **Valve look-ahead** (for a Tado zone, the
 zone's Heating sensor), to check that each pulse opened the valve.
 
+- **The zone:** two settings in the same section, **Zone above the
+  target** (0.2 °C) and **Zone below the target** (0.1 °C), each 0.05–0.5.
+  The room may cool to the zone's bottom before the next pulse; each pulse
+  aims 0.1 °C under the zone's top (0.1 °C over the target by default,
+  never below the target), and a pulse that would take the room over the
+  top waits or ends early. A wider zone means fewer, longer pulses and fewer
+  boiler starts. 0.1 and 0.1 is 2.16.0's band, centred on the target.
 - **When:** a room is either heating up or dosed, never held. A shortfall
   of 0.8 °C or more is a heat-up as before (full power, then the coast);
   everything else is dosed: a coast that stops short, a room cooling from
@@ -276,33 +284,41 @@ zone's Heating sensor), to check that each pulse opened the valve.
   target doesn't wait; heat from a hold or a heat-up must show first.
 - **The cap:** each pulse also has a cap from the room's own heating rate
   (auto-tune's, learned on its heat-ups): when the pulse starts, the time
-  that rate says the room's shortfall (plus its cooling until the heat
-  lands) takes, with 0.2 °C to spare. A fast room short 0.1 °C gets a few
+  that rate says the room's shortfall to the pulse's aim (plus its cooling
+  until the heat lands) takes, with 0.2 °C to spare. A fast room short 0.1 °C gets a few
   minutes at most, a slow room short 0.7 °C up to an hour. It is the
   safety net for a model that is wrong, so a pulse can't overheat the room
   by much; on a cold day it can end a pulse early, and the room then lands
   a little short and gets another pulse. Until the room's heating rate is
   known the cap is 12 minutes. A long pulse also ends like a heat-up once
-  its heat shows and the room rises onto its target.
-- **When the next:** the room fires a pulse so that it reaches 0.1 °C under
-  its target just as the heat starts to show, which puts the bottom of its
-  swing at −0.1 and the landing on the target. A room whose shortest pulse
-  would take it over the target waits until it needs more; a room warming
-  by itself (sun, people) gets that much less.
+  its heat shows and the room rises onto its aim.
+- **When the next:** the room fires a pulse so that it reaches the zone's
+  bottom just as the heat starts to show, which puts the bottom of its
+  swing there and the landing on the aim. A room whose shortest pulse
+  would take it over the zone's top waits until it needs more; a room
+  warming by itself (sun, people) gets that much less.
 - **The cooling** it covers is measured all the time: the room's cooling
   less the effect of the heat Roomstat sent. Cold nights get bigger pulses,
   mild evenings smaller ones; people and sun count as they happen.
-- **Learning:** each pulse is compared with what the room did, the room's
-  own cooling fitted with it. The model's rise per open minute moves towards
-  the last six pulses at once when that means smaller pulses, slowly (at
-  most every 12 hours) when it means bigger ones; its delay and spread follow
-  the room either way. It starts from auto-tune's heating rate and a
-  top-up's typical delay (5 min) and spread (8 min). The **Top-up gain**
-  sensor shows the rise per minute in use, with the rest of the model and
-  the pulses of the last 24 hours; the diagnostics have every episode.
-- **The boiler:** a room at or below its target rides another zone's call
+- **Learning:** the model is fitted on the room's last pulses together
+  (up to 10, from the last 48 hours), with the room's own cooling allowed to
+  drift slowly between them. One pulse alone can't tell a strong radiator
+  from a room that cooled faster; several of different sizes can. Stretches
+  with a window, Boost, a hold's or heat-up's heat, a gap in the readings
+  or Roomstat off are left out. The model only moves once the fit is sure
+  enough (within about ±20 %) and further than that uncertainty: at once
+  when it means smaller pulses, at most 15 % every 12 hours when it means
+  bigger ones; its delay and spread follow the fit. It starts from
+  auto-tune's heating rate and a top-up's typical delay (5 min) and spread
+  (8 min); with few pulses the fit leans on those. The **Top-up
+  gain** sensor shows the rise per minute in use, how sure the last fit
+  was, the rest of the model and the pulses of the last 24 hours; the
+  diagnostics have every pulse and the last fit in full. An update from
+  2.16 starts the learning afresh.
+- **The boiler:** a room at or below its aim rides another zone's call
   for heat, and a room due within a few minutes fires with another room's
-  pulse, if a minimum pulse would not take it over its target.
+  pulse, if a minimum pulse would not take it more than 0.05 °C over its
+  aim. Each room judges this on its own zone.
 - **The activity log** says each pulse, its landing and what was learned.
 - **Safety:** every pulse is a full-power command, so the fail-cold rules
   apply (timer, watchdog, a lost room sensor ends it). A valve that still

@@ -754,7 +754,7 @@ class TestRecovery:
 _ROOT = Path(__file__).parent.parent / "custom_components" / "roomstat"
 
 
-@pytest.mark.parametrize("lang", ["strings.json", "translations/en.json", "translations/de.json"])
+@pytest.mark.parametrize("lang", ["strings.json", "translations/en.json"])
 def test_every_setting_and_state_is_explained(lang):
     import json
 

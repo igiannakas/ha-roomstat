@@ -253,6 +253,11 @@ class _Hass:
         # instead of being discarded.
         self.keep_tasks = False
         self.tasks: list = []
+        # The executor jobs and background tasks started (run inline), and
+        # any exception a background task let escape.
+        self.executor_jobs: list[str] = []
+        self.background_tasks: list[str] = []
+        self.task_errors: list[BaseException] = []
 
     def set(self, entity_id, state, attributes=None):
         self.states_by_id[entity_id] = _State(state, attributes)
@@ -265,6 +270,38 @@ class _Hass:
             self.tasks.append(coro)
         else:
             coro.close()
+
+    async def async_add_executor_job(self, target, *args):
+        """The executor, inline: the job runs at once, deterministically."""
+        self.executor_jobs.append(getattr(target, "__name__", repr(target)))
+        return target(*args)
+
+    def async_create_background_task(self, coro, name, eager_start=True):
+        """A background task, run to its end at once.  With the inline
+        executor nothing the integration starts this way suspends, so this
+        is HA's eager start carried through (the result is there when the
+        call returns).  An exception escaping the task is kept, as HA's task
+        handler would log it, never raised into the caller."""
+        self.background_tasks.append(name)
+        try:
+            coro.send(None)
+        except StopIteration:
+            return _DoneTask()
+        except Exception as err:  # noqa: BLE001 - HA logs a task's exception
+            self.task_errors.append(err)
+            return _DoneTask()
+        coro.close()
+        raise AssertionError(f"background task {name!r} suspended; the harness runs them inline")
+
+
+class _DoneTask:
+    """A finished task (what async_create_background_task hands back)."""
+
+    def done(self) -> bool:
+        return True
+
+    def cancel(self) -> bool:
+        return False
 
 
 class _Entry:

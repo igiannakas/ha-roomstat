@@ -314,7 +314,7 @@ def _minutes(seconds: float) -> str:
 _DOSE_ENDS = {
     "covered": "the dose is on its way",
     "max": "its cap, the most the room's own heating rate allows",
-    "landing": "rising onto the target, the leftover heat lands it",
+    "landing": "rising onto its aim, the leftover heat lands it",
     "stop_rule": "the room rose sooner than expected",
 }
 
@@ -332,8 +332,10 @@ def _dose_phrase(f: CycleFacts, e: float, trend: str, cfg: RegulationConfig) -> 
             }.get(f.dose_fired_by, trend)
             cap = (f"; cap about {_minutes(f.dose_cap_s)}"
                    if f.dose_cap_s is not None and math.isfinite(f.dose_cap_s) else "")
+            aim = cfg.dose.aim_over_c
+            to = f"to {aim:.2f} over, " if aim >= 0.005 else ""
             return (f"Top-up pulse: {_gap(e, 2)}, {why}; full power until "
-                    f"{need:.2f} is on its way (the cooling until it lands included){cap}")
+                    f"{need:.2f} is on its way ({to}the cooling until it lands included){cap}")
         ran = (f.dose_pulse_s or 0.0) / 60.0
         return (f"Top-up pulse: {ran:.1f} min at full power, {inflight:.2f} on its way, "
                 f"{max(0.0, need):.2f} still to cover")

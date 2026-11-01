@@ -1,6 +1,7 @@
 """Central parameter defaults for roomstat."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -556,6 +557,24 @@ class LookaheadConfig:
 # Dosed top-ups (dosing.py, climate_dosing.py)
 # ---------------------------------------------------------------------------
 
+# The dosing zone's options (DoseConfig.zone_above_c / zone_below_c), °C.
+DOSE_ZONE_MIN_C = 0.05
+DOSE_ZONE_MAX_C = 0.5
+DOSE_ZONE_STEP_C = 0.05
+
+
+def dose_zone_option(value: object, default: float) -> float:
+    """A dosing zone option (°C): the value when it is a number within
+    DOSE_ZONE_MIN_C..DOSE_ZONE_MAX_C, otherwise the default."""
+    try:
+        zone = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(zone) or not DOSE_ZONE_MIN_C - 1e-9 <= zone <= DOSE_ZONE_MAX_C + 1e-9:
+        return default
+    return round(zone, 3)
+
+
 @dataclass
 class DoseConfig:
     """Dosed top-ups: a Smith predictor sizes full-power pulses in the
@@ -572,6 +591,12 @@ class DoseConfig:
     (4 / 12), every episode within 0.044 °C RMS.  The heat shows after
     about theta + tau / 2 (the release lead) and has landed after about
     theta + 2 tau (the loss horizon and the refractory time).
+
+    Since 2.17.0 the room's own pulses are pooled (dosing.pooled_fit): the
+    last ten usable pulses, the room's cooling a smooth curve, theta and tau
+    held by their priors, the gain anchored on the auto-tuner's heating
+    rate until the pulses say otherwise; the gain in use moves only outside
+    the fit's +-1 sd band, towards bigger doses at most 15 % per 12 h.
     """
 
     # The model.  The auto-tuner's heating rate / 60 replaces the default
@@ -594,10 +619,23 @@ class DoseConfig:
     # cloud polls every ~3 min), so 6 min leaves a slow poll room.
     opened_check_s: float = 360.0
 
-    # The controller (regulation.py).  The band is centred on the target
-    # (owner, 30 Oct 2026): the dose aims at the target itself; "land short
-    # rather than hot" lives in the learner's asymmetry, not in the aim.
-    aim_under_c: float = 0.0
+    # The controller (regulation.py).  The dosing zone, options per room
+    # (2.17.0; owner, 1 Nov 2026: "the +/-0.1 appears to be cycling the
+    # boiler too often"): the room may fall zone_below_c under the target
+    # before the next pulse (the release), each pulse aims aim_over_c over
+    # it (zone_above_c less aim_margin_c, never below the target), and a
+    # pulse that would land more than zone_above_c over waits or ends (the
+    # dosing phase's stop rule and the minimum pulse's guard).  The learned
+    # aim bias, the coordinator's early fire and the cap are measured from
+    # the aim.  zone_above_c 0.1 with zone_below_c 0.1 is 2.16.0's band,
+    # centred on the target.  Living room, 31 Oct - 1 Nov 2026: a pulse
+    # every 33-62 min in the band of +-0.1, each its own boiler call; a
+    # landing 0.1 higher lets the room cool about twice as far before the
+    # next.  Heat-ups and the ordinary modes keep stop_over_c and
+    # release_below_c (RegulationConfig).
+    zone_above_c: float = 0.2
+    zone_below_c: float = 0.1
+    aim_margin_c: float = 0.1
     # The minimum pulse is the owner's decision (30 Oct 2026).  Each pulse
     # is capped by the room's own expected behaviour (owner, 31 Oct 2026: a
     # safety net, so a wrong model cannot heat the room far over): when it
@@ -614,8 +652,8 @@ class DoseConfig:
     # (peaks +0.22..+0.47).  0.2: the tuner's rate is a heat-up's steepest
     # rise, 5-25 % above a top-up's rise per open-minute (living room 0.0437
     # against 0.041, master 0.029 against 0.023), and a pulse that runs to
-    # its cap lands at most about 0.2 over if the room's heating rate is
-    # right.
+    # its cap lands at most about 0.2 over the aim if the room's heating
+    # rate is right (the measured stop rule ends it sooner, at zone_above_c).
     pulse_min_s: float = 180.0
     pulse_max_s: float = 720.0
     cap_margin_c: float = 0.2
@@ -628,13 +666,13 @@ class DoseConfig:
     refractory_max_s: float = 1800.0
     # A pulse fired early (riding another zone's burn, or with another
     # room) only when a minimum pulse would land at most this far above
-    # the target.  A pulse released by the room itself: at most the stop
-    # rule's stop_over_c (RegulationConfig) above.
+    # the aim (and never above zone_above_c).  A pulse released by the room
+    # itself: at most zone_above_c above the target.
     fire_max_overshoot_c: float = 0.05
 
     # The pulse coordinator (dosing.PulseCoordinator; the boiler is an
     # on/off type, so radiators should share its burns).  Ride another
-    # zone's burn once at or below the target; fire with another room's
+    # zone's burn once at or below the room's aim; fire with another room's
     # pulse when due within this fraction of the visible dead time; a pulse
     # counts as just started for together_window_s; a zone's heating report
     # counts while it is at most zone_report_max_age_s old.  5 min: the
@@ -648,42 +686,129 @@ class DoseConfig:
     together_window_s: float = 120.0
     zone_report_max_age_s: float = 300.0
 
-    # The learner (dosing.DoseLearner): each episode (a pulse to the room's
-    # first peak) is fitted by a grid over theta and tau with the
-    # closed-form gain and the room's loss fitted with it.  An episode with
-    # no landing is judged at most episode_max_s after its pulse ended (from
-    # the start, a 32-min pulse was judged at -0.21 while it peaked at -0.01:
-    # review 3, 31 Oct 2026).
+    # The landings (dosing.DoseLearner): each pulse is an episode up to the
+    # room's first peak, which sets the aim bias and the two-hot-landings
+    # watchdog.  An episode with no landing is judged at most episode_max_s
+    # after its pulse ended (from the start, a 32-min pulse was judged at
+    # -0.21 while it peaked at -0.01: review 3, 31 Oct 2026).  A pulse of
+    # fewer than min_open_min open-minutes is not pooled.
     episode_max_s: float = 3600.0
-    episodes_kept: int = 6
     min_open_min: float = 2.0
-    fit_theta_s: tuple[float, float, float] = (120.0, 1200.0, 60.0)
-    fit_tau_s: tuple[float, ...] = (
-        240.0, 360.0, 480.0, 600.0, 720.0, 900.0, 1080.0, 1320.0, 1560.0, 1800.0,
-    )
-    fit_max_rms_c: float = 0.06
-    # The learner keeps this much of the room's readings and the valve's
-    # open intervals, so each episode's fit can include the heat of earlier
-    # pulses still arriving and estimate the room's loss with it: the 15 min
-    # before the longest pulse (pulse_ceiling_s), the pulse, and up to
-    # episode_max_s after it, with 5 min to spare.
-    fit_history_s: float = 8400.0
-    # Bounds: the gain within these multiples of the default (seeded) gain;
-    # an episode's gain is accepted within these multiples of the gain in
-    # use.
+
+    # The pooled fit (dosing.pooled_fit, 2.17.0; project doc
+    # claude/roomstat-pooled-dose-learner-2026-11-01.md).  Single-pulse fits
+    # of 3-7-min pulses are noise: on the night of 31 Oct - 1 Nov 2026 the
+    # living room's six fits scattered 0.049-0.114 and the gain in use went
+    # 0.044 -> 0.089 (spread 8 -> 25 min) while the heat balance and every
+    # pooled fit put it at 0.045-0.056.  So the model is fitted on the last
+    # fit_window_pulses usable pulses (at most fit_window_s old) together:
+    # the room's readings in fit_step_s bins, room = baseline + gain x S(t),
+    # S the closed-form FOPDT response of every booked opening.
+    fit_step_s: float = 120.0
+    fit_window_pulses: int = 10
+    fit_window_s: float = 172800.0
+    # The baseline (the room as if unheated) is one value per bin with a
+    # second-difference penalty: an integrated random walk, its slope (the
+    # room's loss) wandering about fit_wander_c_per_h_per_30min (°C/h per
+    # 30 min).  This one constant decides the gain to about +-15 %: on the
+    # night of 1 Nov 0.02 -> 0.043-0.052, 0.05 -> about 0.05, 0.1 -> 0.056,
+    # 0.2 -> 0.063, a free baseline 0.07+ (the g-tau ridge: a baseline that
+    # bends near every pulse trades its slope against the gain).  That
+    # night's loss was 0.24 °C/h before the first pulse and 0.21-0.24 in
+    # every quiet stretch, which favours the stiff end.  The penalty is
+    # scaled by the fit's own noise (two passes: fit_noise0_c, then the
+    # first pass's residual sd, at least fit_noise_floor_c).  Chosen
+    # physically, never from the data (GCV favours the flexible baseline on
+    # the ridge and biases the gain up).
+    fit_wander_c_per_h_per_30min: float = 0.05
+    fit_noise0_c: float = 0.015
+    fit_noise_floor_c: float = 0.005
+    # The grids (lo, hi, ratio), uniform in ln theta and ln tau (a grid
+    # dense at small tau puts more prior mass there when the posterior is
+    # summed over it): theta 1-18.6 min (14 points), tau 3-28 min (11).
+    fit_theta_grid_s: tuple[float, float, float] = (60.0, 1120.0, 1.25)
+    fit_tau_grid_s: tuple[float, float, float] = (180.0, 1680.0, 1.25)
+    # A dead start c0 per pulse (heat = open-minutes - c0) is on the grid as
+    # a diagnostic only: the regulator never uses it.  1 Nov: pulse 6 (6.8
+    # open-min) gave more per open-minute than the 4-min ones, and ~150 s of
+    # dead start fitted better, but a sensor plume is as plausible; a week
+    # of natural 3-7-min pulses settles it.  Its prior weights (relative)
+    # favour none.  The simulators may use (0.0,) to save two thirds of the
+    # time.
+    fit_dead_start_grid_s: tuple[float, ...] = (0.0, 90.0, 180.0)
+    fit_dead_start_prior: tuple[float, ...] = (1.0, 0.5, 0.25)
+    # Log-normal priors.  The gain's is centred on the auto-tuner's heating
+    # rate / 60 (living room 0.0437 against top-ups 0.041-0.05, master 0.029
+    # against 0.023, second bedroom 0.030 against 0.038: all within x1.3),
+    # else on default_gain_c_per_open_min with the wider sd.  theta and tau
+    # are prior-held: 3-7-min pulses do not identify tau (the RMS is flat
+    # along the g-tau ridge for tau 7-20 min), so the prior holds them unless
+    # many pulses say otherwise (a synthetic tau-24 room with 19 pulses moves
+    # tau to 19; its gain then reads 0.82x, bigger doses the aim bias and
+    # the watchdog cover).
+    prior_gain_sd_ln: float = math.log(1.5)
+    prior_gain_sd_ln_unseeded: float = math.log(2.0)
+    prior_theta_s: float = 300.0
+    prior_theta_sd_ln: float = math.log(1.5)
+    prior_tau_s: float = 480.0
+    prior_tau_sd_ln: float = math.log(1.5)
+    # The residuals are autocorrelated (lag-1 0.87-0.93: 5-18 % effective
+    # samples), so the likelihood is tempered by (1 - rho) / (1 + rho), at
+    # least fit_temper_floor, and the posterior sd of ln g inflated by
+    # fit_sd_inflation (the tempered posterior was about 2x overconfident on
+    # synthetic nights).  A fit is acted on only when that sd is at most
+    # fit_accept_sd_ln (the gain known to x/÷1.5 at 2 sd: 1-2 pulses give
+    # 0.33-0.41, 5-6 give 0.14-0.2) and it pooled fit_accept_min_pulses or
+    # more.
+    fit_temper_floor: float = 0.02
+    fit_sd_inflation: float = 1.5
+    fit_accept_sd_ln: float = 0.2
+    fit_accept_min_pulses: int = 2
+    # A fit that fails the gate but pooled this many pulses or more, and
+    # whose whole 1-sd range lies below the gain in use, still takes the
+    # slow step down (step_more_frac per step_more_interval_s) towards that
+    # range: otherwise only accepted fits could undo a gain the watchdog or
+    # one fit had raised (2.17.0 review, house simulation, second bedroom
+    # cold: the gain 1.7x the fits' for 3 days, 4 of 134 fits accepted).
+    fit_step_more_min_pulses: int = 5
+    # Each usable pulse's segment, [start - segment_pre_s, min(next pulse,
+    # landing + segment_post_s)], is judged once at the fit: dropped (and
+    # the fit run once more without its readings; its heat stays modelled)
+    # when its residual RMS is over segment_reject_rms_factor x the median
+    # segment's and segment_reject_rms_min_c, or the fitted baseline rises
+    # more than segment_reject_rise_c_per_h over it (heat from elsewhere:
+    # people, sun).
+    segment_pre_s: float = 1200.0
+    segment_post_s: float = 2700.0
+    segment_reject_rms_factor: float = 2.0
+    segment_reject_rms_min_c: float = 0.03
+    segment_reject_rise_c_per_h: float = 0.3
+    # The readings pooled come in chains of unbroken bins.  A chain breaks on
+    # a gap of more than chain_max_gap_s, a bridged reading, Roomstat off,
+    # summer or the room sensor lost, a clock going back; on a window (no
+    # new chain until chain_settle_after_window_s after it), on Boost or on
+    # heat booked nowhere -- a hold's, a heat-up's maximum, the app's, a
+    # pulse resumed without its booking -- (chain_settle_after_unbooked_s
+    # after its end).  A pulse is pooled only if its segment from
+    # segment_pre_s before it to its judgement lies in one chain.
+    chain_settle_after_unbooked_s: float = 3600.0
+    chain_settle_after_window_s: float = 1800.0
+    chain_max_gap_s: float = 600.0
+
+    # Bounds: the gain within these multiples of the anchor (the seeded
+    # gain); the delay and spread in use within these.
     gain_bounds: tuple[float, float] = (0.3, 3.0)
-    gain_accept: tuple[float, float] = (0.2, 4.0)
     theta_bounds_s: tuple[float, float] = (120.0, 1200.0)
     tau_bounds_s: tuple[float, float] = (180.0, 1800.0)
-    # Steps towards the median of the last episodes.  The gain moves
-    # asymmetrically: up (smaller doses) half the way at once, down
-    # (bigger doses) 15 % of the way, at most every 12 h.  The delay and the
-    # spread move half the way either way: neither direction is the safe
-    # one (longer: an earlier, bigger pulse; shorter: the next pulse before
-    # this one's heat has landed), so they follow the room (2.15.0 review:
-    # a 15-min delay seeded from the heat-ups landed +0.15 and took days to
-    # walk back at the slow rate).
-    step_safe_frac: float = 0.5
+    # The gain in use moves only when the pooled fit's MAP lies outside its
+    # +-1 sd band around it (a dead band: without one, up-at-once and
+    # down-slowly ratchet up even on pooled estimates, 1.00-1.05x truth
+    # where the posterior said 0.83-0.86, arch/exp3_update.py).  Up (smaller
+    # doses) to the MAP at once; down (bigger doses) at most step_more_frac
+    # (15 %) at a time, at most every step_more_interval_s (12 h): the
+    # owner's rule.  The delay and the spread follow the MAP when they
+    # differ from the values in use by a minute or more (prior-held: a
+    # change means evidence).
     step_more_frac: float = 0.15
     step_more_interval_s: float = 43200.0
     # The aim bias (°C added to the need) moves this fraction of each
@@ -694,15 +819,34 @@ class DoseConfig:
     # and an additive bias learned from it overdoses every small top-up
     # (house simulation, 31 Oct 2026: the bias at +0.10..+0.25 once the
     # dosing phase took 0.3-0.8 shortfalls, and peaks near the target up).
+    # The landings are judged against the aim (aim_over_c).
     bias_gain: float = 0.3
-    bias_target_c: float = 0.0
     bias_clamp_c: float = 0.25
     bias_max_shortfall_c: float = 0.3
-    # Two landings in a row above this: the gain x 1.5 and the bias -0.1
-    # at once.
+    # Two landings in a row above this (or 0.1 over zone_above_c, if
+    # higher; watchdog_line_c): the gain x 1.5 and the bias -0.1 at once.
     watchdog_peak_c: float = 0.3
-    # Stage 2 (logged only for now): the gain against the radiator's warmth.
-    radiator_term_min_episodes: int = 12
+
+    @property
+    def aim_over_c(self) -> float:
+        """How far over the target each pulse aims: zone_above_c less
+        aim_margin_c, never below the target (°C)."""
+        return max(0.0, self.zone_above_c - self.aim_margin_c)
+
+    @property
+    def watchdog_line_c(self) -> float:
+        """The landing over the target that counts as hot for the
+        learner's watchdog (°C)."""
+        return max(self.watchdog_peak_c, self.zone_above_c + 0.1)
+
+    @property
+    def bias_shortfall_line_c(self) -> float:
+        """The largest shortfall at a pulse's start whose landing may move
+        the aim bias up (°C): bias_max_shortfall_c, or 0.2 below the zone's
+        bottom when that is lower (with a wide zone below, every pulse
+        starts further short, and up-learning would never happen; 2.17.0
+        review)."""
+        return max(self.bias_max_shortfall_c, self.zone_below_c + 0.2)
 
 
 # ---------------------------------------------------------------------------
