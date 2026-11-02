@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .card import async_register_card
 from .climate_controllers import (
     MissingEntityWatch,
+    heating_report,
     migrate_options_v1_to_v2,
     plausible_c,
     read_trv,
@@ -27,10 +28,11 @@ from .const import (
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEATING_POWER_ENTITY_ID,
     DOMAIN,
-    safe_float,
+    TADO_DOMAIN,
 )
 from .parameters import (
     ENTITY_MISSING_REPORT_S,
+    REPORT_TS_MAX_AHEAD_S,
     ROOM_SENSOR_UNAVAILABLE_REPORT_S,
     CorrectionTuning,
 )
@@ -162,21 +164,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # not).  The value and when it last changed (a new report of the
         # cloud's polling).  Read whenever the sensor is set: one state
         # lookup.
-        data["heating_power"] = None
-        data["heating_power_ts"] = None
-        data["heating_power_reported_ts"] = None
+        data.update(heating_report(None, None, changed_ts=0.0, reported_ts=0.0,
+                                   from_tado=False, max_ahead_s=REPORT_TS_MAX_AHEAD_S))
         power_id = entry.options.get(CONF_HEATING_POWER_ENTITY_ID)
-        if power_id:
-            state = hass.states.get(power_id)
-            value = safe_float(state.state) if state is not None else None
-            if value is not None and 0.0 <= value <= 100.0:
-                data["heating_power"] = value
-                data["heating_power_ts"] = state.last_changed.timestamp()
-                # When the value was last reported, a repeat of the same one
-                # included (the lost-off check: a valve still at 100 % three
-                # minutes after an off reports no change).
-                reported = getattr(state, "last_reported", None) or state.last_updated
-                data["heating_power_reported_ts"] = reported.timestamp()
+        state = hass.states.get(power_id) if power_id else None
+        if state is not None:
+            # When the value was last reported, a repeat of the same one
+            # included (the lost-off check: a valve still at 100 % three
+            # minutes after an off reports no change); and, from a Tado
+            # zone's heating sensor only, when the valve itself made that
+            # report (its ``time``): the look-ahead judges its answers by it,
+            # and the lost-off check needs no allowance for the polling
+            # (parameters.LOST_OFF_AFTER_TADO_S).
+            reported = getattr(state, "last_reported", None) or state.last_updated
+            power_reg = er.async_get(hass).async_get(power_id)
+            data.update(heating_report(
+                state.state, state.attributes,
+                changed_ts=state.last_changed.timestamp(),
+                reported_ts=reported.timestamp(),
+                from_tado=power_reg is not None and power_reg.platform == TADO_DOMAIN,
+                max_ahead_s=REPORT_TS_MAX_AHEAD_S,
+            ))
 
         async_check_entities(
             hass, entry, missing_watch, time.time(),
@@ -224,6 +232,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         hass.data[DOMAIN].pop(entry.entry_id)
+        if not hass.data[DOMAIN]:
+            # The last room is gone: no refresh after a command is due.
+            from .climate_regulation import COMMAND_REFRESHER
+
+            COMMAND_REFRESHER.cancel()
     # A disabled room no longer needs its entities.  (A plain reload keeps
     # its repairs: the check needs a few minutes to report them again.)
     if entry.disabled_by is not None:

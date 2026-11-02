@@ -87,12 +87,14 @@ modules.
   last command's bookkeeping (`pending_command`, `resend_grace_s`,
   `trv_holds_command`, `CommandRecord`), the
   fail-cold helpers (timer overlays, watchdog test, `OutOfBandMonitor`),
-  the config entry option migration, and the options form's checks
+  the valve's own report time (`tado_report_ts`), the planner of the
+  refresh after a command (`RefreshPlanner`), the config entry option
+  migration, and the options form's checks
   (`options_form_errors`, `options_form_values`: shown again after an
   error with what was entered).
 - `climate.py`: the ClimateEntity (properties, lifecycle, options).
-- `climate_regulation.py`: regulation cycle, rate limiting, TRV commands,
-  feeding the auto-tuner. At debug it logs one line per cycle with the
+- `climate_regulation.py`: regulation cycle, rate limiting, TRV commands
+  (`COMMAND_PACER`, `COMMAND_REFRESHER`), feeding the auto-tuner. At debug it logs one line per cycle with the
   whole decision (mode, setpoint, room and slope, the valve's reading and
   state, the command relative to that reading, P, I, send reason). The
   coordinator's own refresh chatter is on
@@ -357,6 +359,34 @@ Read this before changing `regulation.py` or `parameters.py`.
   flow (TRV section); it is written to the entry data and unique ID together
   with the options (`change_trv`, one reload), and a fallback that becomes
   the TRV is removed with "prefer the fallback".
+- **Refresh after a command** (2.19.0, option `refresh_after_command`,
+  off by default, TRV section): after every TRV service call to a cloud
+  TRV (`_async_call_trv`; of the failed ones only a timeout, which may have
+  landed: one that keeps failing would cost a refresh per rate-limit
+  interval), one `homeassistant.update_entity` on it
+  `COMMAND_REFRESH_DELAY_S` (30 s) later (`COMMAND_REFRESHER`, one for all
+  rooms, with the HA-free `RefreshPlanner`): commands to other cloud TRVs
+  within the delay share it, which then waits for the last of them, at most
+  `COMMAND_REFRESH_MAX_WAIT_S` (60 s) after the first, and a TRV commanded
+  less than `COMMAND_REFRESH_MIN_AGE_S` (15 s) before it waits for the next
+  one (its answer must exist first); for a Tado home one refresh updates
+  every zone. The call does not block (2.19.0 review: a 10-s timeout cut a
+  slow refresh short with its 16–21 calls spent); a failure to ask is logged
+  once per distinct error, the refresh's own failures by HA; nothing while
+  HA stops, and the last room unloading cancels a pending one.
+  Evidence (2 Nov 2026, project doc `claude/tado-polling-2026-11-02.md`): a
+  Tado valve answers 6–13 s after a command, and HA saw the answer 53–180 s
+  later (median 152 s), because the Tado integration's own refresh after the
+  command runs before the answer exists and the next poll is the owner's
+  3-min `update_entity` automation (HA's own interval is 5 min while any
+  zone heats, 30 min otherwise, not configurable). Cost: 5 API calls per
+  refresh with ha-tado-quota's trim, about 21 without (seven zones);
+  40–170 commands a day. What it changes: the valve's state and heating %
+  show half a minute after a command (card, activity log, the look-ahead's
+  answer when it comes that early); the lost-off check above runs on the
+  polls after it. Polling faster all the time was rejected: about +2,000
+  calls a day trimmed (+8,400 untrimmed, over the 20,000 quota) for little
+  that changes behaviour.
 - **Command spacing:** one `CommandPacer` for all rooms keeps TRV commands at
   least `TRV_COMMAND_SPACING_S` (5 s) apart. All rooms run their cycle on the
   same minute after a restart, and all V3+ valves share one bridge.
@@ -616,7 +646,26 @@ is updating.
   at 7 min again with 370 s (2.15.0 reviews). The 25 Oct valves heated
   13–15 min. The confirmation off covers offs within a minute of a
   heat command; this covers any later one, which dosed pulses (an off
-  3 min or more after each 25 °C) make the normal case.
+  3 min or more after each 25 °C) make the normal case. **With the valve's
+  own report time (2.19.0):** a Tado zone's heating sensor carries it as
+  `time` (`heating_report` / `tado_report_ts` → `heating_power_valve_ts`;
+  read only from a sensor of the `tado` platform; a value more than
+  `REPORT_TS_MAX_AHEAD_S`, 20 s, after the poll that brought it is a clock
+  out of step and not used: a report is made before the poll that brings
+  it, and at 120 s the review's Tado clock 90 s ahead made a report from
+  just before an off read as made after it), and then a poll `LOST_OFF_AFTER_TADO_S`
+  (3 min) or more after the off still at 20 % is a lost off, and a report
+  the valve itself made `LOST_OFF_REPORTED_AFTER_S` (60 s) or more after
+  the off saying it heats is one at once; without it, 8 min as above. 2 Nov
+  2026, 16 offs from 100 % in four zones: every valve reported under 20 %
+  2–10 s after the off on Tado's clock, HA saw it 5–178 s later (the next
+  poll), and a refresh 5–14 s after an off already showed it; the 2.15.0
+  review's "reports 200 s late" was the simulator's model, where HA's poll
+  time advanced while the value lagged, which a polled cloud does not do.
+  Tado re-reports a steady value only about every 20 min, so a valve that
+  dropped the off and stays at 100 % is caught by the poll rule, not by
+  its own report. 3 min, not 2: 18 times the slowest report seen, and safe
+  if the cloud is ever slow (a false positive costs one extra off).
 - **Room sensor lost:** the room sensor is meant to be reliable (owner's
   decision), so a gap is only bridged with the last value for the sensor
   grace period, counted from the first cycle without a reading. After that
@@ -1138,21 +1187,48 @@ doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
   shows for a minute), with the reading's slope known and a heating power
   sensor set. The command booked is the one tried (`_last_attempt_c`, kept
   inside what the valve accepts). Its answer is the first heating power
-  report above 0 whose report time (the state's `last_changed`) is after
-  the command and within `observe_s` (8 min): cycles that skip the
-  look-ahead (room sensor lost, no data, waiting) must not make a later
-  report the answer. The push is the setpoint the valve first shows after
+  report above 0 whose report time is after the command and within
+  `observe_s` (8 min): the valve's own (Tado's `time`, 2.19.0,
+  `heating_power_valve_ts`), else the state's `last_changed`; cycles that
+  skip the look-ahead (room sensor lost, no data, waiting) must not make a
+  later report the answer. The release is given up `answer_seen_late_s`
+  (240 s) after the window, since a report made within it reaches HA up to
+  a poll later (and a reload takes a pending one back within the same). The push is the setpoint the valve first shows after
   the command's own cycle (`note_setpoint(seen_ts=…)`; a cloud zone rounds
   to 0.5 °C: 18.3 → 18.5) minus its reading at the send.
   A report ≥ 98 % (fully open) is not counted; an off or full power sent
   before the answer cancels it (also Roomstat's own off, summer, the
   watchdog: `_lookahead_observe` checks the last attempt). Least squares
   over the last 24 releases, response = a + b × push + d × fall, look-ahead
-  = d / b, trusted from 8 releases when the fall rates spread ≥ 0.5 °C/h,
-  b ≥ 10 %/°C and |r(push, fall)| ≤ 0.9 (with the look-ahead in use the push
-  is lowered on a falling reading, so they correlate). The value in use
-  starts at 0 and moves towards the fit by at most 2 min per release (gap
-  under 1 min left alone), within 0-20 min. Each release's lesson is an
+  = d / b, trusted from 6 releases when 3 of them came on a reading falling
+  ≥ 1 °C/h (`min_falling`, `falling_c_per_h`: only those show the
+  look-ahead), the fall rates spread ≥ 0.5 °C/h, b ≥ 10 %/°C, |r(push,
+  fall)| ≤ 0.9 (with the look-ahead in use the push is lowered on a falling
+  reading, so they correlate), the valve's answer per °C of push is known
+  to within ± 30 % (`max_push_gain_rel_uncertainty`: the look-ahead is a
+  ratio over it, and the delta method understates its error when it is
+  not) and the look-ahead's standard error (delta method on the slopes'
+  covariance, residuals over n − 3, scaled to one sigma of Student's t for
+  those few degrees of freedom: × 1.20 at 6 releases) is ≤ 5 min
+  (`max_uncertainty_s`). The study's real releases on 2 Nov (pushes only
+  −0.2…+0.9) give 16.5 ± 3.1 min but its answer per °C of push ± 36–56 %
+  with a sixth like them: one release with a bigger push makes the fit
+  (14.8 ± 2.5 min); in the simulation below the push check changed nothing
+  (pushes there spread wider). The value in use starts at 0 and moves half the
+  way to a trusted fit per release (`step_frac`; gap under 1 min left
+  alone), within 0-20 min. Until 2.18.2: 8 releases, no falling count or
+  uncertainty, at most 2 min per release. 2 Nov 2026, the owner asked why
+  all four read 0: master 7 releases (one falling, answers scattering about
+  20 %), living room and study 5 (dosing had replaced the hold since 31
+  Oct / 1 Nov), second bedroom none (it sits above target, valve shut); the
+  master's next release would have made a fit of 5-15 min depending on that
+  one answer. On a synthetic Tado (scratch `la_gate/`: 16 + 38 × (push + L
+  × fall), 8-12 % noise, the rooms' release mixes, the push lowered by the
+  look-ahead in use and rounded to 0.5 °C, 250 runs each) runs that ever
+  used ≥ 5 min too much 26 → 13 % (worst 49 → 26 %); releases to within
+  3 min of a 13-min valve for good 12 → 11-12 at 8 % noise, 12-13 → 19-20
+  at 12 %; ±4 min halved the wrong runs again but was slower. The study's
+  five releases already give 16.5 ± 3.1 min. Each release's lesson is an
   activity line (`valve look-ahead: the valve answered 62 % to a push of
   +0.5 on a reading falling 3.0 °C/h → …`).
 - **The auto-tuner** gets the look-ahead taken off the command the valve
@@ -1181,7 +1257,8 @@ doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
   This matches "tried and dropped: cancelling the Tado's own anticipation"
   under Regulation concepts. Judge it live on the trace sensors.
 - **On the entity:** the sensor `valve_lookahead` (minutes in use, only while
-  the option is on; attributes: the fit, releases, the last lesson), the
+  the option is on; attributes: the fit and its uncertainty, releases and
+  those on a falling reading with what each needs, the last lesson), the
   thermostat's `valve_lookahead_min` and `valve_lookahead_c` (this cycle's
   lowering, unrecorded), the hold's activity phrase (`0.6 off for its
   reading falling 2.8 °C/h`), the debug line (`, look-ahead -0.62` and the
@@ -1789,6 +1866,9 @@ ruff check .
   target or after a heat-up, the cap on the room's heating rate, the
   sensor's churn, removal, the room sensor lost mid-pulse, failures).
   Its `_TadoPlant` holds every command as a Tado does.
+- `tests/test_tado_report_time.py` (2.19.0: Tado's report time, the
+  lost-off rule with and without it, through the entity on a zone polled
+  every 3 min, the refresh planner and the refresh after a command).
 - `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
   Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
   replayed, restarts and pre-2.12 snapshots).

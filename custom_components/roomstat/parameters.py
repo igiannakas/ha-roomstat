@@ -87,6 +87,41 @@ OFF_CONFIRM_S: float = 60.0
 LOST_OFF_AFTER_S: float = 480.0
 LOST_OFF_MIN_PCT: float = 20.0
 LOST_OFF_MAX_RESENDS: int = 2
+# A heating sensor that carries the valve's own report time (Tado's ``time``
+# attribute, climate_controllers.tado_report_ts) shows how late a report is,
+# so the wait is the valve's, not the polling's (2.19.0).  2 Nov 2026, 16
+# offs from 100 % in four zones: each valve reported under 20 % 2-10 s after
+# the off on Tado's clock, and refreshes 5-14 s after an off already showed
+# it; the 5-178 s HA took otherwise was the wait for the next poll.  So a
+# poll LOST_OFF_AFTER_TADO_S or more after an off that still shows heating
+# is a valve that kept the heat (3 min: 18 times the slowest report seen,
+# and safe if the cloud is ever slow), and a report the valve itself made
+# LOST_OFF_REPORTED_AFTER_S or more after the off saying it heats is one at
+# once.
+LOST_OFF_AFTER_TADO_S: float = 180.0
+LOST_OFF_REPORTED_AFTER_S: float = 60.0
+# A valve report time more than this after the poll that brought it is a
+# clock out of step: the report time is not used (2.19.0 review: at 120 s a
+# Tado clock 90 s ahead made a report from just before an off read as one
+# made after it).  A report is made before the poll that brings it, so any
+# lead at all is skew; servers keep NTP time to well under a second.
+REPORT_TS_MAX_AHEAD_S: float = 20.0
+
+# Refresh after a command (option ``refresh_after_command``, 2.19.0): one
+# homeassistant.update_entity on a cloud TRV this long after a command to
+# it, so its answer is seen then rather than at the next poll (2 Nov 2026:
+# a Tado valve answers 6-13 s after a command, and HA saw it 53-180 s later,
+# median 152 s, because the integration's own refresh after the command runs
+# before the answer exists).  Commands to other cloud TRVs within the delay
+# share the refresh, which waits at most COMMAND_REFRESH_MAX_WAIT_S after
+# the first (a heating script commands four rooms within 15 s).  Each
+# refresh costs Tado API calls (5 with ha-tado-quota's trim, about 21
+# without, for seven zones).
+COMMAND_REFRESH_DELAY_S: float = 30.0
+COMMAND_REFRESH_MAX_WAIT_S: float = 60.0
+# A TRV commanded less than this before the shared refresh waits for the
+# next one (a valve answers 6-13 s after a command).
+COMMAND_REFRESH_MIN_AGE_S: float = 15.0
 
 # A TRV whose setpoint still differs from the last command this long after it
 # was sent did not take it (lost on the way, or a Tado schedule block ended
@@ -535,11 +570,38 @@ class LookaheadConfig:
 
     # Releases kept for the fit, and how many before it is trusted.
     window: int = 24
-    min_samples: int = 8
+    min_samples: int = 6
     observe_s: float = 480.0
-    # The look-ahead in use starts at 0 and moves towards the fit at most
-    # step_s per release; a gap under deadband_s is left alone.
-    step_s: float = 120.0
+    # An answer is judged by its report time (the valve's own when the
+    # sensor carries it), so one made within observe_s may reach Home
+    # Assistant up to a poll later: the release is given up only this much
+    # after the window.
+    answer_seen_late_s: float = 240.0
+    # The look-ahead shows only in releases on a falling reading: a fit is
+    # trusted once min_falling of them fell falling_c_per_h or more, and the
+    # look-ahead is known to within max_uncertainty_s (one standard error).
+    # 2 Nov 2026: with a count alone (8, until 2.18.2), the master bedroom's
+    # first fit rested on one falling release among seven (its answers
+    # scatter about 20 %), and one more release would have swung it 5-15
+    # min.  On a synthetic Tado (16 + 38 x (push + L x fall), 8-12 % noise,
+    # the rooms' release mixes, 250 runs each; scratch la_gate/): runs that
+    # ever used 5 min or more too much 26 % -> 13 % (worst case 49 -> 26 %),
+    # releases to within 3 min of a 13-min valve for good 12 -> 11-12 at 8 %
+    # noise and 12-13 -> 19-20 at 12 %.  ±4 min halved the wrong runs again
+    # (9 %) but was slower (14-22).
+    min_falling: int = 3
+    falling_c_per_h: float = 1.0
+    max_uncertainty_s: float = 300.0
+    # And the valve's answer per °C of push must itself be known to within
+    # this share (one standard error): the look-ahead is a ratio over it,
+    # and the delta method understates its error when it is not (2.19.0
+    # review).  The look-ahead's error is also scaled to one sigma of
+    # Student's t for the fit's few degrees of freedom.
+    max_push_gain_rel_uncertainty: float = 0.3
+    # The look-ahead in use starts at 0 and moves step_frac of the way to a
+    # trusted fit per release (until 2.18.2 at most 2 min per release, which
+    # took 7 releases to reach 13 min); a gap under deadband_s is left alone.
+    step_frac: float = 0.5
     deadband_s: float = 60.0
     max_lookahead_s: float = 1200.0
     # The fit is trusted only when the releases spread enough in fall rate

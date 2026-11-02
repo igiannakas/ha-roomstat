@@ -161,21 +161,74 @@ class TestLearner:
         la = LookaheadLearner()
         assert la.lookahead_s == 0.0 and la.fit is None and not la.observing
 
-    def test_learns_the_valves_lookahead_a_step_at_a_time(self):
+    def test_learns_the_valves_lookahead_half_the_gap_at_a_time(self):
         rng = random.Random(4)
+        cfg = LookaheadConfig()
         la = LookaheadLearner()
-        history = []
+        trusted = 0
         for k in range(40):
+            before = la.lookahead_s
             line = _release(la, 1000.0 + k * 3600, rng)
             assert line
-            history.append(la.lookahead_s)
-        # Nothing before the fit is trusted, then at most 2 min per release.
-        assert history[:LookaheadConfig().min_samples - 1] == [0.0] * (LookaheadConfig().min_samples - 1)
-        steps = [b - a for a, b in zip(history, history[1:], strict=False)]
-        assert max(abs(s) for s in steps) <= LookaheadConfig().step_s + 1e-9
-        assert la.fit is not None
+            if la.fit is None:
+                # Nothing moves before a fit is trusted.
+                assert la.lookahead_s == before and (trusted or before == 0.0)
+                continue
+            trusted += 1
+            gap = la.fit.lookahead_s - before
+            if abs(gap) < cfg.deadband_s:
+                assert la.lookahead_s == before
+            else:
+                assert la.lookahead_s == pytest.approx(before + cfg.step_frac * gap)
+        assert trusted and k + 1 - trusted >= cfg.min_samples - 1
+        assert la.fit is not None and la.fit.uncertainty_s <= cfg.max_uncertainty_s
         assert la.fit.lookahead_s / 60 == pytest.approx(13.0, abs=2.5)
         assert la.lookahead_s / 60 == pytest.approx(13.0, abs=2.5)
+
+    def test_a_fit_needs_releases_on_a_falling_reading(self):
+        # 2 Nov 2026, master bedroom: seven releases, one on a falling reading.
+        real = [(0.7, 0.0, 14), (1.4, 0.0, 67), (1.3, 0.0, 80), (0.1, 1.7, 25),
+                (0.3, 0.0, 12), (1.4, 0.0, 42), (0.2, 0.0, 31)]
+        la = LookaheadLearner()
+        for k, (push, fall, pct) in enumerate(real + [(0.3, 0.0, 20)]):
+            la.start(1000.0 + k * 3600, 18.0 + push, 18.0, -fall * PER_H)
+            line = la.observe(1150.0 + k * 3600, pct, 1150.0 + k * 3600)
+        # Until 2.18.2 the eighth release made a fit of 12.5 min (5.2-15.2
+        # with other plausible eighth answers) and walked towards it.
+        assert la.fit is None and la.lookahead_s == 0.0
+        assert "1 of 3 releases on a reading falling 1.0 °C/h or more" in line
+        assert la.summary()["falling_releases"] == 1
+
+    def test_a_fit_too_uncertain_is_not_used(self):
+        rng = random.Random(11)
+        la = LookaheadLearner()
+        for k in range(10):
+            line = _release(la, 1000.0 + k * 3600, rng, noise=40.0)
+        assert la.fit is None and la.lookahead_s == 0.0
+        assert "too uncertain" in line
+
+    def test_the_studys_releases_need_a_wider_push_for_a_fit(self):
+        # 2 Nov 2026, study: five releases, four on a reading falling 3-4 °C/h
+        # (16.5 ± 3.1 min).  All pushes small (-0.2..+0.9), so the valve's
+        # answer per °C of push is known only to about ± 40 %, and the
+        # look-ahead, a ratio over it, is not trusted yet (2.19.0 review);
+        # one release with a bigger push pins it down, and the look-ahead
+        # moves half the way to the fit.
+        real = [(0.9, 0.0, 46), (-0.1, 3.0, 29), (-0.1, 3.0, 31), (-0.2, 4.0, 53),
+                (0.3, 3.5, 59), (0.4, 0.0, 30)]
+        la = LookaheadLearner()
+        for k, (push, fall, pct) in enumerate(real + [(1.2, 0.0, 62)]):
+            la.start(1000.0 + k * 3600, 18.0 + push, 18.0, -fall * PER_H)
+            line = la.observe(1150.0 + k * 3600, pct, 1150.0 + k * 3600)
+            if k == len(real) - 1:
+                assert la.fit is None and "answer to the push is too uncertain" in line
+        assert la.fit is not None
+        assert la.fit.uncertainty_s <= LookaheadConfig().max_uncertainty_s
+        assert la.fit.lookahead_s / 60 == pytest.approx(14.8, abs=1.0)
+        assert la.lookahead_s == pytest.approx(0.5 * la.fit.lookahead_s)
+        assert "±" in line and "fit from 7 releases" in line
+        s = la.summary()
+        assert s["fitted_uncertainty_min"] is not None and s["falling_releases"] == 4
 
     def test_a_valve_without_lookahead_learns_none(self):
         rng = random.Random(7)
@@ -216,11 +269,27 @@ class TestLearner:
         assert "fully open" in line and la.releases == () and not la.observing
 
     def test_no_answer_within_the_window_is_given_up(self):
+        cfg = LookaheadConfig()
         la = LookaheadLearner()
         la.start(1000.0, 18.3, 18.0, -2.0 * PER_H)
         assert la.observe(1000.0 + 400, 0.0, 1000.0 + 390) is None
-        line = la.observe(1000.0 + 481, 0.0, 1000.0 + 480)
+        # Past the window, but a report made within it may still come in.
+        assert la.observe(1000.0 + 481, 0.0, 1000.0 + 480) is None and la.observing
+        line = la.observe(1000.0 + cfg.observe_s + cfg.answer_seen_late_s + 1, 0.0, 1000.0 + 480)
         assert "no heating" in line and not la.observing and la.releases == ()
+
+    def test_an_answer_made_in_the_window_and_seen_a_poll_later_counts(self):
+        # 2.19.0: the valve's own report time (Tado's ``time``): made 7 min
+        # after the release, seen by Home Assistant at 10 min.
+        la = LookaheadLearner()
+        la.start(1000.0, 18.3, 18.0, -2.0 * PER_H)
+        assert la.observe(1000.0 + 540, 0.0, 1000.0 + 300) is None
+        line = la.observe(1000.0 + 600, 45.0, 1000.0 + 420)
+        assert line and "answered 45 %" in line and la.releases[0].response_pct == 45.0
+        # One made after the window does not count, however it is seen.
+        la.start(5000.0, 18.3, 18.0, -2.0 * PER_H)
+        assert la.observe(5000.0 + 600, 45.0, 5000.0 + 500) is None
+        assert la.observing
 
     def test_a_report_from_before_the_command_is_not_its_answer(self):
         la = LookaheadLearner()
@@ -259,11 +328,15 @@ class TestLearner:
         assert la.releases[0].ts == 1000.0 + 15 * 3600
 
     def test_never_beyond_the_bounds(self):
+        # A 40-min valve on gentle slides and pushes (answers stay unclipped).
         rng = random.Random(6)
         la = LookaheadLearner()
         for k in range(60):
-            _release(la, 1000.0 + k * 3600, rng, lookahead_min=60.0, noise=2.0)
-        assert la.lookahead_s == LookaheadConfig().max_lookahead_s
+            _release(la, 1000.0 + k * 3600, rng, lookahead_min=40.0, noise=2.0,
+                     push=rng.uniform(-0.3, 0.3), fall=rng.uniform(0.0, 2.0))
+        assert la.fit is not None and la.fit.lookahead_s == LookaheadConfig().max_lookahead_s
+        assert la.lookahead_s == pytest.approx(LookaheadConfig().max_lookahead_s, abs=60.0)
+        assert la.lookahead_s <= LookaheadConfig().max_lookahead_s
 
     def test_reset(self):
         rng = random.Random(4)
@@ -306,9 +379,13 @@ class TestPersistence:
         la = LookaheadLearner()
         la.start(1000.0, 18.3, 18.0, -2.0 * PER_H)
         data = la.to_dict()
-        assert not LookaheadLearner().restore(data, now=1000.0 + 600) or True
+        cfg = LookaheadConfig()
+        # Its answer may still come in (made in the window, seen a poll later).
+        kept = LookaheadLearner()
+        kept.restore(data, now=1000.0 + cfg.observe_s + cfg.answer_seen_late_s)
+        assert kept.observing
         late = LookaheadLearner()
-        late.restore(data, now=1000.0 + 600)
+        late.restore(data, now=1000.0 + cfg.observe_s + cfg.answer_seen_late_s + 1)
         assert not late.observing
         early = LookaheadLearner()
         early.restore(data, now=900.0)

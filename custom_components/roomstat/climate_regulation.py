@@ -28,6 +28,7 @@ from .climate_controllers import (
     CommandPacer,
     CommandRecord,
     OutOfBandMonitor,
+    RefreshPlanner,
     TrvReading,
     command_limits,
     cycle_stalled,
@@ -46,15 +47,22 @@ from .climate_controllers import (
 )
 from .const import (
     CONF_FALLBACK_ENTITY_ID,
+    CONF_REFRESH_AFTER_COMMAND,
+    CONF_SOURCE_ENTITY_ID,
     CONF_WINDOW_SENSOR_ID,
     TADO_DOMAIN,
     TADO_SERVICE_TIMER,
 )
 from .parameters import (
+    COMMAND_REFRESH_DELAY_S,
+    COMMAND_REFRESH_MAX_WAIT_S,
+    COMMAND_REFRESH_MIN_AGE_S,
     FALLBACK_DRIFT_GRACE_S,
     LOST_OFF_AFTER_S,
+    LOST_OFF_AFTER_TADO_S,
     LOST_OFF_MAX_RESENDS,
     LOST_OFF_MIN_PCT,
+    LOST_OFF_REPORTED_AFTER_S,
     MANUAL_SETTLE_S,
     MAX_INTEGRATION_STEP_S,
     OFF_CONFIRM_S,
@@ -77,6 +85,73 @@ async def _wait_for_command_slot() -> None:
     delay = COMMAND_PACER.reserve(time.monotonic())
     if delay > 0:
         await asyncio.sleep(delay)
+
+
+class CommandRefresher:
+    """One refresh of the cloud TRVs a short time after commands to them
+    (option ``refresh_after_command``; parameters.COMMAND_REFRESH_DELAY_S).
+
+    One for every Roomstat room, so a burst of commands (a heating script,
+    four rooms within 15 s) shares one refresh: ``homeassistant.update_entity``
+    on the TRVs commanded, which for a Tado home refreshes the whole home
+    once (its coordinator merges the requests).  Never raises: a refresh
+    that fails costs nothing but its log line."""
+
+    def __init__(self, delay_s: float, max_wait_s: float, min_age_s: float) -> None:
+        self.planner = RefreshPlanner(delay_s, max_wait_s, min_age_s)
+        self._hass: Any = None
+        self._cancel: Any = None
+        self._failed: str | None = None
+
+    def request(self, hass: Any, entity_id: str, now: float) -> None:
+        """A command went to the cloud TRV *entity_id* at *now*."""
+        self._arm(hass, self.planner.request(now, entity_id))
+
+    def _arm(self, hass: Any, delay: float) -> None:
+        if self._cancel is not None:
+            self._cancel()
+        self._hass = hass
+        self._cancel = async_call_later(hass, delay, self._async_fire)
+
+    def cancel(self) -> None:
+        """Forget what was pending (the last room unloading)."""
+        if self._cancel is not None:
+            self._cancel()
+        self._cancel = None
+        self.planner.clear()
+
+    async def _async_fire(self, _now: Any = None) -> None:
+        self._cancel = None
+        hass = self._hass
+        entities, again = self.planner.take(time.time())
+        if again is not None and hass is not None:
+            # Commanded too recently for this refresh: the next one.
+            self._arm(hass, again)
+        if not entities or hass is None or getattr(hass, "is_stopping", False):
+            return
+        _LOGGER.debug("Refreshing %s after a command", ", ".join(entities))
+        try:
+            # Not blocking: the integration's own refresh can take seconds
+            # (about 21 calls one after another for a Tado home untrimmed),
+            # and a timeout here would cut it short with its calls spent.
+            # Home Assistant logs a failure of the refresh itself.
+            await hass.services.async_call(
+                "homeassistant", "update_entity",
+                {"entity_id": list(entities)}, blocking=False,
+            )
+        except Exception as err:  # noqa: BLE001 - a refresh is only a courtesy
+            what = f"{type(err).__name__}: {err}"
+            if what != self._failed:
+                self._failed = what
+                _LOGGER.warning("Refreshing %s after a command failed: %s",
+                                ", ".join(entities), what)
+            return
+        self._failed = None
+
+
+COMMAND_REFRESHER = CommandRefresher(
+    COMMAND_REFRESH_DELAY_S, COMMAND_REFRESH_MAX_WAIT_S, COMMAND_REFRESH_MIN_AGE_S
+)
 
 
 class RegulationMixin:
@@ -750,6 +825,9 @@ class RegulationMixin:
             resends=self._lost_off_resends,
             after_s=LOST_OFF_AFTER_S, min_pct=LOST_OFF_MIN_PCT,
             max_resends=LOST_OFF_MAX_RESENDS,
+            valve_report_ts=data.get("heating_power_valve_ts"),
+            after_tado_s=LOST_OFF_AFTER_TADO_S,
+            reported_after_s=LOST_OFF_REPORTED_AFTER_S,
         ):
             return
         self._off_confirm_ts = now
@@ -1323,9 +1401,34 @@ class RegulationMixin:
                 )
         except Exception as err:  # noqa: BLE001 - any failure is reported, never raised
             self._note_command_result(entity_id, what, err)
+            if isinstance(err, TimeoutError):
+                # A call that timed out may still have landed: look again.
+                # (Not after other failures: one that keeps failing would
+                # cost a refresh per rate-limit interval for nothing.)
+                self._refresh_after_command(entity_id)
             return False
         self._note_command_result(entity_id, what, None)
+        self._refresh_after_command(entity_id)
         return True
+
+    def _refresh_after_command(self, entity_id: str) -> None:
+        """With the option on, ask for one refresh of a cloud TRV a short
+        time after a command to it (CommandRefresher): its answer is then
+        seen at once rather than at the next poll."""
+        try:
+            if not self._config_entry.options.get(CONF_REFRESH_AFTER_COMMAND, False):
+                return
+            data = self.coordinator.data or {}
+            if entity_id == self._config_entry.data.get(CONF_SOURCE_ENTITY_ID):
+                cloud = data.get("tado_cloud")
+            elif entity_id == self._config_entry.options.get(CONF_FALLBACK_ENTITY_ID):
+                cloud = data.get("fallback_cloud")
+            else:
+                cloud = False
+            if cloud:
+                COMMAND_REFRESHER.request(self.hass, entity_id, time.time())
+        except Exception:  # noqa: BLE001 - never stop a command for a refresh
+            _LOGGER.debug("Could not ask for a refresh of %s", entity_id, exc_info=True)
 
     async def _async_send_off_to_tado(self, entity_id: str | None) -> bool:
         """Shut the valve with hvac mode ``off`` (the regulation's minimum).

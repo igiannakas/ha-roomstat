@@ -79,6 +79,12 @@ CONF_FALLBACK_ENTITY_ID = "fallback_entity_id"
 # default: every cloud command costs Tado API calls.
 CONF_PREFER_FALLBACK = "prefer_fallback"
 
+# Refresh a cloud TRV (homeassistant.update_entity) half a minute after each
+# command to it, so its answer is seen then rather than at the next poll
+# (climate_regulation.CommandRefresher).  Off by default: each refresh costs
+# Tado API calls.
+CONF_REFRESH_AFTER_COMMAND = "refresh_after_command"
+
 # Integrations whose climate entities reach the TRV through a cloud API that
 # Home Assistant polls (minutes between updates).  A TRV from one of them
 # gets the slower drift grace, whether it is the configured TRV or the

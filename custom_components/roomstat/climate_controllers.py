@@ -51,6 +51,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -1309,19 +1310,157 @@ def lost_off_due(
     *, off_ts: float | None, off_taken: bool, heat_since_off: bool,
     confirm_pending: bool, heating_pct: float | None, reported_ts: float | None,
     resends: int, after_s: float, min_pct: float, max_resends: int,
+    valve_report_ts: float | None = None, after_tado_s: float | None = None,
+    reported_after_s: float | None = None,
 ) -> bool:
     """An off the valve took has been dropped: the zone still reports
     heating (at least *min_pct*) in a report made *after_s* or more after
     the off (*reported_ts*: when the state was last reported, a repeat of
     the same value included), no heat command of ours went out since, no
     confirmation off is already due, and fewer than *max_resends* were sent
-    for this heat command (parameters.LOST_OFF_AFTER_S)."""
+    for this heat command (parameters.LOST_OFF_AFTER_S).
+
+    With the valve's own report time (*valve_report_ts*, Tado's ``time``
+    attribute) the wait is *after_tado_s* instead, and a report the valve
+    made *reported_after_s* or more after the off saying it heats is due at
+    once (parameters.LOST_OFF_AFTER_TADO_S)."""
     values = (off_ts, heating_pct, reported_ts)
     if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in values):
         return False
     if not off_taken or heat_since_off or confirm_pending or resends >= max_resends:
         return False
-    return heating_pct >= min_pct and reported_ts - off_ts >= after_s
+    if heating_pct < min_pct:
+        return False
+    if (
+        isinstance(valve_report_ts, (int, float)) and math.isfinite(valve_report_ts)
+        and isinstance(after_tado_s, (int, float))
+    ):
+        if (
+            isinstance(reported_after_s, (int, float))
+            and valve_report_ts - off_ts >= reported_after_s
+        ):
+            return True
+        return reported_ts - off_ts >= after_tado_s
+    return reported_ts - off_ts >= after_s
+
+
+def heating_report(
+    value: Any, attributes: Mapping[str, Any] | None, *, changed_ts: float,
+    reported_ts: float, from_tado: bool, max_ahead_s: float,
+) -> dict[str, float | None]:
+    """A zone's heating power sensor for the coordinator's data: its value
+    (0-100 %), when it last changed and was last reported in Home Assistant,
+    and the valve's own report time (only a Tado heating sensor's ``time``,
+    tado_report_ts).  All None when the value is unusable."""
+    out: dict[str, float | None] = {
+        "heating_power": None, "heating_power_ts": None,
+        "heating_power_reported_ts": None, "heating_power_valve_ts": None,
+    }
+    try:
+        pct = float(value)
+    except (TypeError, ValueError):
+        return out
+    if not math.isfinite(pct) or not 0.0 <= pct <= 100.0:
+        return out
+    out["heating_power"] = pct
+    out["heating_power_ts"] = changed_ts
+    out["heating_power_reported_ts"] = reported_ts
+    if from_tado:
+        out["heating_power_valve_ts"] = tado_report_ts(
+            (attributes or {}).get("time"), reported_ts, max_ahead_s=max_ahead_s
+        )
+    return out
+
+
+def tado_report_ts(value: Any, polled_ts: float | None, *, max_ahead_s: float) -> float | None:
+    """When the valve itself made the heating report Home Assistant shows.
+
+    HA's Tado integration puts the zone's heating power timestamp in the
+    heating sensor's ``time`` attribute (an ISO 8601 UTC string such as
+    ``2026-11-01T16:52:36.240Z``; a steady value is reported again about
+    every 20 min).  None when it is missing or unreadable, has no UTC
+    offset, or lies more than *max_ahead_s* after the poll that brought it
+    (*polled_ts*: a clock out of step), so the caller keeps Home Assistant's
+    own times."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00", 1) if text.endswith("Z") else text)
+        except ValueError:
+            return None
+    elif isinstance(value, datetime):
+        parsed = value
+    else:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    ts = parsed.timestamp()
+    if not math.isfinite(ts):
+        return None
+    if isinstance(polled_ts, (int, float)) and math.isfinite(polled_ts):
+        if ts - polled_ts > max_ahead_s:
+            return None
+    return ts
+
+
+class RefreshPlanner:
+    """Which cloud TRVs to refresh after commands, and when (HA-free; the
+    entity's ``COMMAND_REFRESHER`` in climate_regulation.py arms the timer).
+
+    A command asks for a refresh *delay_s* later; commands to other TRVs
+    within that time share it, which then waits for the last of them, but at
+    most *max_wait_s* after the first.  A TRV commanded less than
+    *min_age_s* before the refresh waits for the next one, so its answer
+    has time to exist (parameters.COMMAND_REFRESH_DELAY_S)."""
+
+    def __init__(self, delay_s: float, max_wait_s: float, min_age_s: float = 0.0) -> None:
+        self.delay_s = max(0.0, float(delay_s))
+        self.max_wait_s = max(self.delay_s, float(max_wait_s))
+        self.min_age_s = min(self.delay_s, max(0.0, float(min_age_s)))
+        self._requested: dict[str, float] = {}
+        self._first_ts: float | None = None
+
+    @property
+    def pending(self) -> tuple[str, ...]:
+        return tuple(sorted(self._requested))
+
+    def _delay(self, now: float) -> float:
+        last = max(self._requested.values())
+        fire_ts = min(self._first_ts + self.max_wait_s, last + self.delay_s)
+        return max(0.0, fire_ts - now)
+
+    def request(self, now: float, entity_id: str) -> float:
+        """A command went to *entity_id*: the seconds from *now* until the
+        refresh."""
+        if (
+            not self._requested or self._first_ts is None or now < self._first_ts
+            or any(now < t for t in self._requested.values())
+        ):
+            # The first of a batch, or the clock went back: start afresh.
+            self._first_ts = now
+            self._requested = {e: now for e in self._requested}
+        self._requested[entity_id] = now
+        return self._delay(now)
+
+    def take(self, now: float) -> tuple[tuple[str, ...], float | None]:
+        """The timer fired at *now*: the TRVs to refresh, and the seconds
+        until the next refresh for those commanded too recently (None when
+        there are none)."""
+        due = sorted(
+            e for e, t in self._requested.items() if now - t >= self.min_age_s or now < t
+        )
+        self._requested = {e: t for e, t in self._requested.items() if e not in due}
+        if not self._requested:
+            self._first_ts = None
+            return tuple(due), None
+        self._first_ts = min(self._requested.values())
+        return tuple(due), self._delay(now)
+
+    def clear(self) -> None:
+        self._requested.clear()
+        self._first_ts = None
 
 
 @dataclass(frozen=True)

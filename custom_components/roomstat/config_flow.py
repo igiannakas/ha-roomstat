@@ -44,6 +44,7 @@ from .const import (
     CONF_PRESENCE_HOME_DELAY_S,
     CONF_PRESENCE_OVERRIDE_MAX_MIN,
     CONF_PRESENCE_SENSOR_ID,
+    CONF_REFRESH_AFTER_COMMAND,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SCHEDULE_OVERRIDE_MIN,
     CONF_SENSOR_GRACE_S,
@@ -439,6 +440,12 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_PREFER_FALLBACK,
                     default=bool(opts.get(CONF_PREFER_FALLBACK, False)),
+                ): selector.BooleanSelector(),
+                # One refresh of a cloud TRV half a minute after a command
+                # (climate_regulation.CommandRefresher).  Costs API calls.
+                vol.Required(
+                    CONF_REFRESH_AFTER_COMMAND,
+                    default=bool(opts.get(CONF_REFRESH_AFTER_COMMAND, False)),
                 ): selector.BooleanSelector(),
             }
         )

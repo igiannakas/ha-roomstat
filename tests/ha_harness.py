@@ -401,6 +401,9 @@ def reset_timers() -> None:
     mod = sys.modules.get("roomstat_e2e.climate_dosing")
     if mod is not None:
         mod.PULSE_COORDINATOR.reset()
+    reg = sys.modules.get("roomstat_e2e.climate_regulation")
+    if reg is not None:
+        reg.COMMAND_REFRESHER.cancel()
 
 
 async def _start(ent, *, last_state=None, extra=None):

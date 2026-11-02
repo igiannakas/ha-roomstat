@@ -197,9 +197,12 @@ class LookaheadMixin:
                 # still shows the valve as it was (seen_ts).
                 self._lookahead.note_setpoint(trv.setpoint_c, seen_ts=now)
             data = self.coordinator.data or {}
-            line = self._lookahead.observe(
-                now, data.get("heating_power"), data.get("heating_power_ts")
-            )
+            # The valve's own report time when the sensor carries it (a Tado
+            # zone), else when Home Assistant saw the value change.
+            report_ts = data.get("heating_power_valve_ts")
+            if report_ts is None:
+                report_ts = data.get("heating_power_ts")
+            line = self._lookahead.observe(now, data.get("heating_power"), report_ts)
             if line:
                 self._log(_LOGGER).info("valve look-ahead: %s", line)
         except Exception as err:  # noqa: BLE001 - never stop the regulation

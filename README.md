@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.18.2-blue)
+![Version](https://img.shields.io/badge/version-2.19.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -36,7 +36,12 @@ changes.
   cloud thermostat as **Configure → TRV Communication → Thermostat (TRV)**
   (if it was the fallback, the fallback is removed), then disable the
   HomeKit Device integration. Roomstat recognises a cloud thermostat and
-  allows for its polling delay before it re-sends a command.
+  allows for its polling delay before it re-sends a command. Turn on
+  **Configure → TRV Communication → Refresh the cloud thermostat after a
+  command** to see each answer half a minute after the command instead of
+  at the next poll; commands to several rooms within that time share one
+  refresh, and each refresh costs Tado API calls (about 5 with polling
+  trimmed).
 - **Gentle on the bridge.** Commands from different rooms go out at least
   5 seconds apart. Roomstat checks every minute that each valve still holds
   its last command, and sends it again only if it doesn't, so you can set
@@ -48,7 +53,10 @@ changes.
   nothing has changed for 15 seconds, so pressing Comfort then Frost
   protection sends nothing. A Tado valve that gets an off seconds after a
   heat command can heat for a quarter of an hour anyway, so an off sent
-  within a minute of a heat command is sent once more a minute later. More
+  within a minute of a heat command is sent once more a minute later, and a
+  valve that still reports heating after an off gets it again (3 minutes
+  after it on a Tado zone, whose heating sensor says when the valve itself
+  reported; 8 minutes otherwise). More
   heat also waits while a window's open delay runs. Less heat and off always
   go at once; the schedule, presence and windows wait only within those 15
   seconds. **Heat** sent to a room that is already heating no longer ends
@@ -245,8 +253,12 @@ zone's heating power sensor (for a Tado zone, `sensor.<zone>_heating`).
   power are not touched, so it only ever takes heat away.
 - The look-ahead starts at 0. Each top-up from a shut valve teaches it: the
   valve's first heating power report, against what it was asked and how fast
-  its reading fell. From 8 top-ups on it moves towards what they show, at
-  most 2 minutes per top-up (up to 20 minutes).
+  its reading fell. It moves only once at least 6 top-ups, 3 of them on a
+  reading falling 1 °C/h or more and with pushes varied enough to show how
+  the valve answers a push, pin the look-ahead down to within about ±5
+  minutes; then it goes half the way to what they show per top-up (up to
+  20 minutes). On a Tado zone each answer is timed by the valve's own
+  report.
 - The **Valve look-ahead** sensor shows the value in use, with what the
   learning has seen. The activity log has a line for each top-up it learns
   from.
@@ -325,8 +337,8 @@ zone's Heating sensor), to check that each pulse opened the valve.
 - **The activity log** says each pulse, its landing and what was learned.
 - **Safety:** every pulse is a full-power command, so the fail-cold rules
   apply (timer, watchdog, a lost room sensor ends it). A valve that still
-  reports heating 8 minutes after an off gets the off again, at most twice
-  (also without dosed top-ups).
+  reports heating after an off gets the off again, at most twice (also
+  without dosed top-ups): 3 minutes after it on a Tado zone, 8 otherwise.
 - **Reset auto-tune** forgets what dosed top-ups learned. Another valve (a
   changed TRV) starts afresh.
 

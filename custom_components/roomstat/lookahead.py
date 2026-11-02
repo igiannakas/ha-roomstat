@@ -32,10 +32,13 @@ valve), its first heating power report above 0 (Tado's heating %) within
 its reading; the cloud rounds the setpoint to 0.5 °C) and how fast its
 reading fell.  A least-squares fit over the last releases,
 response = a + b x push + d x fall, gives the look-ahead d / b.  It is
-trusted from ``min_samples`` releases on, when they spread enough in fall
-rate, the valve clearly answers the push and push and fall are not
-entangled.  The look-ahead in use starts at 0 and moves towards the fit by
-at most a step per release.
+trusted from ``min_samples`` releases on, when ``min_falling`` of them came
+on a clearly falling reading (only those show the look-ahead), the fall
+rates spread enough, the valve clearly answers the push, push and fall are
+not entangled, and the look-ahead is known to within
+``max_uncertainty_s`` (its standard error, from the fit's residuals).  The
+look-ahead in use starts at 0 and moves ``step_frac`` of the way to a
+trusted fit per release.
 
 The trade-off, measured
 -----------------------
@@ -94,6 +97,8 @@ class Fit:
     lookahead_s: float      # d / b, within 0 .. max_lookahead_s
     gain_pct_per_c: float   # b: the valve's answer per °C of push
     releases: int
+    uncertainty_s: float    # the standard error of d / b
+    falling: int            # releases on a reading falling falling_c_per_h or more
 
 
 class LookaheadLearner:
@@ -160,8 +165,11 @@ class LookaheadLearner:
     def observe(
         self, ts: float, heating_pct: float | None, report_ts: float | None
     ) -> str | None:
-        """One cycle's heating power report.  Returns a line for the log
-        when a release is counted or given up, else None."""
+        """One cycle's heating power report.  ``report_ts`` is when it was
+        made: the valve's own time when the sensor carries it (Tado's
+        ``time`` attribute), else when Home Assistant saw it change.  Returns
+        a line for the log when a release is counted or given up, else
+        None."""
         p = self._pending
         if p is None or not _finite(ts):
             return None
@@ -184,7 +192,7 @@ class LookaheadLearner:
             release = Release(p.ts, push, p.fall_c_per_h, float(heating_pct))
             self._releases.append(release)
             return self._line(f"{heard} → {self._learn()}")
-        if ts - p.ts > self.cfg.observe_s:
+        if ts - p.ts > self.cfg.observe_s + max(0.0, self.cfg.answer_seen_late_s):
             self._pending = None
             return self._line(
                 f"the valve reported no heating within {self.cfg.observe_s / 60:.0f} min "
@@ -202,14 +210,19 @@ class LookaheadLearner:
         c = self.cfg
         cur, target = self.lookahead_s, fit.lookahead_s
         gap = target - cur
-        fitted = (f"fit from {fit.releases} releases: it looks {_min(target)} ahead "
+        fitted = (f"fit from {fit.releases} releases: it looks {target / 60.0:.1f} "
+                  f"± {_min(fit.uncertainty_s)} ahead "
                   f"({fit.gain_pct_per_c:.0f} % per °C of push)")
         if abs(gap) < c.deadband_s:
             return f"{fitted}; look-ahead stays {_min(cur)}"
-        step = math.copysign(min(abs(gap), c.step_s), gap)
-        self.lookahead_s = min(c.max_lookahead_s, max(0.0, cur + step))
+        frac = min(1.0, max(0.0, c.step_frac))
+        self.lookahead_s = min(c.max_lookahead_s, max(0.0, cur + frac * gap))
         towards = "" if abs(self.lookahead_s - target) < 1.0 else f", a step towards {_min(target)}"
         return f"{fitted}; look-ahead {_min(cur)} → {_min(self.lookahead_s)}{towards}"
+
+    def _falling(self) -> int:
+        """Releases on a reading falling ``falling_c_per_h`` or more."""
+        return sum(1 for r in self._releases if r.fall_c_per_h >= self.cfg.falling_c_per_h)
 
     def _fit(self) -> tuple[Fit | None, str]:
         """response = a + b x push + d x fall over the releases kept: the
@@ -217,8 +230,12 @@ class LookaheadLearner:
         c = self.cfg
         rel = list(self._releases)
         n = len(rel)
-        if n < c.min_samples:
-            return None, f"{n} of {c.min_samples} releases needed for a fit"
+        if n < max(c.min_samples, 4):
+            return None, f"{n} of {max(c.min_samples, 4)} releases needed for a fit"
+        falling = self._falling()
+        if falling < c.min_falling:
+            return None, (f"{falling} of {c.min_falling} releases on a reading falling "
+                          f"{c.falling_c_per_h:.1f} °C/h or more needed for a fit")
         mx = sum(r.push_c for r in rel) / n
         mf = sum(r.fall_c_per_h for r in rel) / n
         my = sum(r.response_pct for r in rel) / n
@@ -242,8 +259,30 @@ class LookaheadLearner:
         if b < c.min_push_gain_pct_per_c:
             return None, (f"the valve barely answers the push ({b:.0f} % per °C, needs "
                           f"{c.min_push_gain_pct_per_c:.0f}): no fit")
-        lookahead_s = min(c.max_lookahead_s, max(0.0, d / b * 3600.0))
-        return Fit(lookahead_s=lookahead_s, gain_pct_per_c=b, releases=n), ""
+        # The look-ahead's standard error (delta method on the slopes'
+        # covariance, the residual variance over n - 3 degrees of freedom).
+        rss = sum(
+            (r.response_pct - my - b * (r.push_c - mx) - d * (r.fall_c_per_h - mf)) ** 2
+            for r in rel
+        )
+        dof = n - 3
+        s2 = rss / dof
+        var_b, var_d, cov_bd = s2 * sff / det, s2 * sxx / det, -s2 * sxf / det
+        ratio = d / b
+        var_ratio = (var_d - 2.0 * ratio * cov_bd + ratio * ratio * var_b) / (b * b)
+        uncertainty_s = math.sqrt(max(0.0, var_ratio)) * 3600.0 * _t_one_sigma(dof)
+        lookahead_s = min(c.max_lookahead_s, max(0.0, ratio * 3600.0))
+        gain_rel = math.sqrt(max(0.0, var_b)) * _t_one_sigma(dof) / b
+        if not math.isfinite(gain_rel) or gain_rel > c.max_push_gain_rel_uncertainty:
+            return None, (f"the valve's answer to the push is too uncertain ({b:.0f} % per °C "
+                          f"± {100 * gain_rel:.0f} %, needs ± "
+                          f"{100 * c.max_push_gain_rel_uncertainty:.0f} % or less): no fit")
+        if not math.isfinite(uncertainty_s) or uncertainty_s > c.max_uncertainty_s:
+            return None, (f"the fit is too uncertain: {lookahead_s / 60.0:.1f} "
+                          f"± {_min(uncertainty_s)}, needs ± "
+                          f"{_min(c.max_uncertainty_s)} or less")
+        return Fit(lookahead_s=lookahead_s, gain_pct_per_c=b, releases=n,
+                   uncertainty_s=uncertainty_s, falling=falling), ""
 
     def _line(self, text: str) -> str:
         self.last_line = text
@@ -255,11 +294,16 @@ class LookaheadLearner:
         return {
             "lookahead_min": round(self.lookahead_s / 60.0, 1),
             "fitted_min": None if self.fit is None else round(self.fit.lookahead_s / 60.0, 1),
+            "fitted_uncertainty_min": (
+                None if self.fit is None else round(self.fit.uncertainty_s / 60.0, 1)
+            ),
             "push_gain_pct_per_c": (
                 None if self.fit is None else round(self.fit.gain_pct_per_c, 1)
             ),
             "releases": len(self._releases),
-            "releases_needed": self.cfg.min_samples,
+            "releases_needed": max(self.cfg.min_samples, 4),
+            "falling_releases": self._falling(),
+            "falling_releases_needed": self.cfg.min_falling,
             "last": self.last_line,
         }
 
@@ -302,13 +346,28 @@ class LookaheadLearner:
         if (
             isinstance(pend, (list, tuple)) and len(pend) == 5 and _finite(*pend[:4])
             and (pend[4] is None or _finite(pend[4])) and _finite(now)
-            and 0 <= now - pend[0] <= self.cfg.observe_s
+            and 0 <= now - pend[0] <= self.cfg.observe_s + max(0.0, self.cfg.answer_seen_late_s)
         ):
             self._pending = _Pending(*(float(v) for v in pend[:4]),
                                      held_c=None if pend[4] is None else float(pend[4]))
         if self._releases:
             self.fit, _ = self._fit()
         return bool(self._releases) or self.lookahead_s > 0
+
+
+# One standard error's worth of Student's t (the 84.13 % quantile) for a
+# fit's degrees of freedom: a few releases' residuals understate the noise.
+_T_ONE_SIGMA = {1: 1.837, 2: 1.321, 3: 1.197, 4: 1.142, 5: 1.111, 6: 1.091, 7: 1.077,
+                8: 1.067, 9: 1.059, 10: 1.053, 12: 1.043, 15: 1.034, 20: 1.026, 30: 1.017}
+
+
+def _t_one_sigma(dof: int) -> float:
+    if dof <= 0:
+        return math.inf
+    for k in sorted(_T_ONE_SIGMA):
+        if dof <= k:
+            return _T_ONE_SIGMA[k]
+    return 1.0
 
 
 def _min(seconds: float) -> str:
