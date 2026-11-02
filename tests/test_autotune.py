@@ -759,13 +759,101 @@ class TestSafety:
         a = t.active_tuning()
         assert a.kp < 1.5 and a.ki < 0.004
 
-    def test_baseline_change_restarts(self):
+    def test_a_new_braking_time_restarts_everything(self):
         t = _tuner()
         t._on_heatup(_heatup(DAY, 0.6), DAY)
         assert t.active_tuning() != A.Tuning(0.6, 0.002, 0.0)
-        t.set_baseline(A.Tuning(0.7, 0.002, 0.0), True)
-        assert t.active_tuning() == A.Tuning(0.7, 0.002, 0.0)
-        assert t.summary()["updates"] == 0
+        t.set_baseline(A.Tuning(0.6, 0.002, 600.0), True)
+        assert t.active_tuning() == A.Tuning(0.6, 0.002, 600.0)
+        assert t.summary()["updates"] == 0 and t._heatups == []
+        assert t.last_event == "configured values changed – learning restarted"
+
+
+class TestNewGains:
+    """2.19.1, the owner (2 Nov 2026): Kp and Ki are not used in a heat-up,
+    so changing them must not forget what heat-ups taught (the dead time and
+    heating rate preheat plans with, the coast, the braking time)."""
+
+    def _learned(self):
+        t = _tuner()
+        for k in range(1, 4):                       # full-power heat-ups (1.5 below)
+            t._on_heatup(_heatup(k * DAY, 0.6), k * DAY)
+        hold_run = _heatup(4 * DAY, 0.3, theta=2400.0, rate=0.6)
+        hold_run.step_c = 0.6                       # a hold ran it: the gains shaped it
+        t._on_heatup(hold_run, 4 * DAY)
+        t._on_hold(_hold(4 * DAY + 4 * 3600, mean=0.3), 4 * DAY + 4 * 3600)
+        t._trim["kp"], t._trim["ki"] = 0.85, 1.2
+        return t
+
+    def _check_kept(self, t, before):
+        assert [m.ts for m in t._heatups] == [DAY, 2 * DAY, 3 * DAY]
+        assert t.heatup_model() == (2.0, 780.0)     # the full-power heat-ups' model
+        assert t.active_tuning().td_s == before.td_s > 0
+        assert t._holds == [] and t._trim["kp"] == t._trim["ki"] == 1.0
+        assert t._votes["kp_up"] == t._votes["ki_up"] == 0
+        a = t.active_tuning()
+        assert (a.kp, a.ki) == (0.4, 0.001)
+        assert "gain learning restarted" in t.last_event
+        assert "kept 3 full-power heat-ups" in t.last_event
+        assert "1 hold-run heat-up dropped" in t.last_event
+
+    def test_a_new_kp_or_ki_keeps_the_heatups_and_the_braking_time(self):
+        t = self._learned()
+        before = t.active_tuning()
+        trim_td = t._trim["td_s"]
+        t.set_baseline(A.Tuning(0.4, 0.001, 0.0), True)
+        self._check_kept(t, before)
+        assert t._trim["td_s"] == trim_td
+
+    def test_the_same_through_a_reload(self):
+        # An options change reloads the room: the save under the old values
+        # comes back into a tuner built with the new ones.
+        old = self._learned()
+        before = old.active_tuning()
+        t = _tuner(kp=0.4, ki=0.001, stored=old.as_dict())
+        self._check_kept(t, before)
+        assert t._trim["td_s"] == pytest.approx(old._trim["td_s"])
+
+    def test_preheat_keeps_its_heatup_time(self):
+        t = self._learned()
+        model = t.heatup_model()
+        t.set_baseline(A.Tuning(1.0, 0.004, 0.0), True)
+        assert t.heatup_model() == model
+
+    def test_a_gain_change_on_trial_goes_a_braking_change_stays(self):
+        t = _tuner()
+        _force_more_heat(t, DAY)                    # Kp up, on trial
+        t.set_baseline(A.Tuning(0.5, 0.002, 0.0), True)
+        assert t._pending is None and t.active_tuning().kp == 0.5
+        t = _tuner(td=1200.0)
+        t._heatups = [_heatup(DAY, -0.05, coast=600.0, td=1200.0)]
+        t._trim["td_s"] = 1.0
+        t._now = DAY
+        assert t._maybe_update(DAY, "test")        # less braking: on trial
+        assert t._pending is not None
+        td = t.active_tuning().td_s
+        t.set_baseline(A.Tuning(0.5, 0.003, 1200.0), True)
+        assert t._pending is not None
+        prev = A._tuning_from(t._pending["prev"])
+        assert (prev.kp, prev.ki, prev.td_s) == (0.5, 0.003, 1200.0)
+        assert t.active_tuning() == A.Tuning(0.5, 0.003, td)
+        # An oscillation now is the new gains' doing: it detunes them and
+        # does not roll the braking change back.
+        t._now = DAY + 3600
+        t._on_hold(_hold(DAY + 3600, osc=True, amp=0.2, period=1200, half=5), DAY + 3600)
+        assert t._pending is not None and t.active_tuning().td_s == td
+
+    def test_a_hold_run_heatup_in_progress_is_dropped_a_full_one_kept(self):
+        for start_room, kept in ((19.4, False), (18.5, True)):
+            t = _tuner()
+            t.observe(A.AutotuneSample(0.0, 19.0, start_room, 18.0, 5.0))
+            t.observe(A.AutotuneSample(60.0, 20.0, start_room, 18.0, 25.0))
+            assert t._heatup is not None
+            t.set_baseline(A.Tuning(0.4, 0.002, 0.0), True)
+            assert (t._heatup is not None) is kept, start_room
+
+    def test_the_threshold_is_the_regulators(self):
+        assert P.AutotuneConfig().full_power_step_c == P.RegulationConfig().heatup_enter_c
 
     def test_integral_off_is_respected(self):
         t = _tuner(ki=0.0)
@@ -870,11 +958,44 @@ class TestPersistence:
         t = _tuner(stored=d)
         _within_bounds(t)
 
-    def test_baseline_mismatch_restarts(self):
+    def test_a_braking_time_mismatch_restarts(self):
         t = _tuner()
         t._on_heatup(_heatup(DAY, 0.6), DAY)
+        t2 = _tuner(td=600.0, stored=t.as_dict())
+        assert t2.active_tuning() == A.Tuning(0.6, 0.002, 600.0)
+        assert t2._heatups == []
+
+    def test_a_gain_mismatch_keeps_the_braking_time(self):
+        t = _tuner()
+        t._on_heatup(_heatup(DAY, 0.6), DAY)
+        td = t.active_tuning().td_s
+        assert td > 0
         t2 = _tuner(kp=0.8, stored=t.as_dict())
+        assert t2.active_tuning() == A.Tuning(0.8, 0.002, td)
+        assert len(t2._heatups) == 1
+        # Saved again and loaded under the same values: nothing more changes.
+        t3 = _tuner(kp=0.8, stored=t2.as_dict())
+        assert t3.active_tuning() == t2.active_tuning()
+        assert t3.last_event == t2.last_event
+
+    def test_an_unreadable_save_under_new_gains_restarts(self):
+        t = _tuner()
+        t._on_heatup(_heatup(DAY, 0.6), DAY)
+        d = t.as_dict()
+        d["trim"] = 5                                  # .items() fails
+        t2 = _tuner(kp=0.8, stored=d)
         assert t2.active_tuning() == A.Tuning(0.8, 0.002, 0.0)
+        assert t2._heatups == [] and t2._counters["heatups"] == 0
+        assert t2.last_event == "configured values changed – learning restarted"
+
+    def test_a_save_without_its_baseline_restarts(self):
+        t = _tuner()
+        t._on_heatup(_heatup(DAY, 0.6), DAY)
+        d = t.as_dict()
+        d["baseline"] = None
+        t2 = _tuner(kp=0.8, stored=d)
+        assert t2.active_tuning() == A.Tuning(0.8, 0.002, 0.0)
+        assert t2._heatups == []
 
     def test_last_event_survives_restart(self):
         t = _tuner()
@@ -997,10 +1118,28 @@ class TestEpisodeAcrossRestart:
         _feed(t3, 300.0, 21.5, 20.0)
         assert t3.phase != A.PHASE_HEATUP
 
-    def test_changed_baseline_drops_the_heatup(self):
+    def test_a_new_braking_time_drops_the_heatup(self):
         t = _tuner()
         _heating(t)
+        assert _restart(t, td=600.0).phase == A.PHASE_IDLE
+
+    def test_a_new_gain_keeps_a_full_power_heatup(self):
+        t = _tuner()
+        last = _heating(t)                            # 1.5 °C below at the step
+        t2 = _restart(t, kp=0.8)
+        assert t2.phase == A.PHASE_HEATUP
+        assert t2._heatup.to_dict() == t._heatup.to_dict()
+        assert "gain learning restarted" in t2.last_event
+        _feed(t2, last + 90.0, 20.0, 19.1)
+        assert t2.phase == A.PHASE_HEATUP
+
+    def test_a_new_gain_drops_a_hold_run_heatup(self):
+        t = _tuner()
+        _feed(t, 0.0, 19.5, 19.4)
+        _feed(t, 60.0, 20.0, 19.4)                    # 0.6 below: a hold's
+        assert t.phase == A.PHASE_HEATUP
         assert _restart(t, kp=0.8).phase == A.PHASE_IDLE
+        assert _restart(t).phase == A.PHASE_HEATUP
 
     def test_reset_drops_the_heatup(self):
         t = _tuner()

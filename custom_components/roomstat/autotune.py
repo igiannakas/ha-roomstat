@@ -812,6 +812,11 @@ def _tuning_dict(t: Tuning) -> dict[str, float]:
     return {"kp": round(t.kp, 6), "ki": round(t.ki, 8), "td_s": round(t.td_s, 1)}
 
 
+def _same_td(a: Tuning, b: Tuning) -> bool:
+    """The same configured braking time (to the 0.1 s the save keeps)."""
+    return round(a.td_s, 1) == round(b.td_s, 1)
+
+
 def _change_text(cur: Tuning, new: Tuning) -> str:
     """'Kp 3.00→2.55, braking 13.1→7.0 min' for the values that differ."""
     parts = []
@@ -936,12 +941,72 @@ class Autotuner:
         self.last_event = "reset to configured values"
 
     def set_baseline(self, baseline: Tuning, derivative_allowed: bool) -> None:
-        """Apply new configured values.  A changed baseline restarts learning."""
+        """Apply new configured values.  A new braking time restarts the
+        learning; new gains (Kp, Ki) restart only what they shaped
+        (:meth:`_restart_gains`)."""
         self.derivative_allowed = derivative_allowed
-        if baseline != self._baseline:
-            self._baseline = baseline
+        if baseline == self._baseline:
+            return
+        old, self._baseline = self._baseline, baseline
+        if not _same_td(old, baseline):
             self.reset()
             self.last_event = "configured values changed – learning restarted"
+            return
+        self._restart_gains()
+
+    def _restart_gains(self) -> None:
+        """The configured Kp or Ki changed, the braking time did not.
+
+        The owner, 2 Nov 2026: Kp and Ki are not used in a heat-up, so
+        changing them should not forget what heat-ups taught.  A heat-up
+        that started ``full_power_step_c`` or more below the target ran at
+        full power, then coasted on the braking time: its dead time, heating
+        rate, coast and overshoot are the radiator's and the braking time's,
+        and they stay, with the braking time learned from them (preheat's
+        heat-up time and the SIMC Ki come from them too).  Restarted: the
+        gains' own trims and votes, the hold windows (the gains made them),
+        heat-up episodes that started closer (a hold ran them), and a gain
+        change still on trial.  A braking-time change on trial stays on
+        trial, falling back to the new gains, and is not rolled back for an
+        ordinary oscillation (the new gains are the likelier cause; a large
+        swing's emergency detune still rolls it back).  Until 2.19.0 a
+        new Kp or Ki restarted everything: preheat fell back to its default
+        heating rate and start-up delay for days."""
+        b, c, cur = self._baseline, self.cfg, self._params
+        p = self._pending
+        if p is not None:
+            prev = _tuning_from(p.get("prev"))
+            if (prev is None or not math.isclose(prev.kp, cur.kp, rel_tol=1e-4)
+                    or not math.isclose(prev.ki, cur.ki, rel_tol=1e-4, abs_tol=1e-12)):
+                self._pending = None          # a gain change on trial: superseded
+            else:
+                p["prev"] = _tuning_dict(Tuning(b.kp, b.ki, prev.td_s))
+                p["ref_osc"] = True
+        kept = [m for m in self._heatups if m.step_c >= c.full_power_step_c]
+        dropped = len(self._heatups) - len(kept)
+        self._heatups = kept
+        tracker = self._heatup
+        if tracker is not None and tracker.samples and (
+            # The step as the finished episode will measure it.
+            tracker.setpoint_c - _median([r for _, r, _ in tracker.samples[:4]])
+            < c.full_power_step_c
+        ):
+            self._heatup = None
+        self._holds = []
+        self._hold = None
+        self._trim["kp"] = self._trim["ki"] = 1.0
+        self._votes["kp_up"] = self._votes["ki_up"] = 0
+        self._params = self._bounded(Tuning(b.kp, b.ki, cur.td_s))
+        self._last_good = self._bounded(Tuning(b.kp, b.ki, self._last_good.td_s))
+        kept_txt = (f"kept {len(kept)} full-power heat-up{'s' if len(kept) != 1 else ''}"
+                    if kept else "no full-power heat-up to keep")
+        self.last_event = (
+            f"configured Kp or Ki changed: gain learning restarted; {kept_txt}"
+            + (f" and the braking time {self._params.td_s / 60:.1f} min"
+               if self.derivative_allowed else "")
+            + (f"; {dropped} hold-run heat-up{'s' if dropped != 1 else ''} dropped"
+               if dropped else "")
+        )
 
     @property
     def baseline(self) -> Tuning:
@@ -1681,16 +1746,40 @@ class Autotuner:
         }
 
     def _load(self, d: Any) -> None:
-        """Restore learned state; anything malformed falls back to a fresh start."""
-        try:
-            if not isinstance(d, dict) or d.get("version") != self.VERSION:
-                return
-            if _tuning_from(d.get("baseline")) != _tuning_from(_tuning_dict(self._baseline)):
+        """Restore learned state; anything malformed falls back to a fresh start.
+
+        Saved under other configured values: a new braking time starts
+        afresh; new gains only (an options change reloads the room) take the
+        save back and then restart what the gains shaped (_restart_gains)."""
+        if not isinstance(d, dict) or d.get("version") != self.VERSION:
+            return
+        stored = _tuning_from(d.get("baseline"))
+        current = self._baseline
+        if stored != _tuning_from(_tuning_dict(current)):
+            if stored is None or not _same_td(stored, current):
                 self.last_event = "configured values changed – learning restarted"
                 return
+            # Taken back as saved (the trims and bounds were the old ones'),
+            # then the gains restart under the new values.
+            self._baseline = stored
+            try:
+                loaded = self._load_saved(d)
+            finally:
+                self._baseline = current
+            if not loaded:
+                self._reset_learning()
+                self.last_event = "configured values changed – learning restarted"
+                return
+            self._restart_gains()
+            return
+        self._load_saved(d)
+
+    def _load_saved(self, d: dict[str, Any]) -> bool:
+        """Take a save back as it is; False if there was nothing to take."""
+        try:
             params = _tuning_from(d.get("params"))
             if params is None:
-                return
+                return False
             self._params = self._bounded(params)
             self._last_good = self._bounded(_tuning_from(d.get("last_good")) or self._params)
             for k, v in (d.get("trim") or {}).items():
@@ -1732,8 +1821,9 @@ class Autotuner:
         except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             _LOGGER.warning("Auto-tune: stored state unreadable, starting fresh")
             self._reset_learning()
-            return
+            return False
         self._load_episode(d.get("episode"))
+        return True
 
     def _load_episode(self, e: Any) -> None:
         """Restore the episode context; anything malformed is simply dropped."""

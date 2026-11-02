@@ -272,6 +272,13 @@ class AutotuneConfig:
     # Heat-up episode detection.
     heatup_min_step_c: float = 0.5     # setpoint step that starts an episode
     heatup_min_error_c: float = 0.4    # room must be at least this far below
+    # An episode that started this far below the target or more ran at full
+    # power, heat then coast, with Kp and Ki unused (RegulationConfig's
+    # heatup_enter_c, kept equal by a test); one that started closer was a
+    # hold's, which Kp and Ki shape.  So a change of the configured Kp or Ki
+    # keeps the first kind and the braking time learned from them, and
+    # drops the second (Autotuner._restart_gains, 2.19.1).
+    full_power_step_c: float = 0.8
     heatup_max_s: float = 5 * 3600.0   # give up if the target is not reached
     heatup_settle_s: float = 45 * 60.0 # flat/falling this long after the peak
     # A TRV demand this high after the demand went <= 0 means heating

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.19.0-blue)
+![Version](https://img.shields.io/badge/version-2.19.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -236,8 +236,13 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   - Kp, Ki and braking time in use;
   - auto-tune status;
   - what it measured (dead time, coast time, heat-up rate, last overshoot).
-- **Reset auto-tune** forgets everything it learned. Changing Kp, Ki or the
-  braking time yourself also starts learning again.
+- **Reset auto-tune** forgets everything it learned. Changing the braking
+  time yourself also starts learning again.
+- Changing Kp or Ki yourself keeps what full-power heat-ups taught (dead
+  time, heating rate, coast, the learned braking time, and so preheat's
+  heat-up time): Kp and Ki play no part in them. It restarts only what the
+  gains shaped: their own adjustments, the hold windows, and heat-ups that
+  started less than 0.8 °C below the target (the hold ran those).
 
 You can set the braking time by hand instead, under **Configure →
 Controller → Heat-up braking time**, with **Learn heat-up braking** off.

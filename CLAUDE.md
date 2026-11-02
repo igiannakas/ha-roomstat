@@ -1804,6 +1804,28 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   cycle feeding the tuner) ends the heat-up early like a schedule change: what
   came before is kept as a cut-short episode, which can only ever argue for
   more braking. Hold windows are not saved.
+- **A new configured Kp or Ki restarts only what the gains shaped**
+  (2.19.1, `_restart_gains`; owner, 2 Nov 2026: "changing p or I should
+  not reset most if not all of these as they are not used during the heat
+  up phase"). A heat-up that started `full_power_step_c` (0.8, equal to
+  `heatup_enter_c`, a test keeps them so) or more below the target ran at
+  full power and coasted on the braking time, Kp and Ki unused: it stays,
+  with its dead time, heating rate, coast and overshoot, and the braking
+  time learned from them (its trim and votes, the rate-limit clock, the
+  counters). Restarted: the Kp and Ki trims and votes, the hold windows,
+  heat-ups that started closer (a hold ran them; one in progress too, by
+  the step the finished episode would measure), and a gain change on
+  trial. A braking-time change on trial stays on trial, its fallback the
+  new gains, and an ordinary oscillation does not roll it back (the new
+  gains are the likelier cause; an emergency still does). Kp and Ki in use
+  are the new configured values; the SIMC Ki then comes from the kept dead
+  time at the tuner's usual pace. Both paths: `set_baseline` (options
+  updated in place) and `_load` (a save made under other gains, taken back
+  under its own baseline, then restarted; an unreadable one starts
+  afresh). A new configured braking time still restarts everything, as
+  does a save with no baseline. Until 2.19.0 any change restarted
+  everything, and preheat fell back to its default heating rate and
+  start-up delay until two heat-ups had been learned again.
 - All limits live in `AutotuneConfig` (`parameters.py`). `tests/plant_sim.py`
   simulates room + radiator + Tado TRV (with its own PI) + proxy in closed
   loop. Check control or auto-tune changes against it.

@@ -93,10 +93,31 @@ def test_learned_values_ignored_when_disabled():
     assert ent._config.tuning.td_s == 600.0
 
 
-def test_changed_baseline_discards_learned_values():
-    ent = _make_entity({**AUTOTUNE_ON, "correction_kp": 4.5})
+def test_a_new_gain_keeps_the_learned_braking_time():
+    """2.19.1: Kp and Ki are not used in a heat-up, so a new Kp (an options
+    change reloads the room) keeps the braking time heat-ups taught."""
+    ent = _make_entity({**AUTOTUNE_ON, "correction_kp": 3.0})
     _run(_start(ent, extra=_Extra({"version": 1, "autotune": _learned_state()})))
-    assert ent._config.tuning.kp == 4.5
+    assert ent._config.tuning.kp == 3.0
+    assert ent._config.tuning.ki == pytest.approx(0.002)
+    assert ent._config.tuning.td_s == pytest.approx(900.0)
+    assert ent._regulator.cfg.tuning.td_s == pytest.approx(900.0)
+
+
+def test_a_new_gain_without_a_reload_keeps_it_too():
+    ent = _make_entity(dict(AUTOTUNE_ON))
+    _run(_start(ent, extra=_Extra({"version": 1, "autotune": _learned_state()})))
+    ent._config_entry.options = {**ent._config_entry.options, "correction_kp": 3.0}
+    _run(ent._async_config_entry_updated(None, ent._config_entry))
+    assert ent._config.tuning.kp == 3.0
+    assert ent._config.tuning.td_s == pytest.approx(900.0)
+
+
+def test_a_new_braking_time_discards_learned_values():
+    ent = _make_entity({**AUTOTUNE_ON, "derivative_time_min": 20})
+    _run(_start(ent, extra=_Extra({"version": 1, "autotune": _learned_state()})))
+    assert ent._config.tuning.kp == 4.0
+    assert ent._config.tuning.td_s == 1200.0
 
 
 def test_restore_data_round_trip_keeps_automation_snapshot():
