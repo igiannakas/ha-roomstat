@@ -124,7 +124,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # While a window's close delay runs: when it closed, the earliest and latest
 # time heating can come back, and the room's own re-warm rate (the card's
-# "Window temp recovery · 6–28 min").  Display only, and the rate moves every
+# "Window · 6–28 min").  Display only, and the rate moves every
 # cycle: not recorded.
 WINDOW_WAIT_ATTRIBUTES = frozenset({
     "window_closed_at", "window_heat_earliest", "window_heat_latest",

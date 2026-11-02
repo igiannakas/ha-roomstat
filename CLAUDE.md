@@ -680,8 +680,9 @@ is updating.
   fresh slope's first reading, 7.5 min, if later), `window_heat_latest`
   (30 min after the close; the earliest once the room re-warms slower than
   1 °C/h, or with no room sensor to show a recovery) and
-  `window_rewarm_c_per_h`. The card reads `Window temp recovery · 6–28 min` until
-  the earliest, then `up to 18 min`, with a window-closed badge; the
+  `window_rewarm_c_per_h`. The card reads `Window · 6–28 min` until
+  the earliest, then `Window · up to 18 min` (2.18.2: shorter, to fit an
+  iPhone), with a window-closed badge; the
   activity line `…; heats again in 6–28 min` or `… at +2.4 °C/h; heats
   again once under 1.0 °C/h, at most 18 min`. Only shown: the close action
   decides as before.

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.18.1-blue)
+![Version](https://img.shields.io/badge/version-2.18.2-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -99,8 +99,8 @@ changes.
   comes back on its own within 15–40 minutes. **Window close delay** is the
   minimum: heating then waits until the room is rising less than 1 °C/h
   (at most 30 minutes after the close). 0 resumes at once. Meanwhile the
-  card says how long: "Window temp recovery · 6–28 min" until heating can first
-  come back, then "up to 18 min" while the room is still re-warming (the
+  card says how long: "Window · 6–28 min" until heating can first
+  come back, then "Window · up to 18 min" while the room is still re-warming (the
   activity log adds the re-warm rate). Auto-tune does not learn from the
   heating that follows a window.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
