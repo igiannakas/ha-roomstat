@@ -27,7 +27,8 @@ const cases = JSON.parse(fs.readFileSync(0, "utf8"));
 const now = Date.now();
 const out = cases.map((c) => {
   const a = { current_temperature: 17.4, temperature: 20, hvac_action: "idle", ...c.attrs };
-  for (const key of ["presence_override_until", "schedule_override_until"]) {
+  for (const key of ["presence_override_until", "schedule_override_until",
+                     "window_heat_earliest", "window_heat_latest"]) {
     if (typeof a[key] === "number") a[key] = new Date(now + a[key] * 1000).toISOString();
   }
   const hass = { states: { "climate.x": { state: c.state || "heat", attributes: a } },
@@ -98,6 +99,28 @@ _CASES = [
     ({"preset_mode": "away", "presence_away_active": True, "preheat_mode": "shadow",
       "preheat_state": "due", "preheat_target_c": 20.0, "preheat_heating_to_c": None},
      "Away · nobody home", None, False),
+    # Shut, its close delay running (2.18.1): until heating can first come
+    # back, the range; then the most it can still take while the room
+    # re-warms by itself; a wait that can't be extended, just the minutes.
+    ({"preset_mode": "frost_protection", "window_open_active": True,
+      "window_close_delay_active": True, "window_heat_earliest": 6 * 60 - 1,
+      "window_heat_latest": 28 * 60 - 1},
+     "Window temp recovery · 6–28 min", "mdi:window-closed-variant", False),
+    ({"preset_mode": "frost_protection", "window_open_active": True,
+      "window_close_delay_active": True, "window_heat_earliest": -60,
+      "window_heat_latest": 18 * 60 - 1, "window_rewarm_c_per_h": 2.4},
+     "Window temp recovery · up to 18 min", "mdi:window-closed-variant", False),
+    ({"preset_mode": "frost_protection", "window_open_active": True,
+      "window_close_delay_active": True, "window_heat_earliest": 3 * 60 - 1,
+      "window_heat_latest": 3 * 60 - 1},
+     "Window temp recovery · 3 min", "mdi:window-closed-variant", False),
+    ({"preset_mode": "frost_protection", "window_open_active": True,
+      "window_close_delay_active": True, "window_heat_earliest": -120,
+      "window_heat_latest": -30},
+     "Window temp recovery", "mdi:window-closed-variant", False),
+    ({"preset_mode": "frost_protection", "window_open_active": True,
+      "window_close_delay_active": True},
+     "Window temp recovery", "mdi:window-closed-variant", False),
 ]
 
 # The clock in the user's language, 24-hour choice and the server's time zone.

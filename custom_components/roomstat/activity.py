@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .parameters import RegulationConfig
+from .parameters import WINDOW_RECOVERY_RATE_C_PER_H, RegulationConfig
 from .regulation import MODE_COAST, MODE_DOSE, MODE_HEAT, MODE_HOLD, MODE_STOP, outlook
 
 MAX_LINES = 30
@@ -255,6 +255,10 @@ class CycleFacts:
     send: str = ""                  # the send decision (climate._last_reason)
     td_s: float | None = None       # the braking time this cycle decided with
     sensor_lost_min: int | None = None
+    # A window's close wait (WINDOW_REWARM): minutes until heating can first
+    # and at the latest come back, and the room's own re-warm rate.
+    window_wait_min: tuple[int, int] | None = None
+    window_rewarm_c_per_h: float | None = None
     # The valve look-ahead (lookahead.py): what it took off the hold command,
     # and how fast the valve's reading was falling.
     lookahead_c: float = 0.0
@@ -350,6 +354,26 @@ def _dose_phrase(f: CycleFacts, e: float, trend: str, cfg: RegulationConfig) -> 
         return f"Valve off (dosing): {_gap(e, 2)}, {trend}; next top-up {when}"
     return (f"Valve off (dosing): {_gap(e, 2)}, {trend}; next top-up once it cools "
             "and the last pulse has landed")
+
+
+def _rewarm_phrase(f: CycleFacts) -> str:
+    """A window's close wait: the valve off while the room re-warms by
+    itself, and when heating comes back (the card shows the same)."""
+    phrase = "Window closed: valve off while the room re-warms by itself"
+    rate = f.window_rewarm_c_per_h
+    if f.window_wait_min is None:
+        return phrase
+    early, late = f.window_wait_min
+    if early > 0 and late > early:
+        return f"{phrase}; heats again in {early}–{late} min"
+    if early > 0:
+        return f"{phrase}; heats again in {early} min"
+    if late > 0 and rate is not None:
+        return (f"{phrase} at {rate:+.1f} °C/h; heats again once under "
+                f"{WINDOW_RECOVERY_RATE_C_PER_H:.1f} °C/h, at most {late} min")
+    if late > 0:
+        return f"{phrase}; heats again within {late} min"
+    return f"{phrase}; heats again at the next check"
 
 
 def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
@@ -527,7 +551,7 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
     elif f.window == WINDOW_OPEN:
         phrase = "Window open: valve off until it closes"
     elif f.window == WINDOW_REWARM:
-        phrase = "Window closed: valve off while the room re-warms by itself"
+        phrase = _rewarm_phrase(f)
     else:
         phrase = _phrase(f, cfg)
         if f.window == WINDOW_PENDING:

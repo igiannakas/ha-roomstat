@@ -673,6 +673,18 @@ is updating.
   heat on a 7–11 °C/h recovery slope. The auto-tuner starts no heat-up
   episode within `window_settle_s` (30 min) of a window (see "Auto-tune").
   The simulator has no windows; this is judged on the trace sensors.
+  While the wait runs the thermostat says how long (2.18.1, owner, 2 Nov
+  2026: "Window open" gave no idea of the wait; `_window_wait`,
+  `window_wait_bounds`, unrecorded `WINDOW_WAIT_ATTRIBUTES`):
+  `window_closed_at`, `window_heat_earliest` (the configured delay, or the
+  fresh slope's first reading, 7.5 min, if later), `window_heat_latest`
+  (30 min after the close; the earliest once the room re-warms slower than
+  1 °C/h, or with no room sensor to show a recovery) and
+  `window_rewarm_c_per_h`. The card reads `Window temp recovery · 6–28 min` until
+  the earliest, then `up to 18 min`, with a window-closed badge; the
+  activity line `…; heats again in 6–28 min` or `… at +2.4 °C/h; heats
+  again once under 1.0 °C/h, at most 18 min`. Only shown: the close action
+  decides as before.
   Switching on or off by hand ends the window state (its saved preset is
   restored; OFF → HEAT re-arms the window if it is still open), but **Heat
   while already heating is no change and leaves the window alone** (2.10.4;

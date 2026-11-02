@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.0";
+const CARD_VERSION = "1.5.1";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -96,6 +96,21 @@ const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
+// The window's status.  Once it has shut, heating waits for the close delay
+// and for the room to stop re-warming by itself (at most 30 min from the
+// close): until heating can first come back the line shows the range
+// ("Window temp recovery · 6–28 min"), then the most it can still take ("up to
+// 18 min"); a room that can't extend the wait shows just the minutes.
+function windowStatus(a) {
+  if (!a.window_close_delay_active) return "Window open";
+  const early = minsUntil(a.window_heat_earliest);
+  const late = minsUntil(a.window_heat_latest);
+  if (early !== null && late !== null && late > early) return `Window temp recovery · ${early}–${late} min`;
+  if (early !== null) return `Window temp recovery · ${early} min`;
+  if (late !== null) return `Window temp recovery · up to ${late} min`;
+  return "Window temp recovery";
+}
+
 /* ------------------------------------------------------------------------ */
 /* Room state – everything the card shows, derived from hass in one place    */
 /* ------------------------------------------------------------------------ */
@@ -125,7 +140,7 @@ function roomState(hass, config, ids) {
   let status;
   if (summer) status = "Summer lock";
   else if (off) status = "Off";
-  else if (windowOpen) status = "Window open";
+  else if (windowOpen) status = windowStatus(a);
   else if (a.presence_away_active) status = preheatStatus(hass, a) || "Away · nobody home";
   else if (awayHeld) {
     // Set by hand while nobody is home: it holds until someone is home,
@@ -149,7 +164,7 @@ function roomState(hass, config, ids) {
   else if (followsSchedule) color = COLORS.teal;
 
   let badge = null;
-  if (windowOpen) badge = "mdi:window-open-variant";
+  if (windowOpen) badge = a.window_close_delay_active ? "mdi:window-closed-variant" : "mdi:window-open-variant";
   else if (override || awayHeld) badge = "mdi:hand-back-right";
 
   return {

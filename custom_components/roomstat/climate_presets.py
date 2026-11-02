@@ -17,7 +17,7 @@ from homeassistant.components.climate import (
 from homeassistant.core import callback
 
 from .activity import preset_name
-from .climate_controllers import SavedState, window_recovery_wait
+from .climate_controllers import SavedState, window_recovery_wait, window_wait_bounds
 from .const import (
     CONF_COMFORT_TARGET,
     CONF_PRESENCE_AWAY_DELAY_S,
@@ -178,6 +178,28 @@ class PresetMixin:
             )
         self._window_recovery_logged = False
         self._restore_window_state()
+
+    def _window_wait(self, now: float) -> tuple[float, float, float, float | None] | None:
+        """While a window's close delay runs (else None): when it closed,
+        the earliest and the latest time heating can come back
+        (:func:`window_wait_bounds`), and the room's own re-warm rate (°C/h,
+        None while the fresh slope is unknown).  A room already re-warming
+        slower than WINDOW_RECOVERY_RATE_C_PER_H is due at the earliest: the
+        latest is then the earliest too.  For the card and the activity
+        log: the window's own close action decides, as before."""
+        closed = self._window_ctrl.close_since
+        if closed is None:
+            return None
+        slope, sensor_ok = self._room_recovery_slope()
+        earliest, latest = window_wait_bounds(
+            closed, self._window_ctrl.close_delay_s,
+            slope_span_s=self._slope.window_s / 2.0,
+            max_wait_s=WINDOW_RECOVERY_MAX_S, sensor_ok=sensor_ok,
+        )
+        rate = slope * 3600.0 if slope is not None and math.isfinite(slope) else None
+        if rate is not None and rate < WINDOW_RECOVERY_RATE_C_PER_H:
+            latest = earliest
+        return closed, earliest, latest, rate
 
     def _end_window_close_delay(self, reason: str) -> None:
         """A change by hand during the window's close delay ends the wait.

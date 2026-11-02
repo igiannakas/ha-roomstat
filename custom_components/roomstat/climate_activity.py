@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import threading
 import time
 from typing import Any
@@ -153,6 +154,14 @@ class ActivityMixin:
             sensor_lost_min=sensor_lost_min,
             td_s=td_s,
         )
+        if window == WINDOW_REWARM:
+            now = time.time()
+            wait = self._window_wait(now)
+            if wait is not None:
+                _closed, earliest, latest, rate = wait
+                facts.window_wait_min = (max(0, math.ceil((earliest - now) / 60.0)),
+                                         max(0, math.ceil((latest - now) / 60.0)))
+                facts.window_rewarm_c_per_h = rate
         result = self._last_result
         if path == PATH_REGULATED and result is not None:
             facts.mode = result.mode

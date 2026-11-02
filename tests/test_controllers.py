@@ -349,6 +349,51 @@ class TestWindowController:
         assert c.close_delay_elapsed_s(4000.0) == 0.0
         assert not c.close_delay_active
 
+    def test_close_time_and_delay_only_while_the_wait_runs(self):
+        """For the card: when the window closed and the configured delay,
+        while (and only while) the close delay runs, extended or not."""
+        c = self._ctrl()
+        assert c.close_since is None and c.close_delay_s == 0.0
+        c.activate("comfort", 20.0)
+        fake = FakeCallLater()
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=1000.0)
+        assert (c.close_since, c.close_delay_s) == (1000.0, 300.0)
+        fake.trigger(0)
+        c.extend_close_delay(None, 60, lambda now: None, call_later=fake)
+        assert (c.close_since, c.close_delay_s) == (1000.0, 300.0)
+        c.restore()
+        assert c.close_since is None and c.close_delay_s == 0.0
+        c.activate("comfort", 20.0)
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=3000.0)
+        c.handle_window_opened(None, 30, lambda now: None, call_later=fake)
+        assert c.close_since is None and c.close_delay_s == 0.0
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=4000.0)
+        c.cancel_timers()
+        assert c.close_since is None and c.close_delay_s == 0.0
+
+
+class TestWindowWaitBounds:
+    """When heating can come back after a window closed (the card's
+    "Window closed · 6–28 min" and the activity line)."""
+
+    bounds = staticmethod(_ctrl_mod.window_wait_bounds)
+    KW = dict(slope_span_s=450.0, max_wait_s=1800.0, sensor_ok=True)
+
+    def test_the_fresh_slope_comes_after_a_short_delay(self):
+        # 5 min configured, the slope needs 7.5 min of readings, at most 30.
+        assert self.bounds(1000.0, 300.0, **self.KW) == (1450.0, 2800.0)
+
+    def test_a_longer_delay_is_the_earliest(self):
+        assert self.bounds(1000.0, 600.0, **self.KW) == (1600.0, 2800.0)
+
+    def test_a_delay_longer_than_the_cap(self):
+        assert self.bounds(1000.0, 2400.0, **self.KW) == (3400.0, 3400.0)
+
+    def test_no_sensor_ends_at_the_configured_delay(self):
+        kw = dict(self.KW, sensor_ok=False)
+        assert self.bounds(1000.0, 300.0, **kw) == (1300.0, 1300.0)
+        assert self.bounds(1000.0, -5.0, **kw) == (1000.0, 1000.0)
+
 
 class TestWindowRecoveryWait:
     """After a window closes the room re-warms on its own; heating waits."""

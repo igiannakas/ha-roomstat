@@ -122,6 +122,21 @@ from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
 
+# While a window's close delay runs: when it closed, the earliest and latest
+# time heating can come back, and the room's own re-warm rate (the card's
+# "Window temp recovery · 6–28 min").  Display only, and the rate moves every
+# cycle: not recorded.
+WINDOW_WAIT_ATTRIBUTES = frozenset({
+    "window_closed_at", "window_heat_earliest", "window_heat_latest",
+    "window_rewarm_c_per_h",
+})
+
+
+def _utc_iso(ts: float | None) -> str | None:
+    if ts is None or not math.isfinite(ts):
+        return None
+    return datetime.datetime.fromtimestamp(ts, tz=datetime.UTC).isoformat()
+
 
 class _AutomationExtraData(ExtraStoredData):
     """RestoreEntity wrapper around the HA-free PersistedAutomationState.
@@ -231,7 +246,7 @@ class RoomstatClimate(
         {
             "activity", "valve_lookahead_c", *PREHEAT_LIVE_ATTRIBUTES,
             "topup_gain", "topup_inflight_c", "topup_virtual_error_c",
-            "topup_ready_in_min",
+            "topup_ready_in_min", *WINDOW_WAIT_ATTRIBUTES,
         }
     )
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
@@ -1302,6 +1317,27 @@ class RoomstatClimate(
 
         return HVACAction.IDLE
 
+    def _window_wait_attributes(self) -> dict[str, Any]:
+        """The window wait's attributes (WINDOW_WAIT_ATTRIBUTES), all None
+        while no close delay runs.  Never raises: the state write must go
+        on."""
+        out: dict[str, Any] = dict.fromkeys(sorted(WINDOW_WAIT_ATTRIBUTES))
+        try:
+            wait = self._window_wait(time.time())
+        except Exception:  # noqa: BLE001 - attributes must never stop the state write
+            _LOGGER.debug("%s: window wait failed", self._config_entry.title, exc_info=True)
+            return out
+        if wait is None:
+            return out
+        closed, earliest, latest, rate = wait
+        out.update({
+            "window_closed_at": _utc_iso(closed),
+            "window_heat_earliest": _utc_iso(earliest),
+            "window_heat_latest": _utc_iso(latest),
+            "window_rewarm_c_per_h": round(rate, 1) if rate is not None else None,
+        })
+        return out
+
     def _prefer_fallback(self) -> bool:
         """Whether the fallback entity is used first (option, needs one set)."""
         opts = self._config_entry.options
@@ -1359,6 +1395,7 @@ class RoomstatClimate(
         attrs: dict[str, Any] = {
             # What the room is doing now (the activity log's live line).
             "activity": self._activity.doing,
+            **self._window_wait_attributes(),
             "regulation_reason": self._last_reason,
             "tado_internal_temp_c": trv.internal_c,
             "trv_fallback_active": trv.is_fallback,

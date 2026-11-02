@@ -175,6 +175,50 @@ class TestCloseDelayWaitsForTheRecovery:
         # Nothing was sent to the valve while the room recovered by itself.
         assert len(_temps(ent)) == sent_before
 
+    def test_the_card_and_the_log_say_how_long_heating_waits(self, monkeypatch):
+        """Owner, 2 Nov 2026: "Window open" while the close delay ran gave
+        no idea of the wait.  The thermostat now says when the window
+        closed, the earliest and latest time heating can come back, and the
+        room's own re-warm rate; the activity line says the same."""
+        import datetime
+
+        def ts(attr):
+            return datetime.datetime.fromisoformat(attr).timestamp()
+
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock)
+        attrs = ent.extra_state_attributes
+        assert attrs["window_closed_at"] is None and attrs["window_heat_latest"] is None
+        _open_window(ent, clock)
+        assert ent.extra_state_attributes["window_heat_earliest"] is None   # still open
+        _close_window(ent)
+        closed = clock.now
+        attrs = ent.extra_state_attributes
+        assert ts(attrs["window_closed_at"]) == pytest.approx(closed)
+        # The configured 5 min, but the fresh slope needs 7.5 min; at most 30.
+        assert ts(attrs["window_heat_earliest"]) == pytest.approx(closed + 450.0)
+        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0)
+        assert attrs["window_rewarm_c_per_h"] is None
+        room = _recover(ent, clock, 18.0, 12.0, 3)
+        assert "heats again in 5–27 min" in ent._activity.doing
+        # Re-warming fast once the slope is known: up to the cap.
+        room = _recover(ent, clock, room, 12.0, 7)
+        _fire_last_timer()
+        attrs = ent.extra_state_attributes
+        assert attrs["window_rewarm_c_per_h"] == pytest.approx(12.0, abs=0.6)
+        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0)
+        assert "at most 20 min" in ent._activity.doing
+        # Slowed below 1 °C/h: due at the next check.
+        room = _recover(ent, clock, room, 0.3, 15)
+        attrs = ent.extra_state_attributes
+        if ent._window_ctrl.close_delay_active:
+            assert attrs["window_heat_latest"] == attrs["window_heat_earliest"]
+        _fire_last_timer()
+        assert not ent._window_ctrl.close_delay_active
+        attrs = ent.extra_state_attributes
+        assert attrs["window_closed_at"] is None and attrs["window_rewarm_c_per_h"] is None
+        assert "window_rewarm_c_per_h" in ent._unrecorded_attributes
+
     def test_gives_up_after_30_min(self, monkeypatch):
         clock = _Clock(monkeypatch)
         ent = _entity(clock)

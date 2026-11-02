@@ -113,6 +113,34 @@ def window_recovery_wait(
     return slope_c_per_s * 3600.0 >= rate_c_per_h
 
 
+def window_wait_bounds(
+    closed_ts: float,
+    close_delay_s: float,
+    *,
+    slope_span_s: float,
+    max_wait_s: float,
+    sensor_ok: bool,
+) -> tuple[float, float]:
+    """When heating can come back after a window closed: the earliest and
+    the latest time (epoch s), for the card and the activity log.
+
+    The earliest is the configured close delay, or the first reading of
+    the room's fresh slope if that comes later (``slope_span_s`` of
+    readings since the close: until then :func:`window_recovery_wait` keeps
+    waiting); the latest ``max_wait_s`` after the close, never before the
+    configured delay.  A room sensor that can't show a recovery ends the
+    wait at the configured delay (both the same).  Between the two it ends
+    once the room's own rise has slowed below the recovery rate, at the
+    next poll."""
+    delay = max(0.0, float(close_delay_s))
+    if not sensor_ok:
+        end = closed_ts + delay
+        return end, end
+    latest = closed_ts + max(delay, float(max_wait_s))
+    earliest = min(closed_ts + max(delay, float(slope_span_s)), latest)
+    return earliest, latest
+
+
 class WindowAutomationController:
     """Manages window-sensor automation with configurable open/close delays.
 
@@ -137,6 +165,7 @@ class WindowAutomationController:
         self._open_timer: _CancelFn | None = None
         self._close_timer: _CancelFn | None = None
         self._close_since: float | None = None
+        self._close_delay_s: float = 0.0     # the configured delay of the wait running
         self._saved: SavedState = SavedState()
 
     # ------------------------------------------------------------------
@@ -164,6 +193,16 @@ class WindowAutomationController:
             return 0.0
         return max(0.0, now - self._close_since)
 
+    @property
+    def close_since(self) -> float | None:
+        """When the window closed, while its close delay runs (else None)."""
+        return self._close_since if self._close_timer is not None else None
+
+    @property
+    def close_delay_s(self) -> float:
+        """The configured close delay of the wait running (0 when none)."""
+        return self._close_delay_s if self._close_timer is not None else 0.0
+
     def get_saved(self) -> SavedState:
         """Return a copy of the currently saved preset/temperature."""
         return SavedState(preset=self._saved.preset, temp=self._saved.temp)
@@ -190,6 +229,7 @@ class WindowAutomationController:
             self._close_timer()
             self._close_timer = None
             self._close_since = None
+            self._close_delay_s = 0.0
             _LOGGER.debug("Window reopened during close delay – staying in frost protection")
             return
 
@@ -237,6 +277,7 @@ class WindowAutomationController:
             self._close_timer()
             self._close_timer = None
         self._close_since = None
+        self._close_delay_s = 0.0
 
         if not self.is_active:
             # Window closed before the open-delay fired – nothing to restore.
@@ -246,6 +287,7 @@ class WindowAutomationController:
             _cl = call_later or _get_call_later()
             self._close_timer = _cl(hass, close_delay_s, on_timer_expire)
             self._close_since = _time_now() if now is None else now
+            self._close_delay_s = float(close_delay_s)
             _LOGGER.debug("Window closed – restoring previous preset in %ds", close_delay_s)
             return False
 
@@ -294,6 +336,7 @@ class WindowAutomationController:
         saved = SavedState(preset=self._saved.preset, temp=self._saved.temp)
         self._close_timer = None
         self._close_since = None
+        self._close_delay_s = 0.0
         self._saved = SavedState()
         self.is_active = False
         return saved
@@ -319,6 +362,7 @@ class WindowAutomationController:
             self._close_timer()
             self._close_timer = None
         self._close_since = None
+        self._close_delay_s = 0.0
 
     def cancel_all(self) -> None:
         """Cancel all timers and reset to idle state (e.g. user override)."""
