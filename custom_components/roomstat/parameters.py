@@ -334,6 +334,26 @@ class AutotuneConfig:
     osc_max_period_s: float = 12 * 3600.0
     # Emergency detune when the swing is this many times osc_amplitude_c.
     emergency_amplitude_factor: float = 2.0
+    # The hold's band (RegulationConfig.stop_over_c / release_below_c, an
+    # option per room since 2.20.0).  The stop and the release swing the room
+    # across it by design, so the swing thresholds above were set for a band
+    # of osc_band_ref_c either side of the target and widen by as much as the
+    # band is wider (never narrow), and a lasting offset is measured from the
+    # band's middle.  Without that a wider band reads as a gain problem: every
+    # stop-to-release cycle an oscillation, Kp and Ki cut for it.
+    hold_band_over_c: float = 0.1
+    hold_band_under_c: float = 0.1
+    osc_band_ref_c: float = 0.1
+
+    def band_widening_c(self) -> float:
+        """How much wider the hold's band is than the one the swing
+        thresholds were set for, each side (0 when it is not wider)."""
+        half = (self.hold_band_over_c + self.hold_band_under_c) / 2.0
+        return max(0.0, half - self.osc_band_ref_c)
+
+    def band_middle_c(self) -> float:
+        """The hold's band's middle as an error (positive: under the target)."""
+        return (self.hold_band_under_c - self.hold_band_over_c) / 2.0
 
     # Targets.
     overshoot_target_c: float = 0.2    # acceptable heat-up overshoot
@@ -520,6 +540,11 @@ class RegulationConfig:
     # unchanged, time more than 0.05 under 4 -> 8 %; 0.15 doubles the RMS
     # in the generic rooms.  Without the firm stop the valve keeps heating
     # just below its reading (0.05-0.08 °C RMS, +0.3 °C peaks).
+    # Both are options per room since 2.20.0 (hold_band_option; owner, 3 Nov
+    # 2026: "The -0.1 / +0.1 target is currently hard coded. Can you make
+    # this a parameter?"), 0.05-0.5.  Dosed top-ups keep their own zone
+    # (DoseConfig): with them on, these apply only while the ordinary modes
+    # run (a window, Boost).
     stop_over_c: float = 0.1
     stop_lead_s: float = 600.0
     release_below_c: float = 0.10
@@ -639,16 +664,37 @@ DOSE_ZONE_MAX_C = 0.5
 DOSE_ZONE_STEP_C = 0.05
 
 
+def _option_in_range(value: object, default: float, lo: float, hi: float) -> float:
+    """An option (°C): the value when it is a number within lo..hi,
+    otherwise the default."""
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number) or not lo - 1e-9 <= number <= hi + 1e-9:
+        return default
+    return round(number, 3)
+
+
 def dose_zone_option(value: object, default: float) -> float:
     """A dosing zone option (°C): the value when it is a number within
     DOSE_ZONE_MIN_C..DOSE_ZONE_MAX_C, otherwise the default."""
-    try:
-        zone = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(zone) or not DOSE_ZONE_MIN_C - 1e-9 <= zone <= DOSE_ZONE_MAX_C + 1e-9:
-        return default
-    return round(zone, 3)
+    return _option_in_range(value, default, DOSE_ZONE_MIN_C, DOSE_ZONE_MAX_C)
+
+
+# The hold's band (RegulationConfig.stop_over_c / release_below_c), options
+# per room since 2.20.0, °C.  At least 0.05: a stop at the target itself
+# was dropped (2-3x the commands), and a release at or above it parks the
+# hold just below the valve's reading, where a Tado trickles.
+HOLD_BAND_MIN_C = 0.05
+HOLD_BAND_MAX_C = 0.5
+HOLD_BAND_STEP_C = 0.05
+
+
+def hold_band_option(value: object, default: float) -> float:
+    """A hold band option (°C): the value when it is a number within
+    HOLD_BAND_MIN_C..HOLD_BAND_MAX_C, otherwise the default."""
+    return _option_in_range(value, default, HOLD_BAND_MIN_C, HOLD_BAND_MAX_C)
 
 
 @dataclass

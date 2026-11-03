@@ -286,6 +286,15 @@ def _num(value: float | None) -> str:
     return "?" if value is None or not math.isfinite(value) else f"{value:.1f}"
 
 
+def _line_c(value: float) -> str:
+    """A temperature the stop or the release acts at: one decimal, two
+    when the hold's band (options in 0.05 steps) puts it between tenths,
+    so a release at 19.75 does not read as 19.8."""
+    if abs(value * 10.0 - round(value * 10.0)) < 0.05:
+        return f"{value:.1f}"
+    return f"{value:.2f}"
+
+
 def _gap(error_c: float, digits: int = 1) -> str:
     half = 0.5 * 10.0 ** -digits
     if error_c >= half:
@@ -423,19 +432,19 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
         towards_line = o.stop_landing_c <= -cfg.stop_over_c and e > -cfg.stop_over_c
         if new and towards_line:
             return (f"Valve off ahead of an overshoot: {_gap(e)}, {trend} would pass "
-                    f"{over:.1f} within {_minutes(o.stop_lead_s)}")
+                    f"{_line_c(over)} within {_minutes(o.stop_lead_s)}")
         if towards_line:
             return (f"Valve off: {_gap(e)}, still {trend}; on that slope it would "
-                    f"pass {over:.1f} within {_minutes(o.stop_lead_s)}, so it stays off")
+                    f"pass {_line_c(over)} within {_minutes(o.stop_lead_s)}, so it stays off")
         heat_at = (f.setpoint_c or 0.0) - cfg.release_below_c
         if o.falling_c_per_s > 0:
             # The forecast leaves out the slope's deadband (as the release does).
             ahead = (f"{o.release_c:.2f} below" if o.release_c > 0
                      else f"{-o.release_c:.2f} above")
             return (f"Valve off: {_gap(e)}, {trend}; heats again "
-                    f"{_minutes(cfg.release_lead_s)} before it reaches {heat_at:.1f} "
+                    f"{_minutes(cfg.release_lead_s)} before it reaches {_line_c(heat_at)} "
                     f"(forecast for {_minutes(cfg.release_lead_s)} ahead: {ahead})")
-        return (f"Valve off: {_gap(e)}, {trend}; heats again at {heat_at:.1f}, or "
+        return (f"Valve off: {_gap(e)}, {trend}; heats again at {_line_c(heat_at)}, or "
                 f"{_minutes(cfg.release_lead_s)} ahead of it once falling")
 
     # Hold.

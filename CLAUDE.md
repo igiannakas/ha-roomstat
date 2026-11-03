@@ -241,6 +241,28 @@ Read this before changing `regulation.py` or `parameters.py`.
     0.030 → 0.025 °C RMS, generic living room +0.01, commands unchanged);
     the simulator does not reproduce the trickle, so the live traces are
     the evidence.
+    **Both lines are options per room** (2.20.0, `hold_stop_over_c` /
+    `hold_release_below_c`, Controller section, 0.05–0.5 in 0.05 steps,
+    `hold_band_option`: out of range keeps 0.1; owner, 3 Nov 2026: "The
+    -0.1 / +0.1 target is currently hard coded. Can you make this a
+    parameter?"). The minimum 0.05 keeps the two rules above: no stop at
+    the target itself, no flat release at or above it. Dosed top-ups keep
+    their own zone (with them on, these apply only in the ordinary modes: a
+    window, Boost). The activity line names a line between tenths with two
+    decimals (`_line_c`: "heats again at 19.75"). The auto-tuner is told the
+    band (`AutotuneConfig.hold_band_over_c` / `hold_band_under_c`,
+    `Autotuner.set_hold_band`; see "Auto-tune"). Simulated (`plant_sim`,
+    eight days, daily schedule, Kp 2.5, auto-tune on, 8 and 2 °C outside),
+    ±0.1 → ±0.2: stop/release cycles 5.8 → 4.0 a day in the generic living
+    room (0–4.5 → 0–0.5 in the fitted rooms, which then mostly hold), daytime
+    RMS 0.075 → 0.13 generic living, 0.028 → 0.043 fitted living, 0.041 →
+    0.087 fitted second bedroom at 8 °C; commands not reliably fewer
+    (fitted second bedroom at 8 °C 25 → 36 a day: the hold runs where it
+    stopped before). With the stock tuner thresholds the generic living
+    room's Ki went 0.0003 → 0.00005 (a rollback, then cuts); following the
+    band it stayed at 0.00035. A higher stop line also keeps the hold
+    running over the target, commanding under the valve's reading, where a
+    Tado trickles (the help text says so).
   - `dose` (2.15.0, the option `dosed_topups`; two phases since 2.16.0):
     a heat-up (`heatup_enter_c` or more short) runs as above, heat then
     coast; everything else is the dosing phase, where a full-power pulse
@@ -1704,6 +1726,18 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
 - Kp bounds (`kp_min`/`kp_max` 0.5–8, and 0.25–2× the configured value)
   are for the hold gain. In practice Kp only moves down (on oscillation):
   it moves up only on stalls with no braking time set.
+- **The hold's swing thresholds follow the hold's band** (2.20.0,
+  `AutotuneConfig.band_widening_c` / `band_middle_c`): an oscillation is a
+  swing beyond `osc_amplitude_c` (±0.15) plus however much the band is
+  wider than `osc_band_ref_c` (0.1) each side, the emergency line moves by
+  the same, and a lasting offset is measured from the band's middle (a
+  band of 0.1 over and 0.3 under sits 0.1 under by design). A narrower band
+  keeps the stock thresholds. Changing the band drops the hold window being
+  gathered (`set_hold_band`; judged with a narrower band's thresholds, a
+  wider band's swings would read as an oscillation); heat-ups stay. The
+  stop-to-release cycle is the band's own swing, not a gain problem: with
+  the stock thresholds a ±0.2 band cut the generic living room's Ki to its
+  floor in the simulator (see the `stop` mode above).
 - The tuner learns only from everyday episodes, never from test signals:
   - **heat-ups** (setpoint step ≥ 0.5 °C with the room ≥ 0.4 °C below) give
     the dead time θ (tangent method), the heating rate, the coast and the
@@ -1913,6 +1947,10 @@ ruff check .
 - `tests/test_tado_report_time.py` (2.19.0: Tado's report time, the
   lost-off rule with and without it, through the entity on a zone polled
   every 3 min, the refresh planner and the refresh after a command).
+- `tests/test_hold_band.py` (2.20.0: the hold's band options, the
+  regulator's stop and release on them, the activity line's numbers, the
+  tuner's thresholds following the band, through the entity with and
+  without a reload).
 - `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
   Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
   replayed, restarts and pre-2.12 snapshots).

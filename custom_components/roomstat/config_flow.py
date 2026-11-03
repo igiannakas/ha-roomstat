@@ -30,6 +30,8 @@ from .const import (
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEAT_TIMER_S,
     CONF_HEATING_POWER_ENTITY_ID,
+    CONF_HOLD_RELEASE_BELOW_C,
+    CONF_HOLD_STOP_OVER_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -63,10 +65,14 @@ from .parameters import (
     DOSE_ZONE_MAX_C,
     DOSE_ZONE_MIN_C,
     DOSE_ZONE_STEP_C,
+    HOLD_BAND_MAX_C,
+    HOLD_BAND_MIN_C,
+    HOLD_BAND_STEP_C,
     BehaviourConfig,
     OutOfBandConfig,
     RegulationConfig,
     dose_zone_option,
+    hold_band_option,
 )
 from .preheat import MODE_OFF, MODES, TIMING_OPTIONS
 
@@ -507,6 +513,16 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
             }
         )
 
+        # The hold's band (2.20.0): the stop's line over the target and the
+        # release's under it.
+        hold_band_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=HOLD_BAND_MIN_C, max=HOLD_BAND_MAX_C, step=HOLD_BAND_STEP_C,
+                mode=selector.NumberSelectorMode.BOX,
+                unit_of_measurement="°C",
+            )
+        )
+
         # --- Main options schema with sections ---
         options_schema = vol.Schema(
             {
@@ -597,6 +613,18 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                                     unit_of_measurement="°C",
                                 )
                             ),
+                            vol.Required(
+                                CONF_HOLD_STOP_OVER_C,
+                                default=hold_band_option(
+                                    opts.get(CONF_HOLD_STOP_OVER_C), defaults.stop_over_c
+                                ),
+                            ): hold_band_selector,
+                            vol.Required(
+                                CONF_HOLD_RELEASE_BELOW_C,
+                                default=hold_band_option(
+                                    opts.get(CONF_HOLD_RELEASE_BELOW_C), defaults.release_below_c
+                                ),
+                            ): hold_band_selector,
                             vol.Required(
                                 CONF_DERIVATIVE_TIME_MIN,
                                 default=opts.get(

@@ -591,7 +591,8 @@ def analyse_hold(
     all_d = [s[2] for s in samples if s[2] is not None]
     heating_all = sum(1 for d in all_d if d > 0) / len(all_d) if all_d else 0.0
 
-    amp = cfg.osc_amplitude_c
+    # A swing counts beyond what the hold's band itself makes.
+    amp = cfg.osc_amplitude_c + cfg.band_widening_c()
     side = 0
     crossings: list[float] = []
     for t, e in zip(ts, es):
@@ -953,6 +954,20 @@ class Autotuner:
             self.last_event = "configured values changed – learning restarted"
             return
         self._restart_gains()
+
+    def set_hold_band(self, over_c: float, under_c: float) -> None:
+        """The hold's band (the stop's line over the target, the release's
+        under it): the swing and offset thresholds follow it
+        (:meth:`AutotuneConfig.band_widening_c`).  A hold window being
+        gathered under another band is dropped: judged with this band's
+        thresholds, a narrower band would read the old swings as an
+        oscillation.  Heat-ups and what they taught stay."""
+        over_c, under_c = float(over_c), float(under_c)
+        if (over_c, under_c) == (self.cfg.hold_band_over_c, self.cfg.hold_band_under_c):
+            return
+        self.cfg.hold_band_over_c = over_c
+        self.cfg.hold_band_under_c = under_c
+        self._hold = None
 
     def _restart_gains(self) -> None:
         """The configured Kp or Ki changed, the braking time did not.
@@ -1440,7 +1455,9 @@ class Autotuner:
                 "a fast swing: less Kp (×0.85)" if fast
                 else "a slow swing: less Ki (×0.7)"
             ]
-            emergency = m.amplitude_c >= c.emergency_amplitude_factor * c.osc_amplitude_c
+            emergency = m.amplitude_c >= (
+                c.emergency_amplitude_factor * c.osc_amplitude_c + c.band_widening_c()
+            )
             rolled = None
             if self._pending is not None and (emergency or not self._pending["ref_osc"]):
                 # A "more heat" change still on trial is undone before anything
@@ -1466,19 +1483,24 @@ class Autotuner:
         # at all, argues for a faster integral.  A room that stays too warm is
         # coasting heat (Td's job) and a partial swing is not an offset: both
         # are classic ways a tuner talks itself into more integral action.
-        if m.mean_error_c >= c.hold_offset_c and m.half_cycles <= 1:
+        # Measured from the middle of the hold's band (the target with the
+        # stock band), where the stop and the release keep the room.
+        middle = c.band_middle_c()
+        under = m.mean_error_c - middle
+        of = "" if abs(middle) < 1e-9 else " the band's middle"
+        if under >= c.hold_offset_c and m.half_cycles <= 1:
             self._votes["ki_up"] += 1
             if self._votes["ki_up"] >= c.confirm_up:
                 self._trim_by("ki", 1.2)
                 self._votes["ki_up"] = 0
-                notes.append(f"stays {m.mean_error_c:.2f} °C under: more Ki (×1.2)")
+                notes.append(f"stays {under:.2f} °C under{of}: more Ki (×1.2)")
             else:
-                notes.append(f"stays {m.mean_error_c:.2f} °C under: vote "
+                notes.append(f"stays {under:.2f} °C under{of}: vote "
                              f"{self._votes['ki_up']} of {c.confirm_up} for more Ki")
         else:
             self._votes["ki_up"] = 0
-            notes.append(f"no lasting offset ({m.mean_error_c:+.2f} °C, needs "
-                         f"{c.hold_offset_c:.2f} under): no Ki vote")
+            notes.append(f"no lasting offset ({under:+.2f} °C, needs "
+                         f"{c.hold_offset_c:.2f} under{of}): no Ki vote")
         reason = self._maybe_update(now, "hold")
         self._set_verdict(notes)
         return reason

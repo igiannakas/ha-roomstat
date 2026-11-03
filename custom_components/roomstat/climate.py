@@ -86,6 +86,8 @@ from .const import (
     CONF_FALLBACK_ENTITY_ID,
     CONF_FROST_PROTECTION_TARGET,
     CONF_HEAT_TIMER_S,
+    CONF_HOLD_RELEASE_BELOW_C,
+    CONF_HOLD_STOP_OVER_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
     CONF_MIN_COMMAND_INTERVAL_S,
@@ -117,6 +119,7 @@ from .parameters import (
     PresetConfig,
     RegulationConfig,
     dose_zone_option,
+    hold_band_option,
 )
 from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
@@ -298,7 +301,12 @@ class RoomstatClimate(
             config_entry.options.get(CONF_AUTOTUNE_ENABLED, False)
         )
         self._autotuner = Autotuner(
-            AutotuneConfig(),
+            AutotuneConfig(
+                # The hold's band, which the tuner's swing and offset
+                # thresholds follow (AutotuneConfig.band_widening_c).
+                hold_band_over_c=self._config.stop_over_c,
+                hold_band_under_c=self._config.release_below_c,
+            ),
             self._configured_tuning(),
             derivative_allowed=bool(
                 config_entry.options.get(CONF_AUTOTUNE_DERIVATIVE, True)
@@ -474,6 +482,13 @@ class RoomstatClimate(
             heat_timer_s = safe_float(opts.get(CONF_HEAT_TIMER_S))
             if heat_timer_s is not None and heat_timer_s > 0:
                 config.heat_timer_s = max(heat_timer_s, HEAT_TIMER_MIN_S)
+            # The hold's band: out of range keeps the default.
+            config.stop_over_c = hold_band_option(
+                opts.get(CONF_HOLD_STOP_OVER_C), config.stop_over_c
+            )
+            config.release_below_c = hold_band_option(
+                opts.get(CONF_HOLD_RELEASE_BELOW_C), config.release_below_c
+            )
             # The dosing zone (dosed top-ups): out of range keeps the default.
             config.dose.zone_above_c = dose_zone_option(
                 opts.get(CONF_DOSE_ZONE_ABOVE_C), config.dose.zone_above_c
@@ -1092,6 +1107,7 @@ class RoomstatClimate(
             self._configured_tuning(),
             bool(entry.options.get(CONF_AUTOTUNE_DERIVATIVE, True)),
         )
+        self._autotuner.set_hold_band(self._config.stop_over_c, self._config.release_below_c)
         self._apply_active_tuning()
         self._sensor_grace_s = entry.options.get(
             CONF_SENSOR_GRACE_S, DEFAULT_SENSOR_GRACE_S

@@ -134,6 +134,11 @@ CONF_AUTOTUNE_DERIVATIVE = "autotune_derivative"
 CONF_MIN_COMMAND_INTERVAL_S = "min_command_interval_s"
 CONF_MIN_CHANGE_THRESHOLD_C = "min_change_threshold_c"
 CONF_INTEGRAL_DEADBAND_C = "integral_deadband_c"
+# The hold's band (2.20.0): the valve is shut once the room is predicted to
+# be this far over the target, and heats again once it is predicted to be
+# this far under (RegulationConfig.stop_over_c / release_below_c).
+CONF_HOLD_STOP_OVER_C = "hold_stop_over_c"
+CONF_HOLD_RELEASE_BELOW_C = "hold_release_below_c"
 
 
 # ---------------------------------------------------------------------------
