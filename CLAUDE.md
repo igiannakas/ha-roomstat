@@ -799,6 +799,34 @@ is updating.
   master bedroom 11:09 and second bedroom 17:12: 25 °C sent, then the
   preset's off seconds later, and the valves heated 13–15 min anyway; see
   "A change by hand settles").
+  **A change by hand overrides an open window** (2.22.0,
+  `_end_window_by_hand`, `WindowAutomationController.override_open`;
+  owner, 3 Nov 2026, after two taps on Day in the study at 09:37 with its
+  window open were only saved for the close: "open window could not be
+  overriden", and the rules are to be "the same as the open window after
+  the sensor reports shut", i.e. the close delay's below): a preset or
+  Boost picked, or a temperature set, while the window's frost protection
+  runs or its open delay is due, takes the room back quietly to what the
+  window had saved and applies the change now. Every service call counts,
+  the heating scripts' too (they already ended the close delay): one press
+  of "Heating - Comfort" heats every room with a window open. The window
+  is then `overridden` until the sensor reports it shut: a repeated "on"
+  (on → unavailable → on) arms nothing, the close restores nothing (an
+  event line says so) and the next opening acts again. The readings are
+  still the draught (`_window_airing`: no slope), and the auto-tuner learns
+  nothing while the sensor reads open (`_autotune_eligible` uses
+  `_window_open`). Not changes by hand, as for the close delay: the
+  schedule, Resume schedule, an override running out, a boost ending.
+  Resume schedule while overridden goes back to the frost protection
+  (`_resume_window_wait` → `resume_open`, the schedule's preset saved for
+  the close, a cycle at once, a Boost ended). Off or Heat by hand forgets
+  it (`forget_override`; Heat from Off re-arms the open window), and so
+  does summer mode. It rides along in the restore-state extra data
+  (`window_overridden`): a reload, which every preset temperature change
+  causes, keeps it while the sensor still reads open and forgets it once
+  shut. The thermostat's `window_overridden` attribute; the card shows the
+  open-window badge over the mode (card 1.5.3); the decision line reads
+  `Window open, overridden by hand: …` (`WINDOW_OVERRIDDEN`).
 - **Fail cold (timer overlays):** a maximum command left behind by a dead
   HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
   (TRV option, default 0: the safe landing needs the Tado app schedule at
@@ -972,7 +1000,8 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   (unavailable, unknown), the room goes back to away anyway
   (`unknown_is_away`): skipping, as a stale away timer does, left the change
   heating with no limit until the sensor next read off.
-- An open window still wins: the change is saved for its close. An override
+- A change by hand overrides an open window too (2.22.0, see "Windows";
+  until then it was saved for the close). An override
   whose limit runs out with the window open goes back to away through the
   window branch (Away saved for the close). A change by hand during the
   close delay ends the wait (`_end_window_close_delay`): the room first takes
@@ -1983,6 +2012,10 @@ ruff check .
   regulator's stop and release on them, the activity line's numbers, the
   tuner's thresholds following the band, through the entity with and
   without a reload; 2.21.0: the release look-ahead option).
+- `tests/test_window_override.py` (2.22.0: a change by hand overrides an
+  open window, the study's 3 Nov 2026 presses, the open delay, Frost and
+  Boost, what does not override it, while overridden, Resume schedule back
+  to the window, Off then Heat, the tuner, a reload, the controller).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

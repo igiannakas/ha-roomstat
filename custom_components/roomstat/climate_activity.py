@@ -27,6 +27,7 @@ from .activity import (
     PATH_SENSOR_LOST,
     WINDOW_IGNORED,
     WINDOW_OPEN,
+    WINDOW_OVERRIDDEN,
     WINDOW_PENDING,
     WINDOW_REWARM,
     ActivityLog,
@@ -233,6 +234,8 @@ class ActivityMixin:
             return WINDOW_REWARM
         if self._window_ctrl.is_active:
             return WINDOW_OPEN
+        if self._window_ctrl.overridden and not self._summer_active:
+            return WINDOW_OVERRIDDEN
         if self._window_sensor_on() and not self._summer_active:
             return WINDOW_PENDING if self._window_ctrl.open_delay_active else WINDOW_IGNORED
         return None

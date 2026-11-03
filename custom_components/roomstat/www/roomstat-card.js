@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.2";
+const CARD_VERSION = "1.5.3";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -132,6 +132,8 @@ function roomState(hass, config, ids) {
   const off = st.state === "off";
   const summer = Boolean(a.summer_mode_active);
   const windowOpen = Boolean(a.window_open_active);
+  // Open, but a change by hand overrode it: the room heats as if it were shut.
+  const windowOverridden = Boolean(a.window_overridden);
   const awayHeld = Boolean(a.presence_override_active);
   // Following the schedule: not overridden, and someone is home (while
   // nobody is, Schedule takes the room back to Away).
@@ -165,6 +167,7 @@ function roomState(hass, config, ids) {
 
   let badge = null;
   if (windowOpen) badge = a.window_close_delay_active ? "mdi:window-closed-variant" : "mdi:window-open-variant";
+  else if (windowOverridden) badge = "mdi:window-open-variant";
   else if (override || awayHeld) badge = "mdi:hand-back-right";
 
   return {

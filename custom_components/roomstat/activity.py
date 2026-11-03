@@ -54,6 +54,7 @@ WINDOW_OPEN = "open"          # the window action holds the valve off
 WINDOW_REWARM = "rewarm"      # closed, in the close delay / re-warm wait
 WINDOW_PENDING = "pending"    # open, the window's open delay still running
 WINDOW_IGNORED = "ignored"    # open, but no window action running or due
+WINDOW_OVERRIDDEN = "overridden"  # open, a change by hand overrode it (2.22.0)
 
 
 # The presets as the UI names them (strings.json, preset_mode).
@@ -568,6 +569,8 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
             phrase = "Window just opened (valve off after its delay): " + phrase
         elif f.window == WINDOW_IGNORED:
             phrase = "Window open, not acted on until it next opens: " + phrase
+        elif f.window == WINDOW_OVERRIDDEN:
+            phrase = "Window open, overridden by hand: " + phrase
     if f.path == PATH_REGULATED:
         if f.room_held:
             phrase += " (a fast fall ignored this cycle)"

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.21.0-blue)
+![Version](https://img.shields.io/badge/version-2.22.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -60,8 +60,13 @@ changes.
   heat also waits while a window's open delay runs. Less heat and off always
   go at once; the schedule, presence and windows wait only within those 15
   seconds. **Heat** sent to a room that is already heating no longer ends
-  an open window's frost protection: switch it **Off** and back to **Heat**
-  for that.
+  an open window's frost protection.
+- **You can override an open window.** A preset, Boost or temperature you
+  pick while a window is open (from the card, a script or the thermostat)
+  heats the room now, as if the window were shut, until the window closes;
+  the next opening acts as usual. Resume schedule goes back to the window's
+  frost protection while it is still open; the schedule itself never
+  overrides it. The card then shows the open-window badge.
 - **Handles failures.** A valve that is off isn't sent temperatures it would
   refuse. A failed command is tried again a few minutes later and logged
   once, not every time; the thermostat's `last_command_error` attribute shows

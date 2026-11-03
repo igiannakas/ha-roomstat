@@ -159,6 +159,12 @@ class WindowAutomationController:
     :func:`window_recovery_wait` whether the room is still re-warming on
     its own and, if so, extends the delay (``extend_close_delay``) until it
     has slowed down or ``WINDOW_RECOVERY_MAX_S`` has passed since the close.
+
+    A change by hand ends either wait: the close delay (``interrupt_close_delay``)
+    or the open window itself, pending or active (``override_open``: then
+    ``overridden`` until the sensor reports it shut).  Resume schedule goes
+    back to either while it would still run (``resume_close_delay``,
+    ``resume_open``).
     """
 
     def __init__(self) -> None:
@@ -172,6 +178,12 @@ class WindowAutomationController:
         # schedule can go back to the wait (``resume_close_delay``).
         self._interrupted_since: float | None = None
         self._interrupted_delay_s: float = 0.0
+        # The opening a change by hand overrode (``override_open``): the
+        # room is regulated as if the window were shut until the sensor
+        # reports it shut, and a repeated "on" (an attribute update, on ->
+        # unavailable -> on) arms nothing.  Resume schedule goes back to
+        # the window's frost protection (``resume_open``).
+        self._overridden: bool = False
         self._saved: SavedState = SavedState()
 
     # ------------------------------------------------------------------
@@ -217,6 +229,20 @@ class WindowAutomationController:
             return None
         return self._interrupted_since, self._interrupted_delay_s
 
+    @property
+    def overridden(self) -> bool:
+        """The window is open, and a change by hand overrode it: no frost
+        protection until the sensor reports it shut and it opens again."""
+        return self._overridden
+
+    @property
+    def open_in_charge(self) -> bool:
+        """The window is open and its frost protection is due or running
+        (not overridden, not yet closed): what a change by hand overrides."""
+        if self._close_timer is not None:
+            return False
+        return self.is_active or self._open_timer is not None
+
     def get_saved(self) -> SavedState:
         """Return a copy of the currently saved preset/temperature."""
         return SavedState(preset=self._saved.preset, temp=self._saved.temp)
@@ -238,7 +264,13 @@ class WindowAutomationController:
         Special case: if a close-delay timer is running (window reopened
         during the restore countdown), cancel that timer and stay in frost
         protection without restarting the open-delay countdown.
+
+        An opening a change by hand overrode arms nothing: the sensor has
+        not reported it shut since, so this is the same opening again.
         """
+        if self._overridden:
+            _LOGGER.debug("Window open event ignored – overridden by hand until it closes")
+            return
         self.forget_interrupted_close()      # a new airing: that wait is over
         if self._close_timer is not None:
             self._close_timer()
@@ -294,9 +326,11 @@ class WindowAutomationController:
         self._close_since = None
         self._close_delay_s = 0.0
         self.forget_interrupted_close()
+        self._overridden = False             # shut: the next opening acts again
 
         if not self.is_active:
-            # Window closed before the open-delay fired – nothing to restore.
+            # Window closed before the open-delay fired, or after a change
+            # by hand overrode it – nothing to restore.
             return False
 
         if close_delay_s > 0:
@@ -373,6 +407,44 @@ class WindowAutomationController:
         self._interrupted_since = None
         self._interrupted_delay_s = 0.0
 
+    def override_open(self) -> bool:
+        """A change by hand overrides the open window (owner, 3 Nov 2026:
+        the same as after the sensor reports it shut): the open delay is
+        cancelled, and the window is overridden until the sensor reports it
+        shut.  The caller restores the saved state (:meth:`restore`) first
+        when the window was active.  False (nothing changed) when no open
+        window is in charge."""
+        if not self.open_in_charge:
+            return False
+        if self._open_timer is not None:
+            self._open_timer()
+            self._open_timer = None
+        self._overridden = True
+        return True
+
+    def mark_overridden(self) -> None:
+        """Take back an override at startup (the restore data says so and
+        the sensor has not reported the window shut): a repeated "on" arms
+        nothing."""
+        if not self.is_active:
+            self._overridden = True
+
+    def resume_open(self, saved: SavedState) -> bool:
+        """Go back to the window's frost protection after an override
+        (Resume schedule while it is still open): active again, with
+        *saved* as what the close restores.  False when not overridden."""
+        if not self._overridden or self.is_active:
+            return False
+        self._overridden = False
+        self._saved = SavedState(preset=saved.preset, temp=saved.temp)
+        self.is_active = True
+        return True
+
+    def forget_override(self) -> None:
+        """No override any more (switched off or on by hand, the sensor
+        gone or found shut at startup): the next "on" acts again."""
+        self._overridden = False
+
     # ------------------------------------------------------------------
     # State mutations called by the climate entity
     # ------------------------------------------------------------------
@@ -426,6 +498,7 @@ class WindowAutomationController:
         """Cancel all timers and reset to idle state (e.g. user override)."""
         self.cancel_timers()
         self.forget_interrupted_close()
+        self._overridden = False
         self.is_active = False
         self._saved = SavedState()
 
@@ -787,6 +860,10 @@ class PersistedAutomationState:
 
     window_active: bool = False
     window_saved: SavedState = field(default_factory=SavedState)
+    # A change by hand overrode the open window (2.22.0): no frost
+    # protection until the sensor reports it shut (a reload, which every
+    # preset temperature change causes, must not re-arm it).
+    window_overridden: bool = False
     presence_active: bool = False
     presence_saved: SavedState = field(default_factory=SavedState)
     # Nobody home, but a change by hand holds away off (until = wall-clock
@@ -819,6 +896,7 @@ class PersistedAutomationState:
             "window_active": self.window_active,
             "window_saved_preset": self.window_saved.preset,
             "window_saved_temp": self.window_saved.temp,
+            "window_overridden": self.window_overridden,
             "presence_active": self.presence_active,
             "presence_saved_preset": self.presence_saved.preset,
             "presence_saved_temp": self.presence_saved.temp,
@@ -848,6 +926,7 @@ class PersistedAutomationState:
                 preset=_as_opt_str(data.get("window_saved_preset")),
                 temp=_as_opt_float(data.get("window_saved_temp")),
             ),
+            window_overridden=data.get("window_overridden") is True,
             presence_active=data.get("presence_active") is True,
             presence_saved=SavedState(
                 preset=_as_opt_str(data.get("presence_saved_preset")),

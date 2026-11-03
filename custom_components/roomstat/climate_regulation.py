@@ -263,13 +263,14 @@ class RegulationMixin:
         """Whether this cycle is normal heating the auto-tuner may learn from.
 
         Window / presence automations, boost, summer mode and a stale sensor
-        all produce behaviour that says nothing about the room's dynamics.
+        all produce behaviour that says nothing about the room's dynamics;
+        so does an open window a change by hand overrode (2.22.0: the
+        readings are the draught).
         """
         return (
             self._hvac_mode == HVACMode.HEAT
             and not self._summer_active
-            and not self._window_ctrl.is_active
-            and not self._window_ctrl.close_delay_active
+            and not self._window_open()
             and not self._presence_ctrl.is_active
             and self._preset_mode != PRESET_BOOST
             and not self._sensor_degraded

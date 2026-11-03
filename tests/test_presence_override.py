@@ -15,8 +15,8 @@ Rules under test:
 - Away picked while nobody is home is away mode itself: it ends an override
   and never leaves a sticky manual Away behind.  Resume schedule while
   nobody is home ends an override too.
-- An open window still wins; the schedule, a boost ending or Off → Heat are
-  not changes by hand.
+- An open window is overridden too (2.22.0), as its close delay is; the
+  schedule, a boost ending or Off → Heat are not changes by hand.
 - The override survives a restart or reload.
 """
 from __future__ import annotations
@@ -394,7 +394,10 @@ class TestChangeByHandWhileAway:
         _arrive(ent)
         assert ent.preset_mode == "comfort"
 
-    def test_open_window_still_wins(self):
+    def test_an_open_window_is_overridden_too(self):
+        """2.22.0: a change by hand overrides an open window as it does
+        away mode: Comfort at once, then the temperature; the close has
+        nothing to restore."""
         ent = _entity(None, window=True)
         _leave(ent)
         ent.hass.set(WINDOW, "on")
@@ -402,15 +405,16 @@ class TestChangeByHandWhileAway:
         _fire(ent, "_async_window_action")
         assert ent.preset_mode == "frost_protection"
         _preset(ent, "comfort")
-        assert ent.preset_mode == "frost_protection"
-        assert _held(ent)
+        assert ent.preset_mode == "comfort"
+        assert _held(ent) and ent._window_ctrl.overridden
         _run(ent.async_set_temperature(temperature=21.5))
-        assert ent.preset_mode == "frost_protection"
+        assert (ent.preset_mode, ent.target_temperature) == ("none", 21.5)
         ent.hass.set(WINDOW, "off")
         ent._async_window_changed(_event("off"))
         drain_tasks(ent)
         assert ent.preset_mode == "none"
         assert ent.target_temperature == 21.5
+        assert not ent._window_ctrl.overridden and _held(ent)
 
     def test_limit_running_out_with_the_window_open(self):
         ent = _entity(None, window=True)

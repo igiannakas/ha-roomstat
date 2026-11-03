@@ -86,9 +86,14 @@ class PresetMixin:
         else:  # window closed
             close_delay = self._config_entry.options.get(CONF_WINDOW_CLOSE_DELAY_S, 120)
             was_pending = self._window_ctrl.open_delay_active
+            was_overridden = self._window_ctrl.overridden
             should_restore = self._window_ctrl.handle_window_closed(
                 self.hass, close_delay, self._async_window_close_action
             )
+            if was_overridden:
+                self._log(_LOGGER).info(
+                    "window closed; it was overridden by hand, so nothing to restore"
+                )
             if should_restore:
                 self._restore_window_state()
             elif was_pending:
@@ -220,6 +225,40 @@ class PresetMixin:
         self._window_ctrl.interrupt_close_delay()  # the close timer must not fire later
         self._restore_window_state(notify=False)
 
+    def _end_window_by_hand(self, reason: str) -> None:
+        """A change by hand (a preset or Boost picked, a temperature set)
+        ends the window's hold on the room, whether the window has closed
+        (the close delay, :meth:`_end_window_close_delay`) or is still open
+        (2.22.0; owner, 3 Nov 2026, after two taps on Day in the study with
+        its window open were saved for the close: the same as after the
+        sensor reports it shut).  Every service call counts, the heating
+        scripts' too; Resume schedule, the schedule and an override running
+        out do not (:meth:`_route_preset`).
+
+        An open window, its frost protection running or its open delay
+        still due, is overridden until the sensor reports it shut
+        (``WindowAutomationController.override_open``): the room first
+        takes back what the window had saved (quietly), then the change
+        applies, and the room is regulated as if the window were shut.  The
+        readings are still the draught (``_window_airing``: no slope, and
+        the auto-tuner learns nothing), and Resume schedule goes back to
+        the frost protection while the window is open
+        (:meth:`_resume_window_wait`)."""
+        ctrl = self._window_ctrl
+        if ctrl.close_delay_active:
+            self._end_window_close_delay(reason)
+            return
+        if self._summer_active or not ctrl.open_in_charge:
+            return
+        was_active = ctrl.is_active
+        ctrl.override_open()
+        self._log(_LOGGER).info(
+            "window open, overridden by hand (%s): heating as if it were shut "
+            "until it closes", reason,
+        )
+        if was_active:
+            self._restore_window_state(notify=False, log=False)
+
     def _resume_window_wait(self) -> bool:
         """Resume schedule after a change by hand ended a window's close
         delay goes back to it while it would still run (owner, 3 Nov 2026:
@@ -231,8 +270,25 @@ class PresetMixin:
         (the pre-boost one during a Boost) saved for the wait's end; the
         caller routes the schedule's preset on top, which is saved there
         too.  Returns True when the wait was resumed (the caller regulates:
-        heat a change by hand had started is taken back at once)."""
+        heat a change by hand had started is taken back at once).
+
+        After a change by hand overrode the window while it was open
+        (2.22.0), the same: while the sensor has not reported it shut, the
+        room is in the window's frost protection again until it closes."""
         ctrl = self._window_ctrl
+        if ctrl.overridden:
+            if ctrl.is_active or self._summer_active or self._hvac_mode == HVACMode.OFF:
+                ctrl.forget_override()
+                return False
+            if not ctrl.resume_open(self._window_saved_now()):
+                return False
+            self._end_boost_for_the_window()
+            self._preset_mode = PRESET_FROST_PROTECTION
+            self._log(_LOGGER).info(
+                "Resume schedule: the window is still open, so heating waits "
+                "for it again (frost protection until it closes)"
+            )
+            return True
         interrupted = ctrl.interrupted_close
         if interrupted is None:
             return False
@@ -255,17 +311,11 @@ class PresetMixin:
                 return False
             timer_s = WINDOW_RECOVERY_POLL_S
             rewarming = True
-        if self._boost_cancel is not None:
-            self._boost_cancel()
-            self._boost_cancel = None
-            self._boost_end_ts = 0.0
-            saved = SavedState(self._boost_saved_preset, self._boost_saved_temp)
-        else:
-            saved = SavedState(self._preset_mode, self._target_temp)
         if not ctrl.resume_close_delay(
-            self.hass, timer_s, self._async_window_close_action, saved
+            self.hass, timer_s, self._async_window_close_action, self._window_saved_now()
         ):
             return False
+        self._end_boost_for_the_window()
         self._preset_mode = PRESET_FROST_PROTECTION
         # The close action says "room recovery over" when the wait ends.
         self._window_recovery_logged = rewarming
@@ -279,12 +329,29 @@ class PresetMixin:
         )
         return True
 
-    def _restore_window_state(self, notify: bool = True) -> None:
+    def _window_saved_now(self) -> SavedState:
+        """What a window taking the room back (Resume schedule) saves for
+        its close: the preset now, the pre-boost one during a Boost."""
+        if self._boost_cancel is not None:
+            return SavedState(self._boost_saved_preset, self._boost_saved_temp)
+        return SavedState(self._preset_mode, self._target_temp)
+
+    def _end_boost_for_the_window(self) -> None:
+        """A window taking the room back ends a running Boost (its saved
+        state is the pre-boost one, :meth:`_window_saved_now`)."""
+        if self._boost_cancel is not None:
+            self._boost_cancel()
+            self._boost_cancel = None
+            self._boost_end_ts = 0.0
+
+    def _restore_window_state(self, notify: bool = True, *, log: bool = True) -> None:
         """Restore preset after window is closed.
 
         ``notify=False`` is used during ``async_added_to_hass``: the entity is
         not fully added yet, so no state write or regulation task is started
         (the platform writes the state right after, the timer regulates).
+        ``log=False``: a change by hand overriding the open window, which
+        says so itself (the window has not closed).
         """
         saved = self._window_ctrl.restore()
         if saved.preset is not None:
@@ -320,7 +387,8 @@ class PresetMixin:
             elif saved.temp is not None:
                 self._target_temp = saved.temp
             self._drop_stale_sticky_override()
-        self._log(_LOGGER).info("window closed, restoring the previous preset")
+        if log:
+            self._log(_LOGGER).info("window closed, restoring the previous preset")
         if not notify:
             return
         self.hass.async_create_task(
@@ -849,18 +917,19 @@ class PresetMixin:
         Returns True when the preset was applied (the caller regulates), False
         when it was saved for later restore by window / presence automation.
         No state is written here.  A preset picked by hand (``manual``) is
-        never held back by away mode, only by an open window.
+        held back neither by away mode nor by a window (2.22.0).
         """
-        # A preset picked by hand during the window's close delay ends the
-        # wait: the user wants it now.  The schedule, Resume schedule and an
-        # override running out ask for no heat now: they are saved for the
-        # wait's end below, as while the window is open, and the room keeps
+        # A preset picked by hand ends the window's hold on the room, open
+        # (2.22.0) or in its close delay: the user wants it now
+        # (:meth:`_end_window_by_hand`).  The schedule, Resume schedule and
+        # an override running out ask for no heat now: they are saved for
+        # the window's close or the wait's end below, and the room keeps
         # re-warming on its own (2.19.2; 3 Nov 2026, living room: Resume
         # schedule 19 min after the close, the room 0.3 under Comfort and
         # rising 1.8 °C/h by itself, ended the wait, and the hold sent the
         # valve 1.2 over its reading).
         if manual:
-            self._end_window_close_delay(f"preset changed to {preset_mode}")
+            self._end_window_by_hand(f"preset changed to {preset_name(preset_mode)}")
 
         if self._presence_ctrl.is_active and (preset_mode != PRESET_AWAY or not manual):
             if manual:
@@ -884,10 +953,11 @@ class PresetMixin:
             # A further change by hand restarts the limit.
             self._presence_takeover(preset_mode)
 
-        # If window automation is active (frost protection due to open window),
-        # update the saved state so the new preset is restored when the window
-        # closes, but keep frost protection active.  This includes selecting
-        # frost protection itself: the user wants frost after the window closes.
+        # If window automation is still active (frost protection due to an
+        # open window: the schedule, Resume schedule, an override running
+        # out, a boost ending), update the saved state so the new preset is
+        # restored when the window closes, but keep frost protection active.
+        # A change by hand has ended it above.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(preset_mode, self._get_preset_target(preset_mode))
             if self._window_ctrl.close_delay_active:

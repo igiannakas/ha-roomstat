@@ -121,6 +121,13 @@ _CASES = [
     ({"preset_mode": "frost_protection", "window_open_active": True,
       "window_close_delay_active": True},
      "Window", "mdi:window-closed-variant", False),
+    # Open, overridden by hand (2.22.0): the mode it heats on, with the
+    # open window as the badge (over the hand of the schedule's override).
+    ({"preset_mode": "comfort", "window_overridden": True, "schedule_preset": "eco",
+      "schedule_override_active": True, "schedule_override_until": 60 * 60 - 1},
+     "Override · Day · 60 min", "mdi:window-open-variant", False),
+    ({"preset_mode": "comfort", "window_overridden": True, "schedule_preset": "comfort"},
+     "Schedule · Day", "mdi:window-open-variant", True),
 ]
 
 # The clock in the user's language, 24-hour choice and the server's time zone.

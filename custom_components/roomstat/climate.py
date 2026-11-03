@@ -715,6 +715,8 @@ class RoomstatClimate(
                     persisted.window_saved.preset or PRESET_COMFORT,
                     persisted.window_saved.temp,
                 )
+            elif persisted.window_overridden:
+                self._window_ctrl.mark_overridden()
             legacy_note = self._load_presence_snapshot(persisted, legacy_held_cold)
 
         # Resume a running boost, or fall back if it ended while HA was down.
@@ -830,6 +832,10 @@ class RoomstatClimate(
         if not summer_on:
             self._startup_reconcile_presence(presence_sensor, persisted)
             self._startup_reconcile_window(window_sensor)
+        else:
+            # Summer mode ignores the window, and its end acts on one still
+            # open: no override left to keep that from happening.
+            self._window_ctrl.forget_override()
         # Schedule last: it routes into window/presence saved state if active.
         self._startup_schedule(summer_on)
         # Preheat decides now, on what was just taken back, so a room that
@@ -943,6 +949,17 @@ class RoomstatClimate(
         """Align window automation with the window sensor at startup."""
         window_state = self.hass.states.get(window_sensor) if window_sensor else None
         state = window_state.state if window_state else None
+        if self._window_ctrl.overridden:
+            # A change by hand overrode the open window (2.22.0): it stays
+            # overridden until the sensor reports it shut, also across a
+            # reload (every preset temperature change).
+            if window_sensor and state != "off":
+                self._log(_LOGGER).info(
+                    "Startup: the window is still open, overridden by hand: no "
+                    "frost protection until it closes"
+                )
+                return
+            self._window_ctrl.forget_override()
         action = window_startup_action(
             self._window_ctrl.is_active, bool(window_sensor), state
         )
@@ -1061,6 +1078,7 @@ class RoomstatClimate(
         return PersistedAutomationState(
             window_active=self._window_ctrl.is_active,
             window_saved=self._window_ctrl.get_saved(),
+            window_overridden=self._window_ctrl.overridden,
             presence_active=self._presence_ctrl.is_active,
             presence_saved=self._presence_ctrl.get_saved(),
             presence_override_active=self._presence_ctrl.override_active,
@@ -1173,8 +1191,10 @@ class RoomstatClimate(
         # master bedroom 11:09, second bedroom 17:12).
         if hvac_mode != self._hvac_mode:
             # Off, then Heat ends the window state by hand: no going back to
-            # a close delay a change by hand ended either.
+            # a close delay a change by hand ended either, and an open
+            # window it overrode acts again once switched on (2.22.0).
             self._window_ctrl.forget_interrupted_close()
+            self._window_ctrl.forget_override()
         if self._window_ctrl.is_active and hvac_mode != self._hvac_mode:
             saved = self._window_ctrl.get_saved()
             self._window_ctrl.cancel_all()
@@ -1280,14 +1300,16 @@ class RoomstatClimate(
         # A manual temperature overrides the schedule (see climate_schedule.py)
         self._schedule_note_manual_temperature()
 
-        # During the window's close delay it ends the wait.
-        self._end_window_close_delay(f"temperature set to {temp_f:.1f} °C")
+        # It ends the window's hold on the room, open (2.22.0) or in its
+        # close delay.
+        self._end_window_by_hand(f"temperature set to {temp_f:.1f} °C")
 
         # Set by hand while nobody is home: it takes effect, away steps
         # aside (until someone is home, or the configured limit).
         self._presence_takeover()
 
-        # An open window still wins: save the temperature for its close.
+        # A window still in charge (only in summer mode, which ignores the
+        # window): save the temperature for its close.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(PRESET_NONE, temp_f)
             self._log(_LOGGER).info(
@@ -1434,6 +1456,7 @@ class RoomstatClimate(
             "autotune_status": self.autotune_summary()["status"],
             "effective_setpoint_c": self._effective_setpoint(),
             "window_open_active": self._window_ctrl.is_active,
+            "window_overridden": self._window_ctrl.overridden,
             "window_close_delay_active": self._window_ctrl.close_delay_active,
             "presence_away_active": self._presence_ctrl.is_active,
             # Nobody home, but a change by hand holds away off (the card

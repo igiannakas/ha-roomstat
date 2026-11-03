@@ -37,6 +37,7 @@ from tests.ha_harness import (
     _restart_from,
     _run,
     _select_preset,
+    _settle,
     _start,
     _State,
     e2e,
@@ -44,6 +45,15 @@ from tests.ha_harness import (
 )
 
 _ROOT = Path(__file__).parent.parent / "custom_components" / "roomstat"
+
+
+class _TestClock:
+    def __init__(self, monkeypatch, start=1_800_000_000.0):
+        self.now = start
+        monkeypatch.setattr("time.time", lambda: self.now)
+
+    def tick(self, s=60.0):
+        self.now += s
 
 
 # ===========================================================================
@@ -337,27 +347,35 @@ class TestWindowCycleEndToEnd:
         assert ent.target_temperature == 19.0
 
     def test_selecting_frost_during_window_open_is_kept(self):
+        """Frost picked by hand with the window open overrides it (2.22.0):
+        the room is Off now, and the close has nothing to restore."""
         ent = _make_entity()
         _run(_start(ent))
         _run(_select_preset(ent, "comfort"))
         self._open_window(ent)
         _run(_select_preset(ent, "frost_protection"))
-        assert ent._window_ctrl.get_saved().preset == "frost_protection"
+        assert not ent._window_ctrl.is_active and ent._window_ctrl.overridden
+        assert ent.preset_mode == "frost_protection"
         self._close_window(ent)
         assert ent.preset_mode == "frost_protection"
+        assert not ent._window_ctrl.overridden
 
-    def test_boost_selected_during_window_open_returns_as_comfort(self):
+    def test_boost_selected_during_window_open_heats_now(self):
+        """Boost picked by hand with the window open overrides it (2.22.0)
+        and runs at once; the close leaves it running, and it ends on the
+        preset from before the window."""
         ent = _make_entity()
         _run(_start(ent))
         _run(_select_preset(ent, "eco"))
         self._open_window(ent)
         _run(_select_preset(ent, "boost"))
-        assert ent._window_ctrl.get_saved().preset == "boost"
+        assert ent.preset_mode == "boost" and ent._boost_cancel is not None
+        assert ent._window_ctrl.overridden and not ent._window_ctrl.is_active
         self._close_window(ent)
-        assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.preset_mode == "boost"
+        _run(ent._async_boost_expired(None))
+        assert ent.preset_mode == "eco"
         assert ent._boost_cancel is None
-        assert _active_timers() == []
 
     def test_boost_running_when_window_opens_returns_to_pre_boost_preset(self):
         ent = _make_entity()
@@ -417,11 +435,11 @@ class TestWindowCycleEndToEnd:
         assert not ent._window_ctrl.is_active
         assert ent.preset_mode == "comfort"
 
-    @pytest.mark.parametrize("preset", ["comfort", "frost_protection"])
-    def test_a_heating_script_with_the_window_open_sends_no_heat(self, preset):
-        """25 Oct 2026: 'Heating - Comfort' / 'Heating - Frost Protection'
-        (set_hvac_mode heat, then the preset) with a window open sent 25 °C
-        (master bedroom 11:09, second bedroom 17:12)."""
+    def test_heating_frost_protection_with_the_window_open_sends_no_heat(self):
+        """25 Oct 2026: 'Heating - Frost Protection' (set_hvac_mode heat,
+        then the preset) with a window open sent 25 °C, then the off
+        (second bedroom 17:12).  The Heat is no change, and the Frost picked
+        by hand overrides the window (2.22.0): straight to Off, no heat."""
         ent = _make_entity({"heat_timer_s": 0})
         _run(_start(ent))
         _run(_select_preset(ent, "comfort"))
@@ -429,12 +447,39 @@ class TestWindowCycleEndToEnd:
         ent.coordinator.data = dict(ent.coordinator.data, room_temp=16.6)
         ent.hass.service_calls.clear()
         _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
-        _run(_select_preset(ent, preset))
+        _run(_select_preset(ent, "frost_protection"))
         heat = [d for dom, svc, d in ent.hass.service_calls
                 if svc == "set_temperature" and d.get("temperature", 0) > 5.05]
         assert heat == []
-        assert ent._window_ctrl.is_active and ent.preset_mode == "frost_protection"
-        assert ent._window_ctrl.get_saved().preset == preset
+        assert ent.preset_mode == "frost_protection" and ent._window_ctrl.overridden
+
+    def test_heating_comfort_with_the_window_open_heats(self, monkeypatch):
+        """A preset picked by hand overrides an open window (2.22.0; owner,
+        3 Nov 2026: the same as after the sensor reports it shut, where a
+        heating script already ended the re-warm wait).  The heating
+        scripts count: 'Heating - Comfort' heats a room whose window is
+        open, with one heat command once the change has settled, and no
+        off after it."""
+        clock = _TestClock(monkeypatch)
+        ent = _make_entity({"heat_timer_s": 0})
+        _run(_start(ent))
+        _run(_select_preset(ent, "eco"))
+        self._open_window(ent)
+        ent.coordinator.data = {
+            "room_temp": 16.6, "room_temp_ts": None,
+            "tado_internal_temp": 14.0, "tado_setpoint": None, "tado_off": True,
+            "tado_min_temp": 5.0, "tado_max_temp": 25.0, "tado_cloud": False,
+            "tado_scheduled": False, "tado_heating": False,
+            "fallback_internal_temp": None, "fallback_setpoint": None,
+        }
+        ent.hass.service_calls.clear()
+        _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
+        _run(_select_preset(ent, "comfort"))
+        assert ent.preset_mode == "comfort" and ent._window_ctrl.overridden
+        _settle(clock)
+        sends = [(svc, d.get("temperature", d.get("hvac_mode")))
+                 for dom, svc, d in ent.hass.service_calls if dom == "climate"]
+        assert sends == [("set_temperature", 25.0)]
 
 
 # --- Restart / reload (Fix C) -----------------------------------------------

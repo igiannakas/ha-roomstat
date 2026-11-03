@@ -162,7 +162,9 @@ class ScheduleMixin:
         room keeps re-warming on its own (2.19.2).  After a change by hand
         ended that wait it goes back to it while the wait would still run
         (:meth:`_resume_window_wait`), and regulates at once, so heat the
-        change had started is taken back.
+        change had started is taken back.  The same after a change by hand
+        overrode an open window (2.22.0): while it is still open, the room
+        is in its frost protection again.
         """
         self._summer_guard("resume schedule")
         if not self.schedule_configured:
