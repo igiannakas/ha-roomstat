@@ -156,6 +156,10 @@ class ScheduleMixin:
         an Off included, ends, the room is in away mode, and coming home
         restores the schedule's preset.  The room takes it quietly before
         away mode saves it (no heat call sent and taken back).
+
+        During a window's close delay it is saved for the wait's end, like
+        any change while the window is open: it asks for no heat now, so the
+        room keeps re-warming on its own (2.19.2).
         """
         self._summer_guard("resume schedule")
         if not self.schedule_configured:

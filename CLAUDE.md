@@ -927,6 +927,13 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   Before, the close delay was simply cancelled, so a Boost picked then
   ended on the window's frost protection and stayed Off (also when home),
   and a temperature set then waited for the end of the re-warm wait.
+  **Resume schedule, the schedule moving on and an override running out
+  do not end it** (2.19.2, `_route_preset` ends it only for `manual`; owner,
+  3 Nov 2026): they ask for no heat now, so they are saved for the wait's
+  end, as while the window is open. 3 Nov, living room: Resume schedule 19
+  min after the close, the room 0.3 under Comfort and re-warming 1.8 °C/h
+  by itself, ended the wait, and the hold sent 18.9 (1.2 over the valve's
+  reading, 93 % until Frost protection was picked 24 s later).
 - A sticky schedule override belongs to an Away or Off picked by hand. Away
   mode turns a manual Away into away mode (it never saves AWAY), so the away
   action clears the sticky override then; one still left behind (older

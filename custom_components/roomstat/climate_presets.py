@@ -202,7 +202,9 @@ class PresetMixin:
         return closed, earliest, latest, rate
 
     def _end_window_close_delay(self, reason: str) -> None:
-        """A change by hand during the window's close delay ends the wait.
+        """A change by hand during the window's close delay ends the wait:
+        a preset or Boost picked, a temperature set.  Resume schedule and
+        the schedule do not (see :meth:`_route_preset`).
 
         The room first takes back what the window had saved (quietly, as the
         close would), so the change applies on top of the real state: a
@@ -788,8 +790,16 @@ class PresetMixin:
         No state is written here.  A preset picked by hand (``manual``) is
         never held back by away mode, only by an open window.
         """
-        # A preset during the window's close delay ends the wait.
-        self._end_window_close_delay(f"preset changed to {preset_mode}")
+        # A preset picked by hand during the window's close delay ends the
+        # wait: the user wants it now.  The schedule, Resume schedule and an
+        # override running out ask for no heat now: they are saved for the
+        # wait's end below, as while the window is open, and the room keeps
+        # re-warming on its own (2.19.2; 3 Nov 2026, living room: Resume
+        # schedule 19 min after the close, the room 0.3 under Comfort and
+        # rising 1.8 °C/h by itself, ended the wait, and the hold sent the
+        # valve 1.2 over its reading).
+        if manual:
+            self._end_window_close_delay(f"preset changed to {preset_mode}")
 
         if self._presence_ctrl.is_active and (preset_mode != PRESET_AWAY or not manual):
             if manual:
@@ -819,9 +829,16 @@ class PresetMixin:
         # frost protection itself: the user wants frost after the window closes.
         if self._window_ctrl.is_active:
             self._window_ctrl.update_saved(preset_mode, self._get_preset_target(preset_mode))
-            self._log(_LOGGER).info(
-                "window open, %s saved for the close, keeping frost protection", preset_mode,
-            )
+            if self._window_ctrl.close_delay_active:
+                self._log(_LOGGER).info(
+                    "window closed, the room still re-warming on its own: %s "
+                    "saved for when heating resumes", preset_name(preset_mode),
+                )
+            else:
+                self._log(_LOGGER).info(
+                    "window open, %s saved for the close, keeping frost protection",
+                    preset_mode,
+                )
             return False
 
         old_preset = self._preset_mode
