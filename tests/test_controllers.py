@@ -349,6 +349,66 @@ class TestWindowController:
         assert c.close_delay_elapsed_s(4000.0) == 0.0
         assert not c.close_delay_active
 
+    # --- a close delay a change by hand ended, and Resume schedule (2.19.2) ---
+
+    def _interrupted(self, fake):
+        c = self._ctrl()
+        c.activate("frost_protection", 5.0)
+        c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=1000.0)
+        c.interrupt_close_delay()
+        c.restore()
+        return c
+
+    def test_an_interrupt_keeps_when_the_window_closed(self):
+        fake = FakeCallLater()
+        c = self._interrupted(fake)
+        assert fake.calls[0]["cancelled"]
+        assert not c.close_delay_active and not c.is_active
+        assert c.interrupted_close == (1000.0, 300.0)
+
+    def test_resume_goes_back_to_the_wait(self):
+        fake = FakeCallLater()
+        c = self._interrupted(fake)
+        assert c.resume_close_delay(
+            None, 60, lambda now: None, SavedState("comfort", 20.0), call_later=fake
+        )
+        assert c.is_active and c.close_delay_active
+        assert (c.close_since, c.close_delay_s) == (1000.0, 300.0)   # from the close
+        assert fake.calls[-1]["delay"] == 60
+        assert c.get_saved() == SavedState("comfort", 20.0)
+        assert c.interrupted_close is None
+        # Only once.
+        c.restore()
+        assert not c.resume_close_delay(None, 60, lambda now: None, SavedState(), call_later=fake)
+
+    def test_nothing_to_resume_without_an_interrupt(self):
+        c, fake = self._ctrl(), FakeCallLater()
+        c.interrupt_close_delay()                        # no close delay running
+        assert c.interrupted_close is None
+        assert not c.resume_close_delay(None, 60, lambda now: None, SavedState(), call_later=fake)
+        assert fake.scheduled_count == 0 and not c.is_active
+
+    @pytest.mark.parametrize("event", ["open", "close", "cancel_all"])
+    def test_a_new_airing_or_off_by_hand_forgets_it(self, event):
+        fake = FakeCallLater()
+        c = self._interrupted(fake)
+        if event == "open":
+            c.handle_window_opened(None, 30, lambda now: None, call_later=fake)
+        elif event == "close":
+            c.handle_window_closed(None, 300, lambda now: None, call_later=fake, now=2000.0)
+        else:
+            c.cancel_all()
+        assert c.interrupted_close is None
+
+    def test_resume_is_refused_while_the_window_is_pending_or_active(self):
+        fake = FakeCallLater()
+        c = self._interrupted(fake)
+        c._open_timer = lambda: None                     # an open delay running
+        assert not c.resume_close_delay(None, 60, lambda now: None, SavedState(), call_later=fake)
+        c._open_timer = None
+        c.activate("comfort", 20.0)
+        assert not c.resume_close_delay(None, 60, lambda now: None, SavedState(), call_later=fake)
+
     def test_close_time_and_delay_only_while_the_wait_runs(self):
         """For the card: when the window closed and the configured delay,
         while (and only while) the close delay runs, extended or not."""

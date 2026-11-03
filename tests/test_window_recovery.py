@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from tests.ha_harness import (
+    PRESENCE,
     SCHEDULE,
     WINDOW,
     _active_timers,
@@ -28,6 +29,7 @@ from tests.ha_harness import (
     _fire_last_timer,
     _make_entity,
     _run,
+    _settle,
     _start,
     e2e,
     reset_timers,
@@ -85,11 +87,14 @@ class _State:
         self.attributes = {}
 
 
-def _entity(clock, options=None, *, schedule=None):
+def _entity(clock, options=None, *, schedule=None, presence=False):
     ent = _make_entity({"window_close_delay_s": CLOSE_DELAY, "autotune_enabled": True,
-                        **(options or {})}, schedule=schedule is not None)
+                        **(options or {})}, schedule=schedule is not None,
+                       presence=presence)
     if schedule is not None:
         ent.hass.set(SCHEDULE, schedule)
+    if presence:
+        ent.hass.set(PRESENCE, "on")
     _run(_start(ent))
     # Comfort 20.5, the room at the target for 15 min: a known, flat slope.
     for _ in range(15):
@@ -380,6 +385,147 @@ class TestOnlyAChangeByHandEndsTheWait:
         assert ent.preset_mode == "comfort"
         assert [t for t in _active_timers()
                 if getattr(t["callback"], "__name__", "") == "_async_window_close_action"] == []
+
+
+def _offs(ent):
+    return [d for dom, svc, d in ent.hass.service_calls
+            if dom == "climate" and svc == "set_hvac_mode" and d.get("hvac_mode") == "off"]
+
+
+def _close_timers():
+    return [t for t in _active_timers()
+            if getattr(t["callback"], "__name__", "") == "_async_window_close_action"]
+
+
+class TestResumeScheduleGoesBackToTheWait:
+    """3 Nov 2026, living room, 08:24: the window shut at about 08:17, and
+    Comfort picked by hand ended the wait; Night, then Resume schedule gave
+    Comfort with no wait (a 0.6 °C push due once the press had settled,
+    Frost picked a second later).  The owner: "If I manually override and
+    then press resume schedule it should resume with the open window".  So
+    a change by hand that ends the wait keeps when the window closed, and
+    Resume schedule goes back to the wait while it would still run."""
+
+    def test_after_a_change_by_hand_it_waits_again(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        room = _in_the_wait(ent, clock)
+        closed = clock.now - 300.0
+        # Comfort by hand ends the wait; once settled its heat-up goes out.
+        _run(ent.async_set_preset_mode("comfort"))
+        assert not ent._window_ctrl.close_delay_active
+        _settle(clock)
+        assert _temps(ent)[-1] == 25.0
+        offs = len(_offs(ent))
+        _run(ent.async_set_preset_mode("eco"))
+        clock.tick(20.0)
+        _run(ent.async_resume_schedule())
+        win = ent._window_ctrl
+        assert win.is_active and win.close_delay_active
+        assert win.close_since == pytest.approx(closed)      # still from the close
+        assert ent.preset_mode == "frost_protection"
+        assert win.get_saved().preset == "comfort"
+        assert ent.extra_state_attributes["schedule_override_active"] is False
+        assert [t["delay"] for t in _close_timers()] == [60.0]
+        assert len(_offs(ent)) > offs                        # the heat taken back at once
+        assert any("heating waits again" in e.text for e in ent._activity.entries())
+        # The wait then runs as after any close.
+        heat = len(_temps(ent))
+        room = _recover(ent, clock, room, 3.0, 5)
+        _fire("_async_window_close_action")
+        assert win.close_delay_active and len(_temps(ent)) == heat
+        _wait_ends(ent, clock, room)
+        assert ent.preset_mode == "comfort"
+
+    def test_within_the_close_delay_the_rest_of_it(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        _open_window(ent, clock)
+        _close_window(ent)
+        _recover(ent, clock, 18.0, 12.0, 2)
+        _run(ent.async_set_temperature(temperature=21.0))
+        assert not ent._window_ctrl.close_delay_active
+        clock.tick(60.0)                                     # 3 min after the close
+        _run(ent.async_resume_schedule())
+        assert ent._window_ctrl.close_delay_active
+        assert [t["delay"] for t in _close_timers()] == [pytest.approx(120.0)]
+        assert ent.preset_mode == "frost_protection"
+        assert ent._window_ctrl.get_saved().preset == "comfort"
+
+    def test_a_boost_is_ended_too(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        _in_the_wait(ent, clock)
+        _run(ent.async_set_preset_mode("boost"))
+        assert ent.preset_mode == "boost"
+        _run(ent.async_resume_schedule())
+        assert ent._boost_cancel is None
+        assert [t for t in _active_timers()
+                if getattr(t["callback"], "__name__", "") == "_async_boost_expired"] == []
+        assert ent.preset_mode == "frost_protection"
+        assert ent._window_ctrl.get_saved().preset == "comfort"
+
+    def test_not_once_the_re_warm_has_slowed(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        room = _in_the_wait(ent, clock)
+        _run(ent.async_set_preset_mode("eco"))
+        _recover(ent, clock, room, 0.3, 12)
+        _run(ent.async_resume_schedule())
+        assert not ent._window_ctrl.is_active
+        assert ent.preset_mode == "comfort"
+        assert ent._window_ctrl.interrupted_close is None
+
+    def test_not_30_min_after_the_close(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        room = _in_the_wait(ent, clock)
+        _run(ent.async_set_preset_mode("eco"))
+        _recover(ent, clock, room, 6.0, 25)                  # still rising fast
+        _run(ent.async_resume_schedule())
+        assert not ent._window_ctrl.is_active
+        assert ent.preset_mode == "comfort"
+
+    def test_not_after_off_then_heat(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        _in_the_wait(ent, clock)
+        _run(ent.async_set_preset_mode("eco"))
+        _run(ent.async_set_hvac_mode(HVACMode.OFF))
+        _run(ent.async_set_hvac_mode(HVACMode.HEAT))
+        _run(ent.async_resume_schedule())
+        assert not ent._window_ctrl.is_active
+        assert ent.preset_mode == "comfort"
+
+    def test_not_after_the_wait_ended_by_itself(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        room = _in_the_wait(ent, clock)
+        _wait_ends(ent, clock, room)
+        _run(ent.async_set_preset_mode("eco"))
+        _run(ent.async_resume_schedule())
+        assert not ent._window_ctrl.is_active
+        assert ent.preset_mode == "comfort"
+
+    def test_while_nobody_is_home_back_to_away_after_the_wait(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, {"presence_away_delay_s": 60}, schedule="comfort",
+                      presence=True)
+        ent.hass.set(PRESENCE, "off")
+        ent._async_presence_changed(_event("off"))
+        _fire("_async_presence_away_action")
+        assert ent.preset_mode == "away"
+        room = _in_the_wait(ent, clock)
+        _run(ent.async_set_preset_mode("comfort"))          # by hand while out
+        assert ent.preset_mode == "comfort"
+        assert ent.extra_state_attributes["presence_override_active"] is True
+        _run(ent.async_resume_schedule())
+        assert ent.extra_state_attributes["presence_override_active"] is False
+        assert ent._window_ctrl.close_delay_active
+        assert ent.preset_mode == "frost_protection"
+        assert ent._window_ctrl.get_saved().preset == "away"
+        _wait_ends(ent, clock, room)
+        assert ent.preset_mode == "away"
 
 
 class TestTunerAfterAWindow:

@@ -159,7 +159,10 @@ class ScheduleMixin:
 
         During a window's close delay it is saved for the wait's end, like
         any change while the window is open: it asks for no heat now, so the
-        room keeps re-warming on its own (2.19.2).
+        room keeps re-warming on its own (2.19.2).  After a change by hand
+        ended that wait it goes back to it while the wait would still run
+        (:meth:`_resume_window_wait`), and regulates at once, so heat the
+        change had started is taken back.
         """
         self._summer_guard("resume schedule")
         if not self.schedule_configured:
@@ -171,12 +174,16 @@ class ScheduleMixin:
         self.note_change_by_hand()
         self._schedule_ctrl.clear_override()
         self._log(_LOGGER).info("schedule resumed")
+        window_wait = self._resume_window_wait()
         if self._presence_ctrl.nobody_home:
             await self._async_back_to_automatic(
                 "Resume schedule", trigger="resume_schedule"
             )
-            return
-        await self._async_follow_schedule(trigger="resume_schedule")
+        else:
+            await self._async_follow_schedule(trigger="resume_schedule")
+        if window_wait:
+            self._write_state_with_binary_sensor()
+            await self._async_regulation_cycle(trigger="resume_schedule")
 
     async def _async_follow_schedule(self, trigger: str) -> None:
         """Apply the schedule's preset (routed via window/presence if active)."""

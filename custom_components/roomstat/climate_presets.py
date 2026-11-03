@@ -210,13 +210,74 @@ class PresetMixin:
         close would), so the change applies on top of the real state: a
         Boost then ends on the preset from before the window, not on its
         frost protection, and while nobody is home the room is in away mode
-        again, for :meth:`_presence_takeover` to leave properly.
+        again, for :meth:`_presence_takeover` to leave properly.  When the
+        window closed is kept: Resume schedule goes back to the wait while
+        it would still run (:meth:`_resume_window_wait`).
         """
         if not self._window_ctrl.close_delay_active:
             return
         self._log(_LOGGER).info("window close delay ended, %s", reason)
-        self._window_ctrl.cancel_timers()  # the close timer must not fire later
+        self._window_ctrl.interrupt_close_delay()  # the close timer must not fire later
         self._restore_window_state(notify=False)
+
+    def _resume_window_wait(self) -> bool:
+        """Resume schedule after a change by hand ended a window's close
+        delay goes back to it while it would still run (owner, 3 Nov 2026:
+        "If I manually override and then press resume schedule it should
+        resume with the open window"): within the configured delay, or
+        while the room still re-warms on its own (:func:`window_recovery_wait`,
+        counted from the close, so at most WINDOW_RECOVERY_MAX_S after it).
+        The room is in the window's frost protection again, with its preset
+        (the pre-boost one during a Boost) saved for the wait's end; the
+        caller routes the schedule's preset on top, which is saved there
+        too.  Returns True when the wait was resumed (the caller regulates:
+        heat a change by hand had started is taken back at once)."""
+        ctrl = self._window_ctrl
+        interrupted = ctrl.interrupted_close
+        if interrupted is None:
+            return False
+        if ctrl.is_active or self._summer_active or self._hvac_mode == HVACMode.OFF:
+            ctrl.forget_interrupted_close()
+            return False
+        closed, delay_s = interrupted
+        waited = max(0.0, time.time() - closed)   # a clock gone back: from now
+        if waited < delay_s:
+            timer_s = delay_s - waited
+            rewarming = False
+        else:
+            slope, sensor_ok = self._room_recovery_slope()
+            if not window_recovery_wait(
+                slope, waited, sensor_ok=sensor_ok,
+                max_wait_s=WINDOW_RECOVERY_MAX_S,
+                rate_c_per_h=WINDOW_RECOVERY_RATE_C_PER_H,
+            ):
+                ctrl.forget_interrupted_close()   # the wait would be over by now
+                return False
+            timer_s = WINDOW_RECOVERY_POLL_S
+            rewarming = True
+        if self._boost_cancel is not None:
+            self._boost_cancel()
+            self._boost_cancel = None
+            self._boost_end_ts = 0.0
+            saved = SavedState(self._boost_saved_preset, self._boost_saved_temp)
+        else:
+            saved = SavedState(self._preset_mode, self._target_temp)
+        if not ctrl.resume_close_delay(
+            self.hass, timer_s, self._async_window_close_action, saved
+        ):
+            return False
+        self._preset_mode = PRESET_FROST_PROTECTION
+        # The close action says "room recovery over" when the wait ends.
+        self._window_recovery_logged = rewarming
+        self._log(_LOGGER).info(
+            "Resume schedule: the window closed %d min ago and %s, so heating "
+            "waits again (at most %d min after the close)",
+            int(waited / 60),
+            "the room is still re-warming on its own" if rewarming
+            else "its close delay is still running",
+            int(max(delay_s, WINDOW_RECOVERY_MAX_S) / 60),
+        )
+        return True
 
     def _restore_window_state(self, notify: bool = True) -> None:
         """Restore preset after window is closed.

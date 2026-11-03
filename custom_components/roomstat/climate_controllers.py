@@ -167,6 +167,11 @@ class WindowAutomationController:
         self._close_timer: _CancelFn | None = None
         self._close_since: float | None = None
         self._close_delay_s: float = 0.0     # the configured delay of the wait running
+        # A close delay a change by hand ended (``interrupt_close_delay``):
+        # when the window closed and the configured delay, so Resume
+        # schedule can go back to the wait (``resume_close_delay``).
+        self._interrupted_since: float | None = None
+        self._interrupted_delay_s: float = 0.0
         self._saved: SavedState = SavedState()
 
     # ------------------------------------------------------------------
@@ -204,6 +209,14 @@ class WindowAutomationController:
         """The configured close delay of the wait running (0 when none)."""
         return self._close_delay_s if self._close_timer is not None else 0.0
 
+    @property
+    def interrupted_close(self) -> tuple[float, float] | None:
+        """A close delay a change by hand ended: when the window closed and
+        the configured delay (None when there is none to go back to)."""
+        if self._interrupted_since is None:
+            return None
+        return self._interrupted_since, self._interrupted_delay_s
+
     def get_saved(self) -> SavedState:
         """Return a copy of the currently saved preset/temperature."""
         return SavedState(preset=self._saved.preset, temp=self._saved.temp)
@@ -226,6 +239,7 @@ class WindowAutomationController:
         during the restore countdown), cancel that timer and stay in frost
         protection without restarting the open-delay countdown.
         """
+        self.forget_interrupted_close()      # a new airing: that wait is over
         if self._close_timer is not None:
             self._close_timer()
             self._close_timer = None
@@ -279,6 +293,7 @@ class WindowAutomationController:
             self._close_timer = None
         self._close_since = None
         self._close_delay_s = 0.0
+        self.forget_interrupted_close()
 
         if not self.is_active:
             # Window closed before the open-delay fired – nothing to restore.
@@ -315,6 +330,48 @@ class WindowAutomationController:
             self._close_since = _time_now()
         _cl = call_later or _get_call_later()
         self._close_timer = _cl(hass, delay_s, on_timer_expire)
+
+    def interrupt_close_delay(self) -> None:
+        """A change by hand ends the close delay: its timer is cancelled,
+        and when the window closed is kept for :meth:`resume_close_delay`.
+        The caller restores the saved state (:meth:`restore`) next."""
+        if self._close_timer is None:
+            return
+        self._interrupted_since = self._close_since
+        self._interrupted_delay_s = self._close_delay_s
+        self._close_timer()
+        self._close_timer = None
+
+    def resume_close_delay(
+        self,
+        hass: Any,
+        delay_s: float,
+        on_timer_expire: Callable,
+        saved: SavedState,
+        *,
+        call_later: _CallLaterFn | None = None,
+    ) -> bool:
+        """Go back to the close delay a change by hand ended (Resume
+        schedule): active again with *saved* as what the end of the wait
+        restores, the close timer armed in *delay_s*, and the wait still
+        counted from the close.  False (nothing changed) when there is no
+        such wait, or the window is open or pending again."""
+        if self._interrupted_since is None or self.is_active or self._open_timer is not None:
+            return False
+        _cl = call_later or _get_call_later()
+        self._saved = SavedState(preset=saved.preset, temp=saved.temp)
+        self.is_active = True
+        self._close_since = self._interrupted_since
+        self._close_delay_s = self._interrupted_delay_s
+        self._close_timer = _cl(hass, delay_s, on_timer_expire)
+        self.forget_interrupted_close()
+        return True
+
+    def forget_interrupted_close(self) -> None:
+        """No going back to an ended close delay (a new airing, the room
+        switched off or on by hand, or the wait would be over)."""
+        self._interrupted_since = None
+        self._interrupted_delay_s = 0.0
 
     # ------------------------------------------------------------------
     # State mutations called by the climate entity
@@ -368,6 +425,7 @@ class WindowAutomationController:
     def cancel_all(self) -> None:
         """Cancel all timers and reset to idle state (e.g. user override)."""
         self.cancel_timers()
+        self.forget_interrupted_close()
         self.is_active = False
         self._saved = SavedState()
 

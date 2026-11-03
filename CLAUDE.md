@@ -934,6 +934,21 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   min after the close, the room 0.3 under Comfort and re-warming 1.8 °C/h
   by itself, ended the wait, and the hold sent 18.9 (1.2 over the valve's
   reading, 93 % until Frost protection was picked 24 s later).
+  **Resume schedule after a change by hand goes back to the wait** (2.19.3;
+  owner, 3 Nov 2026: "If I manually override and then press resume
+  schedule it should resume with the open window"): a change by hand that
+  ends it keeps when the window closed (`interrupt_close_delay`,
+  `interrupted_close`), and Resume schedule (`_resume_window_wait`, also
+  while nobody is home) puts the room back in the window's frost
+  protection, the wait counted from the close, while it would still run:
+  within the configured delay (the timer for the rest of it), or while
+  `window_recovery_wait` says the room still re-warms (a 60-s poll); then
+  a cycle at once, so heat the change started is taken back. Not once the
+  wait would be over, after a new open or close, or after Off or Heat by
+  hand (`forget_interrupted_close`); not kept across a reload (the wait
+  itself restarts from a reload). 08:24 that morning: Comfort by hand ended
+  the wait, then Night, then Resume schedule gave Comfort with a 0.6 °C
+  push due once settled.
 - A sticky schedule override belongs to an Away or Off picked by hand. Away
   mode turns a manual Away into away mode (it never saves AWAY), so the away
   action clears the sticky override then; one still left behind (older

@@ -1150,6 +1150,10 @@ class RoomstatClimate(
         # until 2.10.4 it ended the window's frost protection, so the preset
         # after it heated at full power with the window open (25 Oct 2026,
         # master bedroom 11:09, second bedroom 17:12).
+        if hvac_mode != self._hvac_mode:
+            # Off, then Heat ends the window state by hand: no going back to
+            # a close delay a change by hand ended either.
+            self._window_ctrl.forget_interrupted_close()
         if self._window_ctrl.is_active and hvac_mode != self._hvac_mode:
             saved = self._window_ctrl.get_saved()
             self._window_ctrl.cancel_all()

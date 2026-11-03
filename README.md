@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.19.2-blue)
+![Version](https://img.shields.io/badge/version-2.19.3-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -111,8 +111,9 @@ changes.
   come back, then "Window · up to 18 min" while the room is still re-warming (the
   activity log adds the re-warm rate). A preset, Boost or temperature you
   pick meanwhile ends the wait; Resume schedule and the schedule itself
-  don't: they take effect when it ends. Auto-tune does not learn from the
-  heating that follows a window.
+  don't: they take effect when it ends. Resume schedule after such a change
+  goes back to the wait, if the room would still be in it. Auto-tune does
+  not learn from the heating that follows a window.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
 - **Valve look-ahead (experimental).** A Tado valve looks ahead on how fast
