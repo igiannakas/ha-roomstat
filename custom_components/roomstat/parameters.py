@@ -542,13 +542,33 @@ class RegulationConfig:
     # just below its reading (0.05-0.08 °C RMS, +0.3 °C peaks).
     # Both are options per room since 2.20.0 (hold_band_option; owner, 3 Nov
     # 2026: "The -0.1 / +0.1 target is currently hard coded. Can you make
-    # this a parameter?"), 0.05-0.5.  Dosed top-ups keep their own zone
+    # this a parameter?"), 0.1-0.5 in tenths.  Dosed top-ups keep their own zone
     # (DoseConfig): with them on, these apply only while the ordinary modes
     # run (a window, Boost).
     stop_over_c: float = 0.1
     stop_lead_s: float = 600.0
     release_below_c: float = 0.10
-    release_lead_s: float = 1200.0
+    # The release's look-ahead: 10 min since 2.21.0 (20 since 11 Oct 2026,
+    # chosen then for a radiator lag of 30-35 min, never measured), and an
+    # option per room (release_lead_option; owner, 3 Nov 2026).  Measured on
+    # 43 clean releases, 25 Oct - 3 Nov 2026 (stop -> hold, the room
+    # falling, no window, target step or new stop before its trough): the
+    # 20-min forecast, not the line, released 42 of them, 16 while the room
+    # was still above the target (15 of 25 in the living room), where the
+    # hold asks for less than the valve's reading and a Tado trickles; the
+    # valve answered a median 1.4 min after, the room bottomed out a median
+    # 4.5 min after (3-9.5; the second bedroom 5-52 on pushes of +0.1-0.3)
+    # only 0.04 lower, so 0.07 under the target: the band's lower half went
+    # mostly unused, and the peaks after were +0.20 median (+0.26 after a
+    # release above the target, +0.17 at or under it).  Replayed on the same
+    # releases (straight-line falls), 20 -> 10 min at a 0.2 line: releases
+    # above the target 9 -> 2 of 43, troughs 0.12 -> 0.18 under.  10, not
+    # the 4.5 measured: part of that quick turn is the room's own fall
+    # slowing after a stop, and 10 is the stop's own minimum look-ahead.
+    # The braking time is not this delay: it is a full radiator's coast
+    # after a heat-up (10-30 min here), a release opens the valve partly on
+    # a radiator still warm.
+    release_lead_s: float = 600.0
 
     # Valve look-ahead (lookahead.py, an option per room, 2.14.0): while the
     # valve's own reading falls faster than this, a hold command is lowered
@@ -658,10 +678,12 @@ class LookaheadConfig:
 # Dosed top-ups (dosing.py, climate_dosing.py)
 # ---------------------------------------------------------------------------
 
-# The dosing zone's options (DoseConfig.zone_above_c / zone_below_c), °C.
-DOSE_ZONE_MIN_C = 0.05
+# The dosing zone's options (DoseConfig.zone_above_c / zone_below_c), °C,
+# in tenths since 2.21.0 (0.05 steps from 2.17.0; owner, 3 Nov 2026: "these
+# numbers must be at 0.1C granularity").
+DOSE_ZONE_MIN_C = 0.1
 DOSE_ZONE_MAX_C = 0.5
-DOSE_ZONE_STEP_C = 0.05
+DOSE_ZONE_STEP_C = 0.1
 
 
 def _option_in_range(value: object, default: float, lo: float, hi: float) -> float:
@@ -676,25 +698,54 @@ def _option_in_range(value: object, default: float, lo: float, hi: float) -> flo
     return round(number, 3)
 
 
+def _tenths_option(value: object, default: float, lo: float, hi: float) -> float:
+    """A temperature option in tenths (°C): the value, to the nearest tenth
+    (halves up: 0.15 is 0.2), when that is within lo..hi, otherwise the
+    default.  A value saved in hundredths by an older version (0.05 steps)
+    is read in tenths: 0.05, the old minimum, is 0.1."""
+    number = _option_in_range(value, float("nan"), -math.inf, math.inf)
+    if math.isnan(number):
+        return default
+    tenths = math.floor(number * 10.0 + 0.5 + 1e-9) / 10.0
+    if not lo - 1e-9 <= tenths <= hi + 1e-9:
+        return default
+    return round(tenths, 1)
+
+
 def dose_zone_option(value: object, default: float) -> float:
-    """A dosing zone option (°C): the value when it is a number within
+    """A dosing zone option (°C): the value in tenths when within
     DOSE_ZONE_MIN_C..DOSE_ZONE_MAX_C, otherwise the default."""
-    return _option_in_range(value, default, DOSE_ZONE_MIN_C, DOSE_ZONE_MAX_C)
+    return _tenths_option(value, default, DOSE_ZONE_MIN_C, DOSE_ZONE_MAX_C)
 
 
 # The hold's band (RegulationConfig.stop_over_c / release_below_c), options
-# per room since 2.20.0, °C.  At least 0.05: a stop at the target itself
-# was dropped (2-3x the commands), and a release at or above it parks the
-# hold just below the valve's reading, where a Tado trickles.
-HOLD_BAND_MIN_C = 0.05
+# per room since 2.20.0, °C, in tenths since 2.21.0 (0.05 steps in 2.20.0).
+# At least 0.1: a stop at the target itself was dropped (2-3x the
+# commands), and a release at or above it parks the hold just below the
+# valve's reading, where a Tado trickles.
+HOLD_BAND_MIN_C = 0.1
 HOLD_BAND_MAX_C = 0.5
-HOLD_BAND_STEP_C = 0.05
+HOLD_BAND_STEP_C = 0.1
 
 
 def hold_band_option(value: object, default: float) -> float:
-    """A hold band option (°C): the value when it is a number within
+    """A hold band option (°C): the value in tenths when within
     HOLD_BAND_MIN_C..HOLD_BAND_MAX_C, otherwise the default."""
-    return _option_in_range(value, default, HOLD_BAND_MIN_C, HOLD_BAND_MAX_C)
+    return _tenths_option(value, default, HOLD_BAND_MIN_C, HOLD_BAND_MAX_C)
+
+
+# The release's look-ahead (RegulationConfig.release_lead_s), an option per
+# room since 2.21.0, in minutes.  0: heat again only at the release line.
+RELEASE_LEAD_MIN_MIN = 0
+RELEASE_LEAD_MAX_MIN = 30
+
+
+def release_lead_option(value: object, default_s: float) -> float:
+    """The release look-ahead option (minutes) as seconds: the value when it
+    is a number within RELEASE_LEAD_MIN_MIN..RELEASE_LEAD_MAX_MIN, otherwise
+    the default (seconds)."""
+    minutes = _option_in_range(value, float("nan"), RELEASE_LEAD_MIN_MIN, RELEASE_LEAD_MAX_MIN)
+    return default_s if math.isnan(minutes) else minutes * 60.0
 
 
 @dataclass

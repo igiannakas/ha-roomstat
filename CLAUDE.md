@@ -136,7 +136,8 @@ modules.
 - `climate_activity.py`: the room's activity log on the entity: a decision
   line at every cycle exit, events from `self._log(_LOGGER)`, auto-tune
   verdicts, the sensor's state and attributes, persistence (`activity`).
-- `number.py`: preset temperatures. `sensor.py`: boost remaining, schedule
+- `number.py`: preset temperatures (tenths, step 0.1 since 2.21.0, as the
+  thermostat). `sensor.py`: boost remaining, schedule
   override remaining, auto-tune sensors, and the regulation trace (command to
   the valve, room error as measurement sensors — long-term statistics outlive
   the recorder's purge, 7 days on the owner's 3-GB MariaDB — and the mode as
@@ -223,7 +224,7 @@ Read this before changing `regulation.py` or `parameters.py`.
     radiator's coast is the same however the heat got there (11 Oct: a
     0.6 °C step handled by hold got a 10-min look-ahead while the coast was
     19 min, +0.5 °C peak). Released only once the room is predicted to
-    need heat: error + `release_lead_s` (20 min) × fall ≥
+    need heat: error + `release_lead_s` (10 min since 2.21.0, see below) × fall ≥
     `release_below_c` (0.1 °C below the target; 0.05 in 2.7.0, 0.1 since
     2.7.1 by the owner's choice: some time a little under rather than
     always a little over. Simulated: hold RMS +0.01, overshoot and
@@ -242,11 +243,13 @@ Read this before changing `regulation.py` or `parameters.py`.
     the simulator does not reproduce the trickle, so the live traces are
     the evidence.
     **Both lines are options per room** (2.20.0, `hold_stop_over_c` /
-    `hold_release_below_c`, Controller section, 0.05–0.5 in 0.05 steps,
-    `hold_band_option`: out of range keeps 0.1; owner, 3 Nov 2026: "The
-    -0.1 / +0.1 target is currently hard coded. Can you make this a
-    parameter?"). The minimum 0.05 keeps the two rules above: no stop at
-    the target itself, no flat release at or above it. Dosed top-ups keep
+    `hold_release_below_c`, Controller section, 0.1–0.5 in tenths since
+    2.21.0 (0.05 steps in 2.20.0; owner, 3 Nov 2026: "these numbers must be
+    at 0.1C granularity"), `hold_band_option`: read to the nearest tenth,
+    halves up, out of range keeps 0.1; owner, 3 Nov 2026: "The -0.1 / +0.1
+    target is currently hard coded. Can you make this a parameter?"). The
+    minimum 0.1 keeps the two rules above: no stop at the target itself, no
+    flat release at or above it. Dosed top-ups keep
     their own zone (with them on, these apply only in the ordinary modes: a
     window, Boost). The activity line names a line between tenths with two
     decimals (`_line_c`: "heats again at 19.75"). The auto-tuner is told the
@@ -263,6 +266,34 @@ Read this before changing `regulation.py` or `parameters.py`.
     band it stayed at 0.00035. A higher stop line also keeps the hold
     running over the target, commanding under the valve's reading, where a
     Tado trickles (the help text says so).
+    **The release look-ahead is 10 min and an option** (2.21.0,
+    `hold_release_lead_min`, Controller section, 0–30 min, 0 = only at the
+    line, `release_lead_option`; owner, 3 Nov 2026). It was 20 min from
+    11 Oct 2026, set then for a radiator lag of 30–35 min and never
+    measured. Measured on 43 clean releases 25 Oct – 3 Nov 2026 (stop →
+    hold, the room falling, no window, target step or new stop before its
+    trough; scratch `release_lead/`): the 20-min forecast, not the line,
+    released 42 of them, 16 while the room was still above the target (15 of
+    25 in the living room), where the hold asks for less than the valve's
+    reading; the valve answered a median 1.4 min after, and the room
+    bottomed out a median 4.5 min after (IQR 3–9.5; the second bedroom 5–52
+    min, its pushes only +0.1–0.3) and only 0.04 lower, 0.07 under the
+    target: the band's lower half went mostly unused, and the peaks after
+    were +0.20 median (+0.26 after a release above the target, +0.17 at or
+    under it). Straight-line replay of the same releases at a 0.2 line: 20
+    → 10 min, releases above the target 9 → 2 of 43, troughs 0.12 → 0.18
+    under (5 min: 0 and 0.20). 10, not the 4.5 measured: part of that quick
+    turn is the room's fall slowing by itself after a stop, and 10 is the
+    stop's own minimum look-ahead. Not the braking time, which is a full
+    radiator's coast after a heat-up (10–30 min here, the second bedroom's
+    30); a release opens the valve partly on a radiator still warm. Not
+    learned per room yet: the troughs are noisy (the second bedroom's
+    spread) and biased short. A side effect: rooms spend longer shut, so
+    the auto-tuner's hold windows reach its 20 % heating bar less often;
+    `test_coarse_sensor_still_calms_oscillation` (a simulator room whose
+    valve heats long after a stop, 23 → 17 % in hold) is calmed on 20 min
+    and left alone on 10, its swing no worse than untuned. The option-off
+    dosing trace test runs on 2.14.1's 20 min.
   - `dose` (2.15.0, the option `dosed_topups`; two phases since 2.16.0):
     a heat-up (`heatup_enter_c` or more short) runs as above, heat then
     coast; everything else is the dosing phase, where a full-power pulse
@@ -467,7 +498,7 @@ be read.
   names what keeps it shut (2.10.4): still rising below the stop's line,
   the overshoot forecast (`on that slope it would pass 20.1 within 25 min,
   so it stays off`); otherwise where it heats again (`heats again at 19.9,
-  or 20 min ahead of it once falling`, with the 20-min forecast only while
+  or 10 min ahead of it once falling`, the release look-ahead, with its forecast only while
   falling). 26 Oct 06:42 it read `heats again once heading 0.1 below within
   20 min (predicted: 0.11 below)` — met on paper while the valve stayed
   shut, the release only looking at falls. A coast whose target fell below
@@ -1346,7 +1377,8 @@ evidence: project docs
   the one before the two phases, 2.16.0 (d81590d) the one before the zone
   and the pooled learner; the option off is 2.14.1's regulation (below).
 - **The zone (2.17.0, options per room `dose_zone_above_c` 0.2 and
-  `dose_zone_below_c` 0.1, 0.05–0.5, `DoseConfig.zone_above_c` /
+  `dose_zone_below_c` 0.1, 0.1–0.5 in tenths since 2.21.0 (0.05 steps
+  before), `DoseConfig.zone_above_c` /
   `zone_below_c`, `dose_zone_option`: out of range keeps the default;
   owner, 1 Nov 2026: "Aim for +0.2C / -0.1C as the zone. The +/-0.1c
   appears to be cycling the boiler too often", and "make this target an
@@ -1950,7 +1982,10 @@ ruff check .
 - `tests/test_hold_band.py` (2.20.0: the hold's band options, the
   regulator's stop and release on them, the activity line's numbers, the
   tuner's thresholds following the band, through the entity with and
-  without a reload).
+  without a reload; 2.21.0: the release look-ahead option).
+- `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
+  step and store tenths, as the thermostat does; a step of 0.5 refused a
+  Comfort of 20.6 in the UI).
 - `tests/test_off_and_automatic_while_away.py` (Off until someone is home,
   Away and Resume schedule while out back to automatic, the 27 Oct 2026 day
   replayed, restarts and pre-2.12 snapshots).

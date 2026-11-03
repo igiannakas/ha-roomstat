@@ -90,7 +90,10 @@ class PresetTemperatureNumber(CoordinatorEntity, NumberEntity):
     _attr_mode = NumberMode.BOX
     _attr_native_min_value = 5.0
     _attr_native_max_value = 30.0
-    _attr_native_step = 0.5
+    # Tenths, as the thermostat works in (climate.py PRECISION_TENTHS): with
+    # 0.5 the box refused a Comfort of 20.6 ("Enter a valid value"; owner,
+    # 3 Nov 2026) though the thermostat holds tenths.
+    _attr_native_step = 0.1
 
     def __init__(self, coordinator, entry: ConfigEntry, desc: PresetNumberDescription) -> None:
         """Initialize the preset temperature number entity."""
@@ -121,7 +124,9 @@ class PresetTemperatureNumber(CoordinatorEntity, NumberEntity):
             _LOGGER.warning("Ignoring non-finite preset temperature value: %s", value)
             return
         # Clamp to configured bounds (service calls bypass frontend validation)
-        value = max(self._attr_native_min_value, min(self._attr_native_max_value, value))
+        # and keep tenths, the step (a float like 20.600000000000001 from a
+        # slider or an automation is stored as 20.6).
+        value = round(max(self._attr_native_min_value, min(self._attr_native_max_value, value)), 1)
         # A change by hand: more heat from it settles first (it reloads the
         # room; the thermostat keeps the time in its restore data).
         climate = getattr(self.coordinator, "climate_entity", None)

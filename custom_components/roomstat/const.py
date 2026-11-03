@@ -139,6 +139,9 @@ CONF_INTEGRAL_DEADBAND_C = "integral_deadband_c"
 # this far under (RegulationConfig.stop_over_c / release_below_c).
 CONF_HOLD_STOP_OVER_C = "hold_stop_over_c"
 CONF_HOLD_RELEASE_BELOW_C = "hold_release_below_c"
+# How far ahead a falling room is released (2.21.0, minutes;
+# RegulationConfig.release_lead_s).
+CONF_HOLD_RELEASE_LEAD_MIN = "hold_release_lead_min"
 
 
 # ---------------------------------------------------------------------------

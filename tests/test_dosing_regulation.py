@@ -865,8 +865,8 @@ class TestZone:
 
     @pytest.mark.parametrize("value, expected", [
         (None, 0.2), ("", 0.2), ("x", 0.2), (float("nan"), 0.2), (float("inf"), 0.2),
-        (0.04, 0.2), (0.55, 0.2), (0.05, 0.05), (0.5, 0.5), ("0.3", 0.3),
-        (0.15000000000000002, 0.15),
+        (0.04, 0.2), (0.55, 0.2), (0.05, 0.1), (0.1, 0.1), (0.5, 0.5), ("0.3", 0.3),
+        (0.15000000000000002, 0.2), (0.15, 0.2),
     ])
     def test_an_option_out_of_range_keeps_the_default(self, value, expected):
         assert P.dose_zone_option(value, 0.2) == pytest.approx(expected)

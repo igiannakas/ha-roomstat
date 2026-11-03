@@ -87,6 +87,7 @@ from .const import (
     CONF_FROST_PROTECTION_TARGET,
     CONF_HEAT_TIMER_S,
     CONF_HOLD_RELEASE_BELOW_C,
+    CONF_HOLD_RELEASE_LEAD_MIN,
     CONF_HOLD_STOP_OVER_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
@@ -120,6 +121,7 @@ from .parameters import (
     RegulationConfig,
     dose_zone_option,
     hold_band_option,
+    release_lead_option,
 )
 from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
@@ -488,6 +490,9 @@ class RoomstatClimate(
             )
             config.release_below_c = hold_band_option(
                 opts.get(CONF_HOLD_RELEASE_BELOW_C), config.release_below_c
+            )
+            config.release_lead_s = release_lead_option(
+                opts.get(CONF_HOLD_RELEASE_LEAD_MIN), config.release_lead_s
             )
             # The dosing zone (dosed top-ups): out of range keeps the default.
             config.dose.zone_above_c = dose_zone_option(

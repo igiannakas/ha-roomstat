@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.20.0-blue)
+![Version](https://img.shields.io/badge/version-2.21.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -104,9 +104,13 @@ changes.
   minutes ahead. 0 = no anticipation in heat-ups. Auto-tune can learn it.
 - **The band near the target is yours to set.** **Stop this far over the
   target** and **Heat again this far under the target** (Controller section,
-  0.1 °C each by default, 0.05–0.5) are where the valve is shut ahead of an
+  0.1 °C each by default, 0.1–0.5 in tenths) are where the valve is shut ahead of an
   overshoot and where heating starts again. A wider band means fewer stops
   and restarts and a bigger swing; auto-tune allows for the band's own swing.
+  **Heat again look-ahead** (10 minutes by default, 0–30) is how far ahead a
+  cooling room is released, so the heat arrives about when it bottoms out.
+  Until 2.21.0 it was 20 minutes, which released rooms while they were still
+  warm, often above the target.
 - **After a window closes, the room gets time to re-warm by itself.** The
   walls, furniture and radiator kept their heat; only the air went, and it
   comes back on its own within 15–40 minutes. **Window close delay** is the
@@ -289,7 +293,8 @@ heating power sensor picked under **Valve look-ahead** (for a Tado zone, the
 zone's Heating sensor), to check that each pulse opened the valve.
 
 - **The zone:** two settings in the same section, **Zone above the
-  target** (0.2 °C) and **Zone below the target** (0.1 °C), each 0.05–0.5.
+  target** (0.2 °C) and **Zone below the target** (0.1 °C), each 0.1–0.5
+  in tenths.
   The room may cool to the zone's bottom before the next pulse; each pulse
   aims 0.1 °C under the zone's top (0.1 °C over the target by default,
   never below the target), and a pulse that would take the room over the

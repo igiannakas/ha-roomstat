@@ -1336,8 +1336,11 @@ LIVING = dict(trv_offset_c=-9.9, tau_room_h=50, t_out_c=12, trv_beta_c=6, tado_k
 SCHED = schedule_from([(0, 18.0), (6, 20.0), (8, 5.0), (17, 20.0), (22.5, 18.0)])
 
 
-def _closed_loop(plant_kw, kp, ki, days, sched=SCHED, td=0.0, deriv=True, cfg=None, tune=True):
+def _closed_loop(plant_kw, kp, ki, days, sched=SCHED, td=0.0, deriv=True, cfg=None, tune=True,
+                 release_lead_s=None):
     c = P.RegulationConfig()
+    if release_lead_s is not None:
+        c.release_lead_s = release_lead_s
     c.tuning = P.CorrectionTuning(kp=kp, ki=ki, td_s=td)
     tuner = _tuner(kp=kp, ki=ki, td=td, deriv=deriv, cfg=cfg) if tune else None
     sim = RoomSim(PlantParams(**plant_kw), R, c, ProxySettings(), y0=19.0,
@@ -1395,15 +1398,33 @@ class TestClosedLoop:
 
     @pytest.mark.parametrize("period", [30.0, 300.0])
     def test_coarse_sensor_still_calms_oscillation(self, period):
-        """0.1 °C sensor whose HA timestamp only changes with the value."""
+        """0.1 °C sensor whose HA timestamp only changes with the value.
+
+        This room's valve keeps heating long after a stop (a 2000-min Tado
+        integrator, from the days of 5 °C stops; real valves are switched
+        off since 2.8.4), so it sits in stop 85-90 % of the time.  With the
+        20-min release look-ahead of 2.20 it was in hold ~23 % of the time,
+        over the 20 % a hold window needs to be judged, and the tuner calmed
+        it; with today's 10 min ~17 %, so every window is a passive
+        cool-down to the tuner (by design: hold_min_heating_fraction) at
+        any outdoor temperature.  The look-ahead itself leaves the swing as
+        it was: no worse than the untuned room on 20 min (3 Nov 2026)."""
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8,
                      mix_lag_min=6, sensor_resolution_c=0.1, sensor_period_s=period)
         flat = schedule_from([(0, 20.0)])
-        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
-        idx = tr.window(5 * DAY, 7 * DAY)
-        e = [tr.sp[i] - tr.y_true[i] for i in idx]
-        assert max(e) - min(e) < 0.7
+
+        def swing(tr):
+            idx = tr.window(5 * DAY, 7 * DAY)
+            e = [tr.sp[i] - tr.y_true[i] for i in idx]
+            return max(e) - min(e)
+
+        tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, release_lead_s=1200.0)
+        assert swing(tr) < 0.7
         assert tuner.summary()["holds_analysed"] > 5
+        _, untuned = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, tune=False,
+                                  release_lead_s=1200.0)
+        _, today = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
+        assert swing(today) <= swing(untuned) + 0.02
 
     def test_coarse_sensor_still_learns_braking(self):
         plant = dict(LIVING, sensor_resolution_c=0.1, sensor_period_s=300.0)

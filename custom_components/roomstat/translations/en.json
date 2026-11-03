@@ -133,6 +133,7 @@
               "integral_deadband_c": "Integral precision zone",
               "hold_stop_over_c": "Stop this far over the target",
               "hold_release_below_c": "Heat again this far under the target",
+              "hold_release_lead_min": "Heat again look-ahead",
               "derivative_time_min": "Heat-up braking time"
             },
             "data_description": {
@@ -140,7 +141,8 @@
               "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster.",
               "integral_deadband_c": "The integral only builds up when the room is this close to the target, so heat-ups never wind it up.",
               "hold_stop_over_c": "Near the target, the valve is shut once the room is predicted to be this far over the target within the braking time (at least 10 min). The radiator's leftover heat can still take it a little higher. Below this line, over the target, the valve is asked for less than its own reading, where a Tado can still trickle, so a higher line lets the room run warmer.",
-              "hold_release_below_c": "After a stop, heating starts again only once the room is predicted to be this far under the target within 20 min. With the stop above, this is the band the room swings in: a wider band means fewer stops and restarts and a bigger swing, but not always fewer commands. Auto-tune allows for the band's own swing. Dosed top-ups use their own zone instead.",
+              "hold_release_below_c": "After a stop, heating starts again only once the room is predicted to be this far under the target within the heat again look-ahead below (10 min unless changed). With the stop above, this is the band the room swings in: a wider band means fewer stops and restarts and a bigger swing, but not always fewer commands. Auto-tune allows for the band's own swing. Dosed top-ups use their own zone instead.",
+              "hold_release_lead_min": "A cooling room heats again this many minutes before it is predicted to reach the line above, so the heat arrives about when the room bottoms out. Measured here, a room stops cooling about 3-10 min after its valve reopens; longer releases rooms while they are still warm, often above the target, and they then overshoot. 0 = heat again only at the line.",
               "derivative_time_min": "How far ahead Roomstat predicts where the radiator's leftover heat will carry the room, and so how early heating stops, in heat-ups and near the target (there at least 10 min). 0 = no anticipation in heat-ups. When auto-tune learns braking, this is only its starting value."
             }
           },

@@ -4,8 +4,8 @@ The owner, 3 Nov 2026: "The -0.1 / +0.1 target is currently hard coded. Can
 you make this a parameter?"  Near the target the valve is shut once the room
 is predicted to be ``stop_over_c`` over the target, and heats again once it
 is predicted to be ``release_below_c`` under it.  Both are options now
-(``hold_stop_over_c``, ``hold_release_below_c``, 0.05-0.5, out of range keeps
-the stock 0.1).
+(``hold_stop_over_c``, ``hold_release_below_c``, 0.1-0.5 in tenths since
+2.21.0, out of range keeps the stock 0.1).
 
 The auto-tuner judges the hold's swings: a swing beyond +-0.15 °C around the
 mean is an oscillation (Kp or Ki cut) and +-0.3 an emergency (both cut).  The
@@ -56,15 +56,40 @@ class TestTheOption:
         assert (at.hold_band_over_c, at.hold_band_under_c) == (0.1, 0.1)
 
     @pytest.mark.parametrize(("value", "expected"), [
-        (0.2, 0.2), ("0.3", 0.3), (0.05, 0.05), (0.5, 0.5),
-        (0.04, 0.1), (0.0, 0.1), (-0.2, 0.1), (0.55, 0.1),
+        (0.2, 0.2), ("0.3", 0.3), (0.1, 0.1), (0.5, 0.5),
+        (0.05, 0.1), (0.04, 0.1), (0.0, 0.1), (-0.2, 0.1), (0.55, 0.1),
         (None, 0.1), ("x", 0.1), (float("nan"), 0.1), (float("inf"), 0.1),
     ])
     def test_out_of_range_keeps_the_default(self, value, expected):
         assert P.hold_band_option(value, 0.1) == pytest.approx(expected)
 
-    def test_the_dosing_zone_option_is_unchanged(self):
-        assert P.dose_zone_option(0.35, 0.2) == pytest.approx(0.35)
+    @pytest.mark.parametrize(("value", "expected"), [
+        (0.05, 0.1), (0.15, 0.2), (0.25, 0.3), (0.35, 0.4), (0.45, 0.5), (0.12, 0.1),
+        (0.30000000000000004, 0.3), (0.19999999999999998, 0.2), ("0.25", 0.3),
+    ])
+    def test_in_tenths(self, value, expected):
+        """The owner, 3 Nov 2026: "these numbers must be at 0.1C
+        granularity".  The form steps by 0.1; a value saved by 2.20.0 in
+        0.05 steps is read to the nearest tenth, halves up."""
+        assert P.hold_band_option(value, 0.1) == expected
+        assert P.dose_zone_option(value, 0.2) == expected
+
+    def test_the_form_steps_in_tenths(self):
+        assert (P.HOLD_BAND_MIN_C, P.HOLD_BAND_MAX_C, P.HOLD_BAND_STEP_C) == (0.1, 0.5, 0.1)
+        assert (P.DOSE_ZONE_MIN_C, P.DOSE_ZONE_MAX_C, P.DOSE_ZONE_STEP_C) == (0.1, 0.5, 0.1)
+
+    def test_the_release_look_ahead_is_10_min(self):
+        assert P.RegulationConfig().release_lead_s == 600.0
+
+    @pytest.mark.parametrize(("value", "seconds"), [
+        (10, 600.0), ("20", 1200.0), (0, 0.0), (30, 1800.0), (7.5, 450.0),
+        (31, 600.0), (-1, 600.0), (None, 600.0), ("x", 600.0), (float("nan"), 600.0),
+    ])
+    def test_the_release_look_ahead_option(self, value, seconds):
+        assert P.release_lead_option(value, 600.0) == pytest.approx(seconds)
+
+    def test_the_dosing_zone_option(self):
+        assert P.dose_zone_option(0.3, 0.2) == pytest.approx(0.3)
         assert P.dose_zone_option(0.6, 0.2) == pytest.approx(0.2)
 
 
@@ -94,12 +119,26 @@ class TestTheRegulator:
         assert _mode(wide, 19.76, mode="stop") == "stop"
         assert _mode(wide, 19.75, mode="stop") == "hold"
 
-    def test_a_falling_room_is_still_released_20_min_ahead(self):
-        """19.90, falling 0.55 °C/h: 20 min ahead 0.15 under (0.45 beyond
-        the slope deadband)."""
+    def test_a_falling_room_is_still_released_by_its_look_ahead(self):
+        """19.90, falling: released once 10 min ahead (the release
+        look-ahead) reaches 0.25 under, 0.9 °C/h beyond the slope deadband."""
         wide = _reg(release_below_c=0.25)
-        assert _mode(wide, 19.90, mode="stop", slope_c_per_h=-0.4) == "stop"
-        assert _mode(wide, 19.90, mode="stop", slope_c_per_h=-0.55) == "hold"
+        assert _mode(wide, 19.90, mode="stop", slope_c_per_h=-0.9) == "stop"    # 0.23
+        assert _mode(wide, 19.90, mode="stop", slope_c_per_h=-1.1) == "hold"    # 0.27
+
+    def test_the_look_ahead_sets_how_early_a_falling_room_is_released(self):
+        """19.95 (0.05 under), falling 0.8 °C/h (0.7 beyond the deadband):
+        20 min ahead 0.28 under, 10 min 0.17, 5 min 0.11, none 0.05."""
+        for lead_s, mode in ((1200.0, "hold"), (600.0, "hold"), (300.0, "hold"), (0.0, "stop")):
+            reg = _reg(release_lead_s=lead_s)
+            assert _mode(reg, 19.95, mode="stop", slope_c_per_h=-0.8) == mode, lead_s
+        # Falling 0.35 °C/h (0.25 beyond the deadband): 20 min ahead 0.13
+        # under (released), 10 min ahead 0.09 (not yet).
+        assert _mode(_reg(release_lead_s=1200.0), 19.95, mode="stop", slope_c_per_h=-0.35) == "hold"
+        assert _mode(_reg(release_lead_s=600.0), 19.95, mode="stop", slope_c_per_h=-0.35) == "stop"
+        # With no look-ahead only the line releases.
+        assert _mode(_reg(release_lead_s=0.0), 19.90, mode="stop", slope_c_per_h=-3.0) == "hold"
+        assert _mode(_reg(release_lead_s=0.0), 19.91, mode="stop", slope_c_per_h=-3.0) == "stop"
 
     def test_a_heat_up_is_unchanged(self):
         """The band is the hold's: 0.8 under still heats at full power, and
@@ -133,9 +172,9 @@ class TestTheActivityLog:
         for release, at in cases:
             cfg = P.RegulationConfig(release_below_c=release)
             line = _line(cfg, error_c=-0.36, slope_c_per_h=0.8, **self.OFF)
-            assert f"heats again at {at}, or 20 min ahead of it once falling |" in line
+            assert f"heats again at {at}, or 10 min ahead of it once falling |" in line
             falling = _line(cfg, error_c=0.02, slope_c_per_h=-0.2, **self.OFF)
-            assert f"heats again 20 min before it reaches {at} (" in falling
+            assert f"heats again 10 min before it reaches {at} (" in falling
 
     @pytest.mark.parametrize(("over", "line_c"), [(0.3, "20.3"), (0.15, "20.15")])
     def test_the_overshoot_forecast_names_the_configured_stop(self, over, line_c):
@@ -233,12 +272,17 @@ class TestTheTuner:
 @e2e
 class TestTheEntity:
     def test_the_options_reach_the_regulator_and_the_tuner(self):
-        ent = _make_entity({"hold_stop_over_c": 0.25, "hold_release_below_c": 0.15})
+        ent = _make_entity({"hold_stop_over_c": 0.3, "hold_release_below_c": 0.2})
         _run(_start(ent))
-        assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.25, 0.15)
+        assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.3, 0.2)
         assert ent._regulator.cfg is ent._config
         at = ent._autotuner.cfg
-        assert (at.hold_band_over_c, at.hold_band_under_c) == (0.25, 0.15)
+        assert (at.hold_band_over_c, at.hold_band_under_c) == (0.3, 0.2)
+
+    def test_a_value_saved_in_hundredths_is_read_in_tenths(self):
+        ent = _make_entity({"hold_stop_over_c": 0.25, "hold_release_below_c": 0.15})
+        _run(_start(ent))
+        assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.3, 0.2)
 
     def test_none_set_is_the_stock_band(self):
         ent = _make_entity()
@@ -248,9 +292,20 @@ class TestTheEntity:
         assert (at.hold_band_over_c, at.hold_band_under_c) == (0.1, 0.1)
 
     def test_out_of_range_is_the_stock_band(self):
-        ent = _make_entity({"hold_stop_over_c": 0.9, "hold_release_below_c": "x"})
+        ent = _make_entity({"hold_stop_over_c": 0.9, "hold_release_below_c": "x",
+                            "hold_release_lead_min": 45})
         _run(_start(ent))
         assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.1, 0.1)
+        assert ent._config.release_lead_s == 600.0
+
+    @pytest.mark.parametrize(("options", "seconds"), [
+        ({}, 600.0), ({"hold_release_lead_min": 20}, 1200.0), ({"hold_release_lead_min": 0}, 0.0),
+    ])
+    def test_the_release_look_ahead_reaches_the_regulator(self, options, seconds):
+        ent = _make_entity(options)
+        _run(_start(ent))
+        assert ent._config.release_lead_s == seconds
+        assert ent._regulator.cfg.release_lead_s == seconds
 
     def test_changed_without_a_reload(self):
         ent = _make_entity()

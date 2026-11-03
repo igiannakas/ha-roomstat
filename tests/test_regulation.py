@@ -303,17 +303,21 @@ class TestModes:
 
     def test_firm_stop_lasts_until_the_room_needs_heat(self):
         """Released 0.1 °C below the target, or when a falling room will
-        be there within 20 min; never while it is still above."""
+        be there within the release look-ahead (10 min since 2.21.0)."""
         reg = make_regulator()
         stop = RegulationState(mode="stop")
         res, _ = step(reg, stop, 20.08)
         assert res.mode == "stop"             # flat, 0.08 °C over
         res, _ = step(reg, stop, 20.08, slope_c_per_h=-0.4)
-        assert res.mode == "stop"             # 20 min ahead: 0.02 over, still shut
-        res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.5)
-        assert res.mode == "stop"             # 20 min ahead: 0.08 under: not yet
+        assert res.mode == "stop"             # 10 min ahead: 0.03 over, still shut
         res, _ = step(reg, stop, 20.05, slope_c_per_h=-0.7)
-        assert res.mode == "hold"             # 20 min ahead: 0.15 under: warm up
+        assert res.mode == "stop"             # 10 min ahead: 0.05 under: not yet
+        res, _ = step(reg, stop, 20.05, slope_c_per_h=-1.2)
+        assert res.mode == "hold"             # 10 min ahead: 0.13 under: warm up
+        # The 20-min look-ahead before 2.21.0 released that 0.7 °C/h room
+        # while it was still 0.05 over (20 min ahead: 0.15 under).
+        res, _ = step(make_regulator(release_lead_s=1200.0), stop, 20.05, slope_c_per_h=-0.7)
+        assert res.mode == "hold"
         res, _ = step(reg, stop, 20.01)
         assert res.mode == "stop"             # at the target, flat: shut
         res, _ = step(reg, stop, 19.91)

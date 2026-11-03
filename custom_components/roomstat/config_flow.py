@@ -31,6 +31,7 @@ from .const import (
     CONF_HEAT_TIMER_S,
     CONF_HEATING_POWER_ENTITY_ID,
     CONF_HOLD_RELEASE_BELOW_C,
+    CONF_HOLD_RELEASE_LEAD_MIN,
     CONF_HOLD_STOP_OVER_C,
     CONF_INTEGRAL_DEADBAND_C,
     CONF_MIN_CHANGE_THRESHOLD_C,
@@ -68,11 +69,14 @@ from .parameters import (
     HOLD_BAND_MAX_C,
     HOLD_BAND_MIN_C,
     HOLD_BAND_STEP_C,
+    RELEASE_LEAD_MAX_MIN,
+    RELEASE_LEAD_MIN_MIN,
     BehaviourConfig,
     OutOfBandConfig,
     RegulationConfig,
     dose_zone_option,
     hold_band_option,
+    release_lead_option,
 )
 from .preheat import MODE_OFF, MODES, TIMING_OPTIONS
 
@@ -625,6 +629,18 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                                     opts.get(CONF_HOLD_RELEASE_BELOW_C), defaults.release_below_c
                                 ),
                             ): hold_band_selector,
+                            vol.Required(
+                                CONF_HOLD_RELEASE_LEAD_MIN,
+                                default=round(release_lead_option(
+                                    opts.get(CONF_HOLD_RELEASE_LEAD_MIN), defaults.release_lead_s
+                                ) / 60.0),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(
+                                    min=RELEASE_LEAD_MIN_MIN, max=RELEASE_LEAD_MAX_MIN, step=1,
+                                    mode=selector.NumberSelectorMode.BOX,
+                                    unit_of_measurement="min",
+                                )
+                            ),
                             vol.Required(
                                 CONF_DERIVATIVE_TIME_MIN,
                                 default=opts.get(

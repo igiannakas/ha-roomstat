@@ -131,8 +131,9 @@ class TestDecisionLines:
         assert "decays" not in line and "full heat only" not in line
 
     def test_hold_released_from_a_stop_says_so(self):
+        # 0.05 + 10 min x (0.3 - 0.1) °C/h = 0.08.
         line = _line(prev_mode="stop", error_c=0.05, slope_c_per_h=-0.3)
-        assert line.startswith("Holding (released: heading 0.1 below within 20 min)")
+        assert line.startswith("Holding (released: heading 0.1 below within 10 min)")
 
     def test_hold_released_by_a_target_step_says_how_far_below(self):
         """26 Oct 06:00, second bedroom: Night → Comfort, 0.76 below at once
@@ -163,14 +164,14 @@ class TestDecisionLines:
         line = _line(mode="stop", prev_mode="stop", error_c=-0.36, slope_c_per_h=0.8,
                      command_c=5.0, command_off=True, tado="off", tado_c=None)
         assert line.startswith(
-            "Valve off: 0.4 above, rising 0.8 °C/h; heats again at 19.9, or 20 min ahead "
+            "Valve off: 0.4 above, rising 0.8 °C/h; heats again at 19.9, or 10 min ahead "
             "of it once falling |"
         )
         falling = _line(mode="stop", prev_mode="stop", error_c=0.02, slope_c_per_h=-0.2,
                         command_c=5.0, command_off=True, tado="off", tado_c=None)
-        # 0.02 + 20 min x (0.2 - 0.1) °C/h = 0.05: not yet the 0.1 that releases.
-        assert "falling 0.2 °C/h; heats again 20 min before it reaches 19.9 (forecast for " \
-            "20 min ahead: 0.05 below)" in falling
+        # 0.02 + 10 min x (0.2 - 0.1) °C/h = 0.04: not yet the 0.1 that releases.
+        assert "falling 0.2 °C/h; heats again 10 min before it reaches 19.9 (forecast for " \
+            "10 min ahead: 0.04 below)" in falling
 
     def test_a_stop_still_rising_says_the_overshoot_keeps_it_off(self):
         """26 Oct 06:42, second bedroom: 0.11 below, rising 1.3 °C/h on the

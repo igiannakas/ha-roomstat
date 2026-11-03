@@ -327,10 +327,10 @@ class TestSettledRoom:
         """The two options (Dosed top-ups section) set the zone; out of
         range keeps the default.  With 0.1 / 0.1 (2.16.0's band) the room
         stays within 0.1 of the target, and its pulses come more often."""
-        ent = _entity({**ON, "dose_zone_above_c": 0.35, "dose_zone_below_c": 0.15})
+        ent = _entity({**ON, "dose_zone_above_c": 0.4, "dose_zone_below_c": 0.2})
         dose = ent._config.dose
-        assert (dose.zone_above_c, dose.zone_below_c) == (0.35, 0.15)
-        assert dose.aim_over_c == pytest.approx(0.25) and ent._doser.cfg is dose
+        assert (dose.zone_above_c, dose.zone_below_c) == (0.4, 0.2)
+        assert dose.aim_over_c == pytest.approx(0.3) and ent._doser.cfg is dose
         bad = _entity({**ON, "dose_zone_above_c": 0.9, "dose_zone_below_c": "x"})
         assert (bad._config.dose.zone_above_c, bad._config.dose.zone_below_c) == (0.2, 0.1)
         starts = {}
@@ -468,16 +468,16 @@ def stock_scenario(monkeypatch, options) -> list[list]:
 def test_option_off_is_2_14_1s_regulation(monkeypatch):
     """With the option off (or never set) the room gets exactly the
     commands 2.14.1 sent, at the same times (recorded on 2.14.1, commit
-    f293136, with this scenario)."""
+    f293136, with this scenario).  On 2.14.1's release look-ahead (20 min;
+    10 by default since 2.21.0, an option)."""
     with open(Path(__file__).parent / "fixtures" / "option_off_2_14_1_calls.json") as fh:
         recorded = json.load(fh)
     assert len(recorded) > 10                     # the scenario sends a day's worth
-    never_set = stock_scenario(monkeypatch, {"heating_power_entity_id": POWER})
+    as_2_14_1 = {"heating_power_entity_id": POWER, "hold_release_lead_min": 20}
+    never_set = stock_scenario(monkeypatch, as_2_14_1)
     assert never_set == recorded
     reset_timers()
-    off = stock_scenario(
-        monkeypatch, {"heating_power_entity_id": POWER, "dosed_topups": False}
-    )
+    off = stock_scenario(monkeypatch, {**as_2_14_1, "dosed_topups": False})
     assert off == recorded
     reset_timers()
     dosed = stock_scenario(monkeypatch, ON)
@@ -1304,11 +1304,11 @@ def test_options_changed_without_a_reload_keep_one_dose_config(monkeypatch):
     doser go on sharing one dose config, with the new zone."""
     ent, clock, plant = _started(monkeypatch)
     entry = ent._config_entry
-    entry.options = {**entry.options, "dose_zone_above_c": 0.3, "dose_zone_below_c": 0.15}
+    entry.options = {**entry.options, "dose_zone_above_c": 0.3, "dose_zone_below_c": 0.2}
     _run(ent._async_config_entry_updated(ent.hass, entry))
     assert ent._config.dose is ent._doser.cfg is ent._doser.learner.cfg
     assert ent._regulator.cfg.dose is ent._doser.cfg
-    assert (ent._doser.cfg.zone_above_c, ent._doser.cfg.zone_below_c) == (0.3, 0.15)
+    assert (ent._doser.cfg.zone_above_c, ent._doser.cfg.zone_below_c) == (0.3, 0.2)
 
 
 def test_a_fit_for_a_learner_reset_meanwhile_is_ignored(monkeypatch, caplog):
