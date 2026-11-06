@@ -827,6 +827,18 @@ is updating.
   shut. The thermostat's `window_overridden` attribute; the card shows the
   open-window badge over the mode (card 1.5.3); the decision line reads
   `Window open, overridden by hand: …` (`WINDOW_OVERRIDDEN`).
+  **The change keeps its own schedule override** (2.22.1,
+  `_restore_window_state(by_hand=True)`): ending the window's hold for a
+  change by hand (open or in its close delay) takes the room back to what
+  the window had saved, but must not run `_drop_stale_sticky_override`:
+  the change has already started its override, and an Off or Away picked
+  by hand starts a sticky one. 6 Nov 2026, study: Off picked during the
+  re-warm wait at 08:19 and again at 08:20 (after a Resume schedule) was
+  left Off with no override each time ("the Away or Off picked by hand is
+  over" logged between the restore and the Off): the card read "Schedule ·
+  Day" without the hand, and the next schedule change would have heated the
+  room. The window's own restore (the close, the startup) still drops one
+  left behind.
 - **Fail cold (timer overlays):** a maximum command left behind by a dead
   HA, network or cloud kept the valve open (plan H2). With `heat_timer_s` > 0
   (TRV option, default 0: the safe landing needs the Tado app schedule at
@@ -2015,7 +2027,9 @@ ruff check .
 - `tests/test_window_override.py` (2.22.0: a change by hand overrides an
   open window, the study's 3 Nov 2026 presses, the open delay, Frost and
   Boost, what does not override it, while overridden, Resume schedule back
-  to the window, Off then Heat, the tuner, a reload, the controller).
+  to the window, Off then Heat, the tuner, a reload, the controller;
+  2.22.1: an Off or Away picked by hand keeps its sticky override, the
+  study's 6 Nov 2026 presses replayed).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

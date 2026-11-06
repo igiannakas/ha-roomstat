@@ -223,7 +223,7 @@ class PresetMixin:
             return
         self._log(_LOGGER).info("window close delay ended, %s", reason)
         self._window_ctrl.interrupt_close_delay()  # the close timer must not fire later
-        self._restore_window_state(notify=False)
+        self._restore_window_state(notify=False, by_hand=True)
 
     def _end_window_by_hand(self, reason: str) -> None:
         """A change by hand (a preset or Boost picked, a temperature set)
@@ -257,7 +257,7 @@ class PresetMixin:
             "until it closes", reason,
         )
         if was_active:
-            self._restore_window_state(notify=False, log=False)
+            self._restore_window_state(notify=False, log=False, by_hand=True)
 
     def _resume_window_wait(self) -> bool:
         """Resume schedule after a change by hand ended a window's close
@@ -344,7 +344,9 @@ class PresetMixin:
             self._boost_cancel = None
             self._boost_end_ts = 0.0
 
-    def _restore_window_state(self, notify: bool = True, *, log: bool = True) -> None:
+    def _restore_window_state(
+        self, notify: bool = True, *, log: bool = True, by_hand: bool = False,
+    ) -> None:
         """Restore preset after window is closed.
 
         ``notify=False`` is used during ``async_added_to_hass``: the entity is
@@ -352,6 +354,15 @@ class PresetMixin:
         (the platform writes the state right after, the timer regulates).
         ``log=False``: a change by hand overriding the open window, which
         says so itself (the window has not closed).
+
+        ``by_hand``: the window's hold ends for a change by hand, which
+        applies right after (:meth:`_end_window_close_delay`,
+        :meth:`_end_window_by_hand`).  The schedule override that change has
+        already started is its own, so it is kept: an Off or Away picked by
+        hand starts a sticky one, and dropping it here as one left behind
+        (2.22.1; 6 Nov 2026, study: Off picked during the re-warm wait, twice,
+        stayed Off with no override, so the card read "Schedule · Day" and
+        the next schedule change would have heated the room again).
         """
         saved = self._window_ctrl.restore()
         if saved.preset is not None:
@@ -386,7 +397,8 @@ class PresetMixin:
                 self._target_temp = self._get_preset_target(preset_to_restore)
             elif saved.temp is not None:
                 self._target_temp = saved.temp
-            self._drop_stale_sticky_override()
+            if not by_hand:
+                self._drop_stale_sticky_override()
         if log:
             self._log(_LOGGER).info("window closed, restoring the previous preset")
         if not notify:
@@ -676,7 +688,8 @@ class PresetMixin:
         configured limit after the change (then back to away).  Leaving away
         mode, the room first takes back the preset it had before (as coming
         home would), so a Boost started now returns to that, not to Away.  An
-        open window still wins: the change is saved for its close as usual.
+        open window is overridden by the change too (2.22.0,
+        :meth:`_end_window_by_hand`, called first).
 
         An Off (frost protection) has no limit and ends when someone is home,
         when the schedule comes back (owner, 27 Oct 2026).  One picked once

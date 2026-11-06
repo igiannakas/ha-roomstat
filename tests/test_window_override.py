@@ -26,6 +26,7 @@ import types
 import pytest
 
 from tests.ha_harness import (
+    PRESENCE,
     SCHEDULE,
     WINDOW,
     _active_timers,
@@ -321,6 +322,97 @@ class TestWhileOverridden:
         ent = self._overridden(clock)
         ent._window_ctrl.cancel_all()          # what summer mode's start does
         assert not ent._window_ctrl.overridden
+
+
+@e2e
+class TestAnOffPickedByHandKeepsItsOverride:
+    """2.22.1.  6 Nov 2026, study: the window closed at 07:52 and the room
+    re-warmed by itself; Off was picked by hand at 08:19, and again at 08:20
+    after a Resume schedule.  Each time the change started its sticky
+    schedule override, then ending the window's wait took the room back to
+    what the window had saved (Comfort) and dropped that override as one
+    left behind ("the Away or Off picked by hand is over"), before the Off
+    applied.  The room was Off with no override: the card read "Schedule ·
+    Day" without the hand, and the next schedule change would have heated
+    it again."""
+
+    @staticmethod
+    def _sticky(ent):
+        ctrl = ent._schedule_ctrl
+        return ctrl.override_active and ctrl.override_sticky
+
+    def _closed(self, clock):
+        ent = _entity(clock, schedule="comfort")
+        _open(ent, clock)
+        clock.tick(60)
+        _window(ent, "off")
+        assert ent._window_ctrl.close_delay_active
+        return ent
+
+    def test_the_study_on_6_nov(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = self._closed(clock)
+        _run(ent.async_set_preset_mode("frost_protection"))             # 08:19
+        assert ent.preset_mode == "frost_protection" and self._sticky(ent)
+        assert ent.extra_state_attributes["schedule_override_active"] is True
+        assert not any("picked by hand is over" in t for t in _texts(ent))
+        clock.tick(60)
+        _run(ent.async_resume_schedule())                                # 08:20
+        assert ent._window_ctrl.close_delay_active and not self._sticky(ent)
+        _run(ent.async_set_preset_mode("frost_protection"))
+        assert ent.preset_mode == "frost_protection" and self._sticky(ent)
+        ent.hass.set(SCHEDULE, "eco")
+        ent._async_schedule_changed(_event("eco"))
+        ent.hass.set(SCHEDULE, "comfort")
+        ent._async_schedule_changed(_event("comfort"))
+        assert ent.preset_mode == "frost_protection" and self._sticky(ent)
+        assert _heat(ent) == []
+
+    def test_with_the_window_still_open(self, monkeypatch):
+        """The same through 2.22.0's override of an open window."""
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock, schedule="comfort")
+        _open(ent, clock)
+        _run(ent.async_set_preset_mode("frost_protection"))
+        assert ent._window_ctrl.overridden and self._sticky(ent)
+        _window(ent, "off")
+        ent.hass.set(SCHEDULE, "eco")
+        ent._async_schedule_changed(_event("eco"))
+        assert ent.preset_mode == "frost_protection" and self._sticky(ent)
+
+    def test_away_picked_by_hand_too(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = self._closed(clock)
+        _run(ent.async_set_preset_mode("away"))
+        assert ent.preset_mode == "away" and self._sticky(ent)
+
+    def test_a_timed_override_is_unchanged(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = self._closed(clock)
+        _run(ent.async_set_preset_mode("eco"))
+        ctrl = ent._schedule_ctrl
+        assert ent.preset_mode == "eco" and ctrl.override_active and not ctrl.override_sticky
+
+    def test_one_left_behind_is_still_dropped_when_the_window_closes(self, monkeypatch):
+        """A sticky override from an Away picked before the window, when the
+        close restores Comfort instead (someone is home): the window's own
+        restore, not a change by hand, so it still goes."""
+        clock = _Clock(monkeypatch)
+        ent = _make_entity({"window_delay_s": OPEN_DELAY, "window_close_delay_s": 0,
+                            "heat_timer_s": 0}, presence=True, schedule=True)
+        ent.hass.set(SCHEDULE, "comfort")
+        ent.hass.set(PRESENCE, "on")
+        ent.hass.set(WINDOW, "off")
+        _run(_start(ent))
+        _feed(ent, 19.9)
+        _cycle(ent)
+        _run(ent.async_set_preset_mode("away"))
+        assert self._sticky(ent)
+        _open(ent, clock)
+        assert ent._window_ctrl.get_saved().preset == "away"
+        _window(ent, "off")
+        assert ent.preset_mode == "comfort" and not self._sticky(ent)
+        assert any("picked by hand is over" in t for t in _texts(ent))
 
 
 @e2e
