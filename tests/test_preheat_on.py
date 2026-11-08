@@ -87,7 +87,7 @@ class TestTargets:
         pe._leave(ent)
         assert pe._state(ent) == "close"
         assert ent._effective_setpoint() == COMFORT
-        assert ent.target_temperature == COMFORT
+        assert ent.native_target_temperature == COMFORT
         assert ent.extra_state_attributes["preheat_heating_to_c"] == COMFORT
         pe._set(ent, CLOSE, "off")
         clock.tick(10 * MIN)

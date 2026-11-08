@@ -93,7 +93,7 @@ class TestTheDayReplayed:
         assert _attrs(ent)["schedule_override_active"] is True
         _everyone_leaves(ent)                         # 12:34
         # Off while out, not Away (16 °C): nothing heats it.
-        assert ent.preset_mode == OFF and ent.target_temperature == 5.0
+        assert ent.preset_mode == OFF and ent.native_target_temperature == 5.0
         assert _off_until_home(ent) and not ent._presence_ctrl.is_active
         assert _attrs(ent)["presence_override_until"] is None
         assert _timers("_async_presence_override_expired") == []
@@ -106,7 +106,7 @@ class TestTheDayReplayed:
             assert ent.preset_mode == OFF
         _schedule(ent, "comfort")
         _arrive(ent)                                  # 17:50
-        assert ent.preset_mode == "comfort" and ent.target_temperature == 20.5
+        assert ent.preset_mode == "comfort" and ent.native_target_temperature == 20.5
         assert not ent._presence_ctrl.nobody_home
         assert _attrs(ent)["schedule_override_active"] is False
         assert "Someone is home, the Off picked by hand ends: back to Comfort" in _log(ent)
@@ -198,7 +198,7 @@ class TestOffUntilHome:
         _everyone_leaves(ent)
         assert ent.preset_mode == OFF and _off_until_home(ent)
         _arrive(ent)
-        assert ent.preset_mode == "comfort" and ent.target_temperature == 20.5
+        assert ent.preset_mode == "comfort" and ent.native_target_temperature == 20.5
 
     def test_a_boost_from_the_off_is_not_an_off(self):
         ent = _entity("comfort")
@@ -326,7 +326,7 @@ class TestBackToAutomatic:
         _run(ent.async_set_hvac_mode(_climate.HVACMode.HEAT))
         drain_tasks(ent)
         _preset(ent, "away")
-        assert ent.preset_mode == "away" and ent.target_temperature == 16.0
+        assert ent.preset_mode == "away" and ent.native_target_temperature == 16.0
         assert ent._presence_ctrl.is_active and not _held(ent)
         assert ent._presence_ctrl.get_saved().preset == "comfort"
         assert _attrs(ent)["schedule_override_active"] is False
@@ -471,7 +471,7 @@ class TestRestart:
         if held_cold:
             extra["preheat"]["held_cold"] = {"since": time.time(), "until": None}
         last = _State(old.hvac_mode.value, {
-            "preset_mode": old.preset_mode, "temperature": old.target_temperature,
+            "preset_mode": old.preset_mode, "temperature": old.native_target_temperature,
             "window_open_active": old._window_ctrl.is_active,
         })
         _run(_start(new, last_state=last, extra=_Extra(extra)))

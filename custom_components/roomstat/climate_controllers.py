@@ -1782,7 +1782,15 @@ HEATED_LOOKBACK_S = 1800.0
 # 0.5 °C).  25 Oct 2026, second bedroom: a hold's top-up heated 8 minutes,
 # 3 of them in the look-back; the room then rose 1.5 °C with the valve shut
 # and its reading flat, and the plain "heated in the look-back" rule called
-# it hot.
+# it hot.  That rate is at full output, so with the zone's heating % known
+# (its heating power sensor) the heating is counted as full-open-equivalent
+# time, each report weighed by its heating % (2.23.0).  3 Nov 2026, living
+# room: two hot alarms (14:22, 22:21) on 9 and 15 minutes reported heating at
+# 21-61 % (4.6 and 5.2 full-open minutes, about 0.2 °C there) while the room
+# rose about 1 °C by itself, at lunch and in the evening.  A valve's flow is
+# not linear in its opening (30 % open passes 50-65 % of full flow), so this
+# can understate a part-open valve's heat; the TRV − room gap below is the
+# backstop for a radiator that is really hot (6 Nov 2026, study: 4.1 °C).
 RADIATOR_MAX_RATE_C_PER_H = 4.0
 # The longest one heating report counts for (the cycle is 60 s; a pause,
 # a restart, is no evidence of more).
@@ -1797,6 +1805,14 @@ HEATING_SAMPLE_MAX_S = 120.0
 # the room flat), which at 1.0 gave three false hot alarms.
 RADIATOR_RISE_C = 2.0
 GAP_WINDOW_S = 3 * 3600.0
+
+
+def _heating_share(pct: float | None) -> float | None:
+    """A zone's heating power (0-100 %) as a share of full output; None
+    when it is missing or unusable."""
+    if not isinstance(pct, (int, float)) or isinstance(pct, bool) or not math.isfinite(pct):
+        return None
+    return min(1.0, max(0.0, float(pct) / 100.0))
 
 
 @dataclass(frozen=True)
@@ -1814,10 +1830,13 @@ class BandState:
     radiator_heated: bool | None = None
     # The evidence, while an excursion is judged: the valve reported heating
     # during it; how long it heated in the HEATED_LOOKBACK_S before it began
-    # (None: nothing known); how far the TRV − room gap stands above its
-    # lowest of the last GAP_WINDOW_S (None: no TRV reading).
+    # (None: nothing known), as full-open-equivalent time when
+    # heated_before_full_open (the zone's heating % was known); how far the
+    # TRV − room gap stands above its lowest of the last GAP_WINDOW_S (None:
+    # no TRV reading).
     heated_during: bool | None = None
     heated_before_s: float | None = None
+    heated_before_full_open: bool | None = None
     radiator_rise_c: float | None = None
 
 
@@ -1841,7 +1860,10 @@ class OutOfBandMonitor:
         heats a room that is 0.5 °C over its target: something else is);
       - or it heated at least band / ``RADIATOR_MAX_RATE_C_PER_H`` in the
         ``HEATED_LOOKBACK_S`` before the excursion began (less cannot have
-        lifted the room by the band: a hold's short top-up is no cause);
+        lifted the room by the band: a hold's short top-up is no cause).
+        With the zone's heating % known, that is full-open-equivalent time
+        (each report weighed by its heating %; one without a heating %
+        counts as full output while the valve reports heating);
       - or the TRV's own reading stands ``RADIATOR_RISE_C`` further above
         the room than at its lowest in the last ``GAP_WINDOW_S`` (a hot
         radiator next to a valve that reports nothing).
@@ -1870,13 +1892,16 @@ class OutOfBandMonitor:
         self._cold_since: float | None = None
         # Radiator evidence: when the valve last reported heating, whether
         # it ever reported anything, what it reported over the last
-        # HEATED_LOOKBACK_S (time, heating), how long it heated in the
-        # look-back before the current excursion, and the TRV − room gap
-        # over the last GAP_WINDOW_S (its minimum is the radiator cold).
+        # HEATED_LOOKBACK_S (time, the share of full output it stands for,
+        # whether that came from the zone's heating %), how long it heated
+        # in the look-back before the current excursion (and whether that is
+        # full-open-equivalent time), and the TRV − room gap over the last
+        # GAP_WINDOW_S (its minimum is the radiator cold).
         self._last_heated_ts: float | None = None
         self._heating_known: bool = False
-        self._heat_reports: deque[tuple[float, bool]] = deque()
+        self._heat_reports: deque[tuple[float, float, bool]] = deque()
         self._heated_before_s: float | None = None
+        self._heated_before_full_open: bool | None = None
         self._gaps: deque[tuple[float, float]] = deque()
         self.state = BandState()
 
@@ -1892,17 +1917,25 @@ class OutOfBandMonitor:
         cold_after_s: float,
         valve_heating: bool | None = None,
         trv_c: float | None = None,
+        valve_open_pct: float | None = None,
     ) -> BandState:
         """Take one reading; return (and keep in ``state``) what to show.
 
         ``valve_heating``: what the valve reports this update (None: not
-        known); ``trv_c``: the TRV's own reading (None: not known).
+        known); ``trv_c``: the TRV's own reading (None: not known);
+        ``valve_open_pct``: the zone's heating power, 0-100 % (None: no
+        heating power sensor, or no usable value), which weighs this
+        update's heating in the look-back.
         """
-        if valve_heating is not None:
+        pct = _heating_share(valve_open_pct)
+        if valve_heating is not None or pct is not None:
             self._heating_known = True
-            if valve_heating:
-                self._last_heated_ts = now
-        self._note_heating(now, valve_heating is True)
+        if valve_heating:
+            self._last_heated_ts = now
+        if pct is not None:
+            self._note_heating(now, pct, True)
+        else:
+            self._note_heating(now, 1.0 if valve_heating else 0.0, False)
         if room_c is not None and trv_c is not None:
             if self._gaps and (now < self._gaps[-1][0] or now - self._gaps[-1][0] > GAP_WINDOW_S):
                 self._gaps.clear()               # clock went back, or a long gap
@@ -1913,7 +1946,7 @@ class OutOfBandMonitor:
         if room_c is None or setpoint_c is None:
             # Nothing to judge (no reading): no excursion runs.
             self._hot_since = self._cold_since = None
-            self._heated_before_s = None
+            self._heated_before_s = self._heated_before_full_open = None
             self.state = BandState()
             return self.state
 
@@ -1933,26 +1966,29 @@ class OutOfBandMonitor:
         cold = eligible and setpoint_c - room_c >= band_c - _BAND_TOLERANCE_C
         if not hot:
             self._hot_since = None
-            self._heated_before_s = None
+            self._heated_before_s = self._heated_before_full_open = None
         elif self._hot_since is None:
             self._hot_since = now
-            self._heated_before_s = (
-                self._heating_time(now - HEATED_LOOKBACK_S, now)
-                if self._heating_known else None
-            )
+            if self._heating_known:
+                self._heated_before_s, self._heated_before_full_open = (
+                    self._heating_time(now - HEATED_LOOKBACK_S, now)
+                )
+            else:
+                self._heated_before_s = self._heated_before_full_open = None
         if not cold:
             self._cold_since = None
         elif self._cold_since is None:
             self._cold_since = now
 
         on, reason, since, heated = False, None, None, None
-        during = before = rise = None
+        during = before = full_open = rise = None
         if self._hot_since is not None and now - self._hot_since >= hot_after_s:
             during = (
                 self._last_heated_ts is not None and self._last_heated_ts >= self._hot_since
                 if self._heating_known else None
             )
             before = self._heated_before_s
+            full_open = self._heated_before_full_open if before is not None else None
             rise = self._radiator_rise_c()
             heated = self._radiator_heated(during, before, rise, band_c)
             since = self._hot_since
@@ -1971,6 +2007,7 @@ class OutOfBandMonitor:
             radiator_heated=heated,
             heated_during=during,
             heated_before_s=round(before, 1) if before is not None else None,
+            heated_before_full_open=full_open,
             radiator_rise_c=round(rise, 2) if rise is not None else None,
         )
         return self.state
@@ -2008,29 +2045,40 @@ class OutOfBandMonitor:
             return None
         return self._gaps[-1][1] - min(g for _, g in self._gaps)
 
-    def _note_heating(self, now: float, heating: bool) -> None:
-        """Keep what the valve reported over the last HEATED_LOOKBACK_S (an
-        unknown report counts as not heating: no evidence)."""
+    def _note_heating(self, now: float, share: float, from_pct: bool) -> None:
+        """Keep what the valve reported over the last HEATED_LOOKBACK_S: the
+        share of full output this report stands for (an unknown report
+        counts as not heating: no evidence), and whether it came from the
+        zone's heating %."""
         reports = self._heat_reports
         if reports and now < reports[-1][0]:
             reports.clear()                      # the clock went back
-        reports.append((now, heating))
+        reports.append((now, share, from_pct))
         horizon = now - HEATED_LOOKBACK_S - HEATING_SAMPLE_MAX_S
         while len(reports) > 1 and reports[0][0] < horizon:
             reports.popleft()
 
-    def _heating_time(self, start: float, end: float) -> float:
-        """Seconds the valve reported heating between *start* and *end*: each
-        report stands until the next one, for at most HEATING_SAMPLE_MAX_S."""
+    def _heating_time(self, start: float, end: float) -> tuple[float, bool]:
+        """How long the valve heated between *start* and *end*, and whether
+        that is full-open-equivalent time.
+
+        Each report stands until the next one, for at most
+        HEATING_SAMPLE_MAX_S, weighed by its share of full output.  The time
+        is full-open-equivalent when any report in the span came with the
+        zone's heating % (one without it counts as full output while the
+        valve reports heating, the safe side for the alarm)."""
         total = 0.0
+        full_open = False
         reports = list(self._heat_reports)
-        for i, (ts, heating) in enumerate(reports):
-            if not heating:
-                continue
+        for i, (ts, share, from_pct) in enumerate(reports):
             until = reports[i + 1][0] if i + 1 < len(reports) else end
             stop = min(until, ts + HEATING_SAMPLE_MAX_S, end)
-            total += max(0.0, stop - max(ts, start))
-        return total
+            span = stop - max(ts, start)
+            if span <= 0.0:
+                continue
+            full_open = full_open or from_pct
+            total += share * span
+        return total, full_open
 
     def as_dict(self) -> dict[str, Any]:
         """The part that survives a restart (restore-state extra data)."""
@@ -2062,11 +2110,18 @@ class OutOfBandMonitor:
         if state.heated_before_s is not None:
             enough = state.heated_before_s >= cls.heated_min_s(band_c) - 1e-6
             if enough or not cause:
-                evidence.append(
-                    f"the valve heated {state.heated_before_s / 60.0:.0f} of the "
-                    f"{lookback} min before"
-                    + ("" if enough else f" ({cls.heated_min_s(band_c) / 60.0:g} needed)")
-                )
+                needed = "" if enough else f" ({cls.heated_min_s(band_c) / 60.0:g} needed)"
+                if state.heated_before_full_open:
+                    evidence.append(
+                        f"the valve heated the equivalent of "
+                        f"{state.heated_before_s / 60.0:.1f} min at full output "
+                        f"in the {lookback} min before" + needed
+                    )
+                else:
+                    evidence.append(
+                        f"the valve heated {state.heated_before_s / 60.0:.0f} of the "
+                        f"{lookback} min before" + needed
+                    )
         if state.radiator_rise_c is not None:
             hot = state.radiator_rise_c >= RADIATOR_RISE_C
             if hot or not cause:

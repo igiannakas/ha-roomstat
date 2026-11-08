@@ -287,11 +287,11 @@ class TestChangeByHandWhileAway:
     def test_23_oct_comfort_on_the_way_home_heats_at_once(self):
         ent = _entity("comfort")
         _leave(ent)
-        assert ent.target_temperature == 16.0
+        assert ent.native_target_temperature == 16.0
         before = time.time()
         _preset(ent, "comfort")
         assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.native_target_temperature == 20.5
         assert _held(ent)
         attrs = ent.extra_state_attributes
         assert attrs["presence_away_active"] is False
@@ -315,7 +315,7 @@ class TestChangeByHandWhileAway:
         _run(ent.async_set_temperature(temperature=21.0))
         drain_tasks(ent)
         assert ent.preset_mode == "none"
-        assert ent.target_temperature == 21.0
+        assert ent.native_target_temperature == 21.0
         assert _held(ent)
         assert ent.extra_state_attributes["schedule_override_active"] is True
 
@@ -408,12 +408,12 @@ class TestChangeByHandWhileAway:
         assert ent.preset_mode == "comfort"
         assert _held(ent) and ent._window_ctrl.overridden
         _run(ent.async_set_temperature(temperature=21.5))
-        assert (ent.preset_mode, ent.target_temperature) == ("none", 21.5)
+        assert (ent.preset_mode, ent.native_target_temperature) == ("none", 21.5)
         ent.hass.set(WINDOW, "off")
         ent._async_window_changed(_event("off"))
         drain_tasks(ent)
         assert ent.preset_mode == "none"
-        assert ent.target_temperature == 21.5
+        assert ent.native_target_temperature == 21.5
         assert not ent._window_ctrl.overridden and _held(ent)
 
     def test_limit_running_out_with_the_window_open(self):
@@ -527,7 +527,7 @@ class TestReviewFindings:
         drain_tasks(ent)
         assert not ent._window_ctrl.is_active
         assert _timers("_async_window_close_action") == []
-        assert ent.preset_mode == "none" and ent.target_temperature == 21.5
+        assert ent.preset_mode == "none" and ent.native_target_temperature == 21.5
 
     # An Off has no limit at all (2.12.0, tests/test_off_and_automatic_while_away.py).
     @pytest.mark.parametrize("change", [15.0, 16.0])

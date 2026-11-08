@@ -156,7 +156,7 @@ class TestSummerOn:
         _turn_summer(ent, "on")
         assert ent.summer_mode_active
         assert ent.preset_mode == "frost_protection"
-        assert ent.target_temperature == 5.0
+        assert ent.native_target_temperature == 5.0
         assert ent.hvac_mode == _climate.HVACMode.HEAT
         assert ent.icon == "mdi:weather-sunny"
         assert ent.extra_state_attributes["summer_mode_active"] is True
@@ -215,7 +215,7 @@ class TestSummerLock:
 
     def _assert_unchanged(self, ent):
         assert ent.preset_mode == "frost_protection"
-        assert ent.target_temperature == 5.0
+        assert ent.native_target_temperature == 5.0
         assert ent.hvac_mode == _climate.HVACMode.HEAT
         assert ent.hass.service_calls == []
 
@@ -415,7 +415,7 @@ class TestSummerOff:
         _turn_summer(ent, "off")
         assert not ent.summer_mode_active
         assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.native_target_temperature == 20.5
         assert ent.hvac_mode == _climate.HVACMode.HEAT
         assert ent._last_regulation_ts == 0.0
 
@@ -460,7 +460,7 @@ class TestSummerAcrossRestart:
         ent = self._boot(summer_state="off", persisted_summer=True, last_preset="frost_protection")
         assert not ent.summer_mode_active
         assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.native_target_temperature == 20.5
 
     def test_helper_unavailable_at_boot_keeps_lock(self):
         ent = self._boot(summer_state="unavailable", persisted_summer=True,

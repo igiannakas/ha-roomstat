@@ -52,13 +52,14 @@ class _Clock:
 
 
 def _feed(ent, room, internal, setpoint, *, cloud=True, scheduled=False, off=False,
-          heating=None):
+          heating=None, heating_power=None):
     ent.coordinator.data = {
         "room_temp": room, "room_temp_ts": None,
         "tado_internal_temp": internal, "tado_setpoint": setpoint,
         "tado_min_temp": 5.0, "tado_max_temp": 25.0, "tado_off": off,
         "tado_cloud": cloud, "tado_scheduled": scheduled, "tado_heating": heating,
         "fallback_internal_temp": None, "fallback_setpoint": None,
+        "heating_power": heating_power,
     }
 
 
@@ -469,10 +470,11 @@ def _band_entity(ent):
     return _binary_sensor.RoomstatOutOfBandBinarySensor(ent.coordinator, ent._config_entry)
 
 
-def _minutes(ent, clock, minutes, room, *, internal=15.0, setpoint=None, heating=None):
+def _minutes(ent, clock, minutes, room, *, internal=15.0, setpoint=None, heating=None,
+             heating_power=None):
     for _ in range(minutes):
         clock.tick(60)
-        _feed(ent, room, internal, setpoint, heating=heating)
+        _feed(ent, room, internal, setpoint, heating=heating, heating_power=heating_power)
         _cycle(ent)
 
 
@@ -509,6 +511,43 @@ class TestOutOfBandEntity:
         assert band.is_on is True
         attrs = band.extra_state_attributes
         assert attrs["reason"] == "hot" and attrs["radiator_heated"] is True
+
+    @pytest.mark.parametrize(("power", "reason"), [(45.0, "warm"), (100.0, "hot"), (None, "hot")])
+    def test_the_zones_heating_power_weighs_the_heating_before(
+        self, monkeypatch, caplog, power, reason,
+    ):
+        """2.23.0: 10 minutes of heating just before the room went 0.5 over.
+        At 45 % that is 4.5 minutes at full output, which cannot have lifted
+        the room by the band (7.5 needed): warm, as the living room on 3 Nov
+        2026.  At 100 %, or with no heating power sensor (minutes reported
+        heating, as before), it is the radiator: hot."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        band = _band_entity(ent)
+        _feed(ent, 20.5, 15.0, None, heating=False, heating_power=None if power is None else 0.0)
+        _cycle(ent)
+        _minutes(ent, clock, 10, 20.5, heating=True, heating_power=power)
+        caplog.set_level(logging.INFO)
+        _minutes(ent, clock, 31, 21.0, heating=False,
+                 heating_power=None if power is None else 0.0)
+        attrs = band.extra_state_attributes
+        assert attrs["reason"] == reason
+        assert band.is_on is (reason == "hot")
+        assert attrs["heated_during"] is False
+        if power is None:
+            assert attrs["heated_before_full_open"] is False
+            assert attrs["heated_before_min"] == pytest.approx(10.0)
+        else:
+            assert attrs["heated_before_full_open"] is True
+            assert attrs["heated_before_min"] == pytest.approx(10.0 * power / 100.0)
+        line = next(r.getMessage() for r in caplog.records
+                    if "out of band" in r.getMessage() or "not from the radiator" in r.getMessage())
+        if power == 45.0:
+            assert "the equivalent of 4.5 min at full output in the 30 min before (7.5 needed)" in line
+        elif power == 100.0:
+            assert "the equivalent of 10.0 min at full output in the 30 min before" in line
+        else:
+            assert "the valve heated 10 of the 30 min before" in line
 
     def test_warm_with_the_valve_shut_is_not_an_alarm(self, monkeypatch, caplog):
         """The 16 Oct afternoon: the room climbs with the valve at 0 % and

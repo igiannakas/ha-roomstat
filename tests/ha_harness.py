@@ -77,8 +77,29 @@ def _install_ha_stubs() -> None:
         def async_write_ha_state(self):
             self.state_writes = getattr(self, "state_writes", 0) + 1
 
+    # HA 2026.11 serves the native temperature API; the old names are
+    # deprecated and stop working in 2027.11.  Providing any of them is an
+    # error here, so a regression shows in every entity test.
+    deprecated_climate = frozenset({
+        "temperature_unit", "_attr_temperature_unit",
+        "current_temperature", "_attr_current_temperature",
+        "target_temperature", "_attr_target_temperature",
+        "target_temperature_high", "_attr_target_temperature_high",
+        "target_temperature_low", "_attr_target_temperature_low",
+    })
+
     class ClimateEntity(_Entity):
-        pass
+        def __init_subclass__(cls, **kwargs):
+            super().__init_subclass__(**kwargs)
+            for klass in cls.__mro__:
+                if klass is ClimateEntity:
+                    break
+                old = deprecated_climate & set(vars(klass))
+                if old:
+                    raise TypeError(
+                        f"{klass.__name__} provides the deprecated climate "
+                        f"temperature API: {sorted(old)}"
+                    )
 
     class RestoreEntity(_Entity):
         _stub_last_state = None
@@ -424,7 +445,7 @@ def _restart_from(old, new):
     """Simulate HA persisting *old* and restoring it into *new*."""
     attrs = {
         "preset_mode": old.preset_mode,
-        "temperature": old.target_temperature,
+        "temperature": old.native_target_temperature,
         "window_open_active": old._window_ctrl.is_active,
     }
     last_state = _State(old.hvac_mode.value, attrs)

@@ -1369,7 +1369,7 @@ def test_a_2_16_save_restarts_the_model_and_says_so(monkeypatch):
     again = _make_entity(dict(ON), window=False)
     again.coordinator.data = ent.coordinator.data
     state = _State(ent.hvac_mode.value, {"preset_mode": ent.preset_mode,
-                                         "temperature": ent.target_temperature})
+                                         "temperature": ent.native_target_temperature})
     _run(_start(again, last_state=state, extra=_Extra(extra)))
     lr = again._doser.learner
     assert lr.gain_c_per_open_min == pytest.approx(0.045) and lr.bias_c == 0.0

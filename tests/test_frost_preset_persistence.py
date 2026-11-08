@@ -314,7 +314,7 @@ class TestWindowCycleEndToEnd:
         self._open_window(ent)
         self._close_window(ent)
         assert ent.preset_mode == "frost_protection"
-        assert ent.target_temperature == 5.0
+        assert ent.native_target_temperature == 5.0
 
     def test_user_frost_survives_window_cycle_with_close_delay(self):
         ent = _make_entity({"window_close_delay_s": 120})
@@ -344,7 +344,7 @@ class TestWindowCycleEndToEnd:
         _run(ent._async_window_action(None))  # e.g. a timer racing the guard
         self._close_window(ent)
         assert ent.preset_mode == "none"
-        assert ent.target_temperature == 19.0
+        assert ent.native_target_temperature == 19.0
 
     def test_selecting_frost_during_window_open_is_kept(self):
         """Frost picked by hand with the window open overrides it (2.22.0):
@@ -494,7 +494,7 @@ class TestRestartEndToEnd:
         new = _make_entity(window=False)
         _restart_from(old, new)
         assert new.preset_mode == "frost_protection"
-        assert new.target_temperature == 5.0
+        assert new.native_target_temperature == 5.0
 
     def test_user_frost_survives_reload_after_entity_removal(self):
         old = _make_entity()
@@ -518,7 +518,7 @@ class TestRestartEndToEnd:
                                "window_open_active": True})
         _run(_start(ent, last_state=last, extra=None))
         assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.native_target_temperature == 20.5
 
     def _window_active_entity(self, saved_preset="eco"):
         old = _make_entity()
@@ -681,7 +681,7 @@ class TestRestartEndToEnd:
         _run(_start(ent))
         _run(_select_preset(ent, "eco"))
         self._go_away(ent)
-        assert ent.target_temperature == 17.0  # PresetConfig default away target
+        assert ent.native_target_temperature == 17.0  # PresetConfig default away target
         self._come_home(ent)
         assert ent.preset_mode == "eco"
 

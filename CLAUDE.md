@@ -92,7 +92,12 @@ modules.
   migration, and the options form's checks
   (`options_form_errors`, `options_form_values`: shown again after an
   error with what was entered).
-- `climate.py`: the ClimateEntity (properties, lifecycle, options).
+- `climate.py`: the ClimateEntity (properties, lifecycle, options). It serves
+  HA's native temperature API (2.23.0: `_attr_native_temperature_unit`,
+  `native_current_temperature`, `native_target_temperature`; the old names
+  are deprecated in HA 2026.11 and stop working in 2027.11, so Roomstat
+  needs HA 2026.11, `hacs.json`). Don't bring the old names back: the
+  harness's ClimateEntity refuses them (`tests/test_climate_native.py`).
 - `climate_regulation.py`: regulation cycle, rate limiting, TRV commands
   (`COMMAND_PACER`, `COMMAND_REFRESHER`), feeding the auto-tuner. At debug it logs one line per cycle with the
   whole decision (mode, setpoint, room and slope, the valve's reading and
@@ -909,6 +914,25 @@ is updating.
   never fires; "setpoint + 0.5" alone was on all night. Cold: 0.5 °C below
   for 120 min, restarted by every setpoint rise. `since` is set while on or
   warm.
+  **Weighed by the zone's heating % (2.23.0;** owner, 8 Nov 2026, after the
+  7 Nov review): with a heating power sensor set, the look-back counts
+  full-open-equivalent time, each report weighed by the zone's heating %
+  (`valve_open_pct`, the coordinator's `heating_power`; a report without
+  one counts as full output while the valve reports heating, the safe
+  side), since 4 °C/h is a rate at full output. Without the sensor,
+  minutes reported heating as before. `BandState.heated_before_full_open`
+  (attribute `heated_before_full_open`) says which; the log line reads
+  "the equivalent of N min at full output". "During" is still the valve's
+  own word. 3 Nov 2026, living room: hot at 14:22 (+0.95) and 22:21
+  (+0.50) on 9 and 15 min reported heating at 21–61 % (4.6 and 5.2
+  full-open minutes, about 0.2 °C there) while the room rose about 1 °C by
+  itself at lunch and in the evening: warm now. Still hot: 6 Nov, study,
+  Comfort heating cut by Night (gap +4.1). All three are replayed minute by
+  minute from Roomstat's own records (`tests/fixtures/out_of_band_2026_11.json`,
+  `TestOutOfBandWeighedByHeatingPower`). A valve's flow is not linear in
+  its opening (30 % open ≈ 50–65 % of the flow), so the share understates a
+  part-open valve's heat; the gap rule is the backstop for a radiator that
+  is really hot.
 - **Entity gone:** every coordinator update checks the entity settings (TRV,
   room sensor, fallback, window, presence, summer, schedule). One with
   neither a state nor a registry entry (deleted, renamed), or disabled in the
@@ -2030,6 +2054,8 @@ ruff check .
   to the window, Off then Heat, the tuner, a reload, the controller;
   2.22.1: an Off or Away picked by hand keeps its sticky override, the
   study's 6 Nov 2026 presses replayed).
+- `tests/test_climate_native.py` (2.23.0: the native temperature API, no
+  old name anywhere in the thermostat's classes).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).
@@ -2046,7 +2072,8 @@ ruff check .
 ## Versions and releases
 
 - Bump together: `manifest.json` → `"version"`, and the version badge in
-  `README.md`.
+  `README.md`. The minimum Home Assistant version is `hacs.json` →
+  `"homeassistant"` (2026.11.0 since 2.23.0) and the HA badge in `README.md`.
 - Release notes (GitHub release, English, Markdown):
 
   ```

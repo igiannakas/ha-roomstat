@@ -93,8 +93,9 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
     once per regulation cycle, outside the control loop's own decisions:
     hot is measured from max(setpoint, the lowest reading since the setpoint
     was last lowered), so a room cooling after a setback never counts, and
-    needs the radiator to be the cause (the valve heated, or the TRV's own
-    reading climbed), so a room warmed by the sun is "warm" in the
+    needs the radiator to be the cause (the valve heated enough, weighed by
+    the zone's heating % when known, or the TRV's own reading climbed), so a
+    room warmed by the sun is "warm" in the
     attributes and not an alarm; cold is counted again from every setpoint
     rise, so a heat-up never counts.  Only while heating is on, with no
     summer lock, no window open and a fresh room reading.  Meant for a
@@ -145,10 +146,13 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
             "radiator_heated": state.radiator_heated,
             # The evidence behind radiator_heated (None outside an excursion).
             "heated_during": state.heated_during,
+            # Full-open-equivalent minutes when heated_before_full_open (the
+            # zone's heating % known, 2.23.0), else minutes reported heating.
             "heated_before_min": (
                 round(state.heated_before_s / 60.0, 1)
                 if state.heated_before_s is not None
                 else None
             ),
+            "heated_before_full_open": state.heated_before_full_open,
             "radiator_rise_c": state.radiator_rise_c,
         }

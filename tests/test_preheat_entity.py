@@ -215,7 +215,7 @@ class TestShadow:
             clock = _Clock(monkeypatch)
             ent = _entity(mode=mode)
             _outing(ent, clock)
-            runs[mode] = (_commands(ent), ent.target_temperature)
+            runs[mode] = (_commands(ent), ent.native_target_temperature)
         assert runs["shadow"] == runs["off"]
         # And it did work things out meanwhile.
         assert len(_lines(ent)) >= 5
@@ -227,7 +227,7 @@ class TestShadow:
         _cycle(ent)
         assert _state(ent) == "close"
         assert ent.extra_state_attributes["preheat_target_c"] == 20.5
-        assert ent.target_temperature == 16.0
+        assert ent.native_target_temperature == 16.0
         assert ent._effective_setpoint() == 16.0
         clock.tick(MIN)
 
@@ -379,7 +379,7 @@ class TestScheduled:
         clock.tick(MIN)
         _cycle(ent)
         assert ent.extra_state_attributes["preheat_target_c"] == 20.5
-        assert ent.target_temperature == 16.0
+        assert ent.native_target_temperature == 16.0
         _arrive(ent)
         assert ent._effective_setpoint() == 20.5
 

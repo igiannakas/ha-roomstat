@@ -1,8 +1,8 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.22.1-blue)
-![HA](https://img.shields.io/badge/Home%20Assistant-2026.3%2B-41BDF5)
+![Version](https://img.shields.io/badge/version-2.23.0-blue)
+![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
 not the temperature at the radiator. It works with Tado V3+ and Tado X radiator
@@ -216,6 +216,8 @@ changes.
   and a braking time of 0 becomes 10 minutes.
 
 ## Install
+
+Roomstat needs Home Assistant 2026.11 or later (since 2.23.0).
 
 1. In HACS, open **⋮ → Custom repositories**. Add
    `https://github.com/igiannakas/ha-roomstat` as an **Integration**.
@@ -581,17 +583,19 @@ heating is on, with no summer mode, no window open and a working room sensor:
   warm. One that warms up again by 0.5 °C from its lowest point is — if the
   radiator did it: the valve reported heating while the room was too warm,
   or it heated long enough in the half hour before to explain the rise
-  (7.5 minutes for 0.5 °C; a short top-up can't), or the valve's own reading
-  stands 2 °C further above the room than when the radiator was cold. A
-  room warmed by the sun, people or an appliance is **warm**, not an
-  alarm: the sensor stays off and `reason` says `warm`.
+  (7.5 minutes at full output for 0.5 °C, so a short top-up can't; with a
+  heating power sensor set, 15 minutes at 50 % count as 7.5), or the
+  valve's own reading stands 2 °C further above the room than when the
+  radiator was cold. A room warmed by the sun, people or an appliance is
+  **warm**, not an alarm: the sensor stays off and `reason` says `warm`.
 - The 2 hours start again with each rise of the target, so a heat-up doesn't
   count.
 - Attributes: `reason` (`hot`, `cold`, or `warm` while off), `deviation_c`
   (room minus target), `since` (when it went out of band, set while on or
   warm), `radiator_heated`, and the evidence for it: `heated_during`,
-  `heated_before_min` and `radiator_rise_c`. The room's activity log says
-  the same in words.
+  `heated_before_min` (minutes at full output when
+  `heated_before_full_open` is true) and `radiator_rise_c`. The room's
+  activity log says the same in words.
 - Change the limits under **Configure → Out-of-band alarm**.
 
 A notification for it (put your own entity ids in):

@@ -257,7 +257,7 @@ def test_a_preset_temperature_change_settles_across_its_reload(monkeypatch):
     new = _reload(clock, old, dict(old._config_entry.options))
     _feed(new, 20.4, 13.0, 5.0, off=True)
     _cycle(new)
-    assert new.target_temperature == 22.0
+    assert new.native_target_temperature == 22.0
     assert _commands(new) == []
     _settle(clock)
     assert _commands(new) == ["timer25"]

@@ -11,6 +11,9 @@ test_fail_cold_entity.py.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from tests.plant_sim import (
@@ -615,6 +618,116 @@ class TestOutOfBandReplays:
         assert on and on[0] == 90                            # 07:00
         assert states[90].radiator_rise_c > 3.5
         assert states[on[-1] + 1].reason == C.BAND_WARM
+
+
+_NOV_CASES = json.loads(
+    (Path(__file__).parent / "fixtures" / "out_of_band_2026_11.json").read_text()
+)
+
+
+def _replay_nov(name, *, with_heating_power=True):
+    """Feed a recorded episode of 3-6 Nov 2026 one minute at a time, as the
+    regulation cycle does: the valve's heating report is the zone's heating
+    % above 0 (a Tado cloud zone's hvac_action), and the heating % itself
+    weighs it unless *with_heating_power* is False (no heating power sensor:
+    2.22.1's rule)."""
+    case = _NOV_CASES[name]
+    mon = C.OutOfBandMonitor()
+    states = []
+    for m, room in enumerate(case["room"]):
+        pct = case["pct"][m]
+        states.append(mon.update(
+            m * 60.0, room, case["setpoint"][m], eligible=not case["window"][m],
+            valve_heating=(pct or 0.0) > 0.0, trv_c=case["trv"][m],
+            valve_open_pct=pct if with_heating_power else None, **BAND,
+        ))
+    return states
+
+
+def _first_judged(states):
+    return next((m, s) for m, s in enumerate(states) if s.reason in (C.BAND_HOT, C.BAND_WARM))
+
+
+class TestOutOfBandWeighedByHeatingPower:
+    """2.23.0: with the zone's heating % known, the heating before an
+    excursion is full-open-equivalent time.  The alarms of 3 and 6 Nov 2026,
+    replayed: the two living-room ones the room made itself (a valve part
+    open for 9 and 15 minutes, 4.6 and 5.2 minutes at full output) are warm
+    now; the study's hot radiator is still hot."""
+
+    def test_the_living_rooms_lunchtime_is_warm(self):
+        old = _replay_nov("living_3_nov_lunch", with_heating_power=False)
+        m, alarm = _first_judged(old)
+        assert m == 68 and alarm.reason == C.BAND_HOT              # 14:23, as live (14:22)
+        assert alarm.heated_before_s == pytest.approx(9 * 60.0)
+        assert alarm.heated_before_full_open is False
+        m, now = _first_judged(_replay_nov("living_3_nov_lunch"))
+        assert m == 68 and now.reason == C.BAND_WARM and not now.on
+        assert now.heated_before_full_open is True
+        assert now.heated_before_s == pytest.approx(9 * 0.51 * 60.0)
+        assert now.radiator_rise_c < C.RADIATOR_RISE_C
+        assert "the equivalent of 4.6 min at full output in the 30 min before (7.5 needed)" in (
+            C.OutOfBandMonitor.describe(now, 20.6, 0.5))
+
+    def test_the_living_rooms_evening_is_warm(self):
+        old = _replay_nov("living_3_nov_evening", with_heating_power=False)
+        m, alarm = _first_judged(old)
+        assert m == 85 and alarm.reason == C.BAND_HOT              # 22:22, as live (22:21)
+        assert alarm.heated_before_s == pytest.approx(15 * 60.0)
+        m, now = _first_judged(_replay_nov("living_3_nov_evening"))
+        assert m == 85 and now.reason == C.BAND_WARM
+        assert now.heated_before_s / 60.0 == pytest.approx(5.2, abs=0.05)
+        assert not any(s.on for s in _replay_nov("living_3_nov_evening"))
+
+    def test_the_studys_hot_radiator_is_still_hot(self):
+        for weighed in (False, True):
+            states = _replay_nov("study_6_nov_night", with_heating_power=weighed)
+            m, alarm = _first_judged(states)
+            assert m == 166 and alarm.on and alarm.reason == C.BAND_HOT   # 22:26 (live 22:24)
+            assert alarm.radiator_rise_c == pytest.approx(4.07, abs=0.01)
+            assert alarm.reference_c == pytest.approx(19.35)
+
+    def test_part_open_heating_counts_its_share(self):
+        """Ten minutes at 50 % then the room 0.5 over: 5 minutes at full
+        output, short of the 7.5 a 0.5 band needs; at 80 %, 8 minutes."""
+        for pct, reason in ((50.0, C.BAND_WARM), (80.0, C.BAND_HOT)):
+            mon = C.OutOfBandMonitor()
+            t = 0.0
+            for _ in range(10):
+                mon.update(t, 20.0, 20.0, eligible=True, valve_heating=True,
+                           valve_open_pct=pct, **BAND)
+                t += 60.0
+            for _ in range(31):
+                state = mon.update(t, 20.5, 20.0, eligible=True, valve_heating=False,
+                                   valve_open_pct=0.0, **BAND)
+                t += 60.0
+            assert state.reason == reason
+            assert state.heated_before_s == pytest.approx(10 * pct / 100.0 * 60.0)
+
+    def test_a_report_without_a_heating_percentage_counts_as_full_output(self):
+        """The heating sensor unavailable for part of the look-back: those
+        minutes count at full output (the safe side for the alarm)."""
+        mon = C.OutOfBandMonitor()
+        t = 0.0
+        for i in range(10):
+            mon.update(t, 20.0, 20.0, eligible=True, valve_heating=True,
+                       valve_open_pct=None if i < 5 else 40.0, **BAND)
+            t += 60.0
+        for _ in range(31):
+            state = mon.update(t, 20.5, 20.0, eligible=True, valve_heating=False,
+                               valve_open_pct=0.0, **BAND)
+            t += 60.0
+        assert state.heated_before_full_open is True
+        assert state.heated_before_s == pytest.approx((5 * 1.0 + 5 * 0.4) * 60.0)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "45", True])
+    def test_an_unusable_percentage_is_ignored(self, bad):
+        mon = C.OutOfBandMonitor()
+        mon.update(0.0, 20.0, 20.0, eligible=True, valve_heating=True, valve_open_pct=bad, **BAND)
+        state = mon.update(60.0, 20.6, 20.0, eligible=True, valve_heating=False, **BAND)
+        assert mon._heated_before_full_open is False
+        assert mon._heated_before_s == pytest.approx(60.0)
+        assert state.reason is None                       # not judged yet (30 min)
 
 
 class TestOutOfBandCold:

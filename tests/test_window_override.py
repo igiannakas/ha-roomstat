@@ -169,7 +169,7 @@ class TestAChangeByHandOverridesTheOpenWindow:
         ent = _entity(clock)
         _open(ent, clock)
         _run(ent.async_set_temperature(temperature=21.0))
-        assert (ent.preset_mode, ent.target_temperature) == ("none", 21.0)
+        assert (ent.preset_mode, ent.native_target_temperature) == ("none", 21.0)
         assert ent._window_ctrl.overridden
         _settle(clock)
         assert _heat(ent) == [25.0]
@@ -420,7 +420,7 @@ class TestAcrossAReload:
     def _restart(self, old, window_state):
         new = _make_entity(dict(old._config_entry.options))
         new.hass.set(WINDOW, window_state)
-        attrs = {"preset_mode": old.preset_mode, "temperature": old.target_temperature,
+        attrs = {"preset_mode": old.preset_mode, "temperature": old.native_target_temperature,
                  "window_open_active": old._window_ctrl.is_active}
         _run(old.async_will_remove_from_hass())
         _run(_start(new, last_state=_State(old.hvac_mode.value, attrs),

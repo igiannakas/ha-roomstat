@@ -261,7 +261,7 @@ class TestFollowSchedule:
         ent = _entity("night")
         _schedule(ent, "comfort")
         assert ent.preset_mode == "comfort"
-        assert ent.target_temperature == 20.5
+        assert ent.native_target_temperature == 20.5
         _schedule(ent, "Frost Protection")
         assert ent.preset_mode == "frost_protection"
 

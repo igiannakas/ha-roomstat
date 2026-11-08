@@ -254,7 +254,9 @@ class RoomstatClimate(
             "topup_ready_in_min", *WINDOW_WAIT_ATTRIBUTES,
         }
     )
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    # The native temperature API (HA 2026.11; the old temperature_unit,
+    # current_temperature and target_temperature stop working in 2027.11).
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_TENTHS
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
@@ -1337,13 +1339,14 @@ class RoomstatClimate(
     # ------------------------------------------------------------------
 
     @property
-    def current_temperature(self) -> float | None:
-        """Return the room temperature from the external sensor."""
+    def native_current_temperature(self) -> float | None:
+        """Return the room temperature from the external sensor (°C)."""
         return self.coordinator.data.get("room_temp")
 
     @property
-    def target_temperature(self) -> float | None:
-        """Return the effective setpoint so HA always shows the active target."""
+    def native_target_temperature(self) -> float | None:
+        """Return the effective setpoint (°C), so HA always shows the active
+        target."""
         return self._effective_setpoint()
 
     @property
