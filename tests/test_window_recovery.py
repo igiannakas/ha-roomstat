@@ -713,3 +713,60 @@ class TestTunerAfterAWindow:
         assert ent._reg_state.mode == "heat"
         assert ent._autotuner._heatup is None
         assert ent._autotuner.last_event == "heat-up after a window: not analysed"
+
+
+class TestOutOfBandAfterAWindow:
+    """2.24.1: the out-of-band check's "radiator cold" level (the lowest TRV
+    − room gap of the last 3 h) leaves out the window and its re-warm wait.
+    The valve sits by the radiator under the window: the draught chills its
+    reading far more than the room's, and once the window is shut its
+    reading climbs back faster, which the gap read as a hot radiator (9 Nov
+    2026, study: "hot" 02:23-04:27 with the valve shut all night)."""
+
+    def test_the_valves_recovery_is_not_a_hot_radiator(self, monkeypatch):
+        import sys
+        rise_needed = sys.modules["roomstat_e2e.climate_controllers"].RADIATOR_RISE_C
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock)                    # Comfort 20.5, the valve's reading 12.0
+        before = 12.0 - 20.5
+        ent.hass.set(WINDOW, "on")
+        ent._async_window_changed(_event("on"))
+        _fire_last_timer()                      # the open delay: frost protection
+        for k in range(1, 21):                  # 20 min aired: the valve chills more
+            clock.tick()
+            _feed(ent, 20.5 - 1.1 * k / 20, 12.0 - 2.6 * k / 20, 5.0)
+            _cycle(ent)
+        aired = 9.4 - 19.4
+        ent.hass.keep_tasks = True
+        clock.tick(55.0)
+        _close_window(ent)
+        closed = clock.now
+        kept = len(ent._band_monitor._gaps)
+
+        def shut_for(minutes):                  # the room back in 20, the valve in 40
+            return (19.4 + 1.7 * min(minutes, 20.0) / 20.0,
+                    9.4 + 4.1 * min(minutes, 40.0) / 40.0)
+
+        polls = [closed + CLOSE_DELAY + 60.0 * j for j in range(30)]
+        cycles = [closed + 5.0 + 60.0 * k for k in range(90)]
+        for t, kind in sorted([(t, "poll") for t in polls] + [(t, "cycle") for t in cycles]):
+            clock.now = t
+            if kind == "poll":
+                if ent._window_ctrl.close_delay_active and _close_polls():
+                    _fire("_async_window_close_action")
+            else:
+                room, valve = shut_for((t - closed) / 60.0)
+                _feed(ent, room, valve, 5.0)
+                _cycle(ent)
+                if ent._window_ctrl.close_delay_active:
+                    assert len(ent._band_monitor._gaps) == kept   # the wait's not kept
+            drain_tasks(ent)
+        assert ent.preset_mode == "comfort" and not ent._window_ctrl.close_delay_active
+
+        state = ent._band_monitor.state
+        assert state.reason == "warm" and not state.on
+        now = 13.5 - 21.1
+        # Counted from the airing's gap the valve's recovery was a hot radiator.
+        assert now - aired >= rise_needed
+        assert min(g for _, g in ent._band_monitor._gaps) >= min(before, now) - 1.0
+        assert state.radiator_rise_c < rise_needed

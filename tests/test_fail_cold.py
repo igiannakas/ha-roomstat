@@ -625,21 +625,24 @@ _NOV_CASES = json.loads(
 )
 
 
-def _replay_nov(name, *, with_heating_power=True):
-    """Feed a recorded episode of 3-6 Nov 2026 one minute at a time, as the
+def _replay_nov(name, *, with_heating_power=True, gap_through_windows=False):
+    """Feed a recorded episode of 3-9 Nov 2026 one minute at a time, as the
     regulation cycle does: the valve's heating report is the zone's heating
     % above 0 (a Tado cloud zone's hvac_action), and the heating % itself
     weighs it unless *with_heating_power* is False (no heating power sensor:
-    2.22.1's rule)."""
+    2.22.1's rule).  A window makes the minute ineligible and, unless
+    *gap_through_windows* (2.24.0's rule), keeps its TRV − room gap out."""
     case = _NOV_CASES[name]
     mon = C.OutOfBandMonitor()
     states = []
     for m, room in enumerate(case["room"]):
         pct = case["pct"][m]
+        window = case["window"][m]
         states.append(mon.update(
-            m * 60.0, room, case["setpoint"][m], eligible=not case["window"][m],
+            m * 60.0, room, case["setpoint"][m], eligible=not window,
             valve_heating=(pct or 0.0) > 0.0, trv_c=case["trv"][m],
-            valve_open_pct=pct if with_heating_power else None, **BAND,
+            valve_open_pct=pct if with_heating_power else None,
+            window=window and not gap_through_windows, **BAND,
         ))
     return states
 
@@ -728,6 +731,115 @@ class TestOutOfBandWeighedByHeatingPower:
         assert mon._heated_before_full_open is False
         assert mon._heated_before_s == pytest.approx(60.0)
         assert state.reason is None                       # not judged yet (30 min)
+
+
+class TestOutOfBandAfterAWindow:
+    """2.24.1: the TRV − room gap is not kept while a window holds the room.
+    The valve sits by the radiator under the window, so a draught chills its
+    reading far more than the room's, and a "radiator cold" level taken then
+    made the valve's own recovery read as a hot radiator."""
+
+    def test_the_studys_night_is_warm_not_hot(self):
+        """9 Nov 2026, study, valve shut all night: aired 00:48-01:24, the
+        re-warm wait until 01:50, then 1.4 °C over Night 18.5 by itself.
+        2.24.0 (the window's gap kept) is replayed as it ran live: warm at
+        02:20, hot at 02:23 on a gap 2.07 over its low (taken at 01:21 with
+        the window open), warm again at 04:27 once that low had left the 3 h.
+        Without the window's samples the gap stands at most 1.19 over its
+        low: warm, never an alarm."""
+        old = _replay_nov("study_9_nov_window", gap_through_windows=True)
+        changes = [(m, s.reason) for m, s in enumerate(old)
+                   if m and (s.on, s.reason) != (old[m - 1].on, old[m - 1].reason)]
+        assert changes == [(93, C.BAND_WARM), (96, C.BAND_HOT), (220, C.BAND_WARM)]
+        assert old[96].on and old[96].radiator_rise_c == pytest.approx(2.07)
+        assert old[96].reference_c == pytest.approx(18.95)
+        assert C.OutOfBandMonitor.describe(old[96], 18.5, 0.5) == (   # the live line
+            "room 19.93 °C, 0.98 over its low of 18.95 (target 18.5); "
+            "the valve's reading is 2.1 °C over its cold level (a hot radiator)")
+
+        now = _replay_nov("study_9_nov_window")
+        assert not any(s.on for s in now)
+        m, warm = _first_judged(now)
+        assert m == 93 and warm.reason == C.BAND_WARM
+        assert all(s.reason == C.BAND_WARM for s in now[93:])
+        rise = max(s.radiator_rise_c for s in now[93:])
+        assert rise == pytest.approx(1.19, abs=0.01)
+        assert rise < C.RADIATOR_RISE_C
+
+    def test_the_gap_is_not_kept_while_a_window_holds_the_room(self):
+        """Before and after the window the gap is kept; during it, not."""
+        mon = C.OutOfBandMonitor()
+        t = 0.0
+        for room, trv, window in ([(20.0, 12.0, False)] * 10      # gap -8.0
+                                  + [(19.0, 9.0, True)] * 30       # gap -10.0, the draught
+                                  + [(20.0, 12.5, False)] * 10):   # gap -7.5
+            mon.update(t, room, 20.0 if not window else 5.0, eligible=not window,
+                       trv_c=trv, window=window, **BAND)
+            t += 60.0
+        assert len(mon._gaps) == 20
+        assert min(g for _, g in mon._gaps) == pytest.approx(-8.0)
+        assert mon._radiator_rise_c() == pytest.approx(0.5)
+
+    def test_a_radiator_heated_after_a_window_is_still_hot(self):
+        """The valve's reading climbing well past the gap before the window
+        (a radiator really heating) is still the radiator."""
+        mon = C.OutOfBandMonitor()
+        t = 0.0
+        for room, trv, window, setpoint in ([(20.0, 12.0, False, 20.0)] * 10
+                                            + [(19.0, 9.0, True, 5.0)] * 20
+                                            + [(19.2, 12.0, False, 20.0)] * 10):
+            mon.update(t, room, setpoint, eligible=not window, trv_c=trv, window=window, **BAND)
+            t += 60.0
+        for _ in range(31):                     # the room 0.5 over, the valve's reading 3 up
+            state = mon.update(t, 20.5, 20.0, eligible=True, trv_c=15.5, **BAND)
+            t += 60.0
+        assert state.on and state.reason == C.BAND_HOT
+        assert state.radiator_rise_c == pytest.approx(3.0)
+
+
+class TestOutOfBandVerdict:
+    """2.24.1: the sensor shows ``verdict``, the state as it was when the
+    verdict (on, reason, since) last changed, so the recorder writes a row
+    per verdict instead of one a minute as the deviation moves (9 Nov 2026:
+    2,310 rows in 17 h for four rooms, 34 of them a change of state)."""
+
+    def test_empty_outside_an_excursion(self):
+        mon = C.OutOfBandMonitor()
+        t, states = _feed(mon, 0.0, [20.0, 20.1, 19.9, 20.2, 19.8], 20.0)
+        assert [s.deviation_c for s in states] == pytest.approx([0.0, 0.1, -0.1, 0.2, -0.2])
+        assert mon.verdict == C.BandState()
+
+    def test_fixed_while_the_verdict_holds(self):
+        """Warm (the sun, valve shut, its reading following the room), then
+        hot once the valve heats, then back within the band."""
+        mon = C.OutOfBandMonitor()
+        t, _ = _feed(mon, 0.0, [20.0] * 5, 20.0, heating=False, trv=lambda r: r - 8.0)
+        t, states = _feed(mon, t, [20.5 + 0.01 * (i % 7) for i in range(31)], 20.0,
+                          heating=False, trv=lambda r: r - 8.0)
+        warm = states[-1]
+        assert warm.reason == C.BAND_WARM and not warm.on
+        assert mon.verdict == warm
+        t, states = _feed(mon, t, [20.6 + 0.01 * (i % 5) for i in range(20)], 20.0,
+                          heating=False, trv=lambda r: r - 8.0)
+        assert {s.deviation_c for s in states} != {warm.deviation_c}   # the numbers move
+        assert mon.verdict == warm                                     # the verdict does not
+        state = mon.update(t, 20.7, 20.0, eligible=True, valve_heating=True, trv_c=12.7, **BAND)
+        assert state.on and state.reason == C.BAND_HOT
+        assert mon.verdict == state and mon.verdict.since == warm.since
+        t, _ = _feed(mon, t + 60.0, [20.8, 20.9], 20.0, heating=True, trv=12.9)
+        assert mon.verdict == state
+        mon.update(t, 20.2, 20.0, eligible=True, valve_heating=False, trv_c=12.2, **BAND)
+        assert mon.verdict == C.BandState()
+
+    def test_cold_and_no_reading(self):
+        mon = C.OutOfBandMonitor()
+        t, states = _feed(mon, 0.0, [19.4] * 121, 20.0)
+        cold = states[-1]
+        assert cold.on and mon.verdict == cold
+        t, _ = _feed(mon, t, [19.35, 19.3], 20.0)
+        assert mon.verdict == cold
+        mon.update(t, None, 20.0, eligible=True, **BAND)
+        assert mon.verdict == C.BandState()
 
 
 class TestOutOfBandCold:

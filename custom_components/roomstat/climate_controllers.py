@@ -1811,7 +1811,16 @@ HEATING_SAMPLE_MAX_S = 120.0
 # power for 12 (study) and 35 minutes (living room) lifted it 4–5 °C, and it
 # stayed 2 °C up for about an hour; with the valve shut all day it swung
 # 1.0–1.4 °C (22 Oct, study: its reading fell 15.4 → 13.9 and recovered with
-# the room flat), which at 1.0 gave three false hot alarms.
+# the room flat), which at 1.0 gave three false hot alarms.  The gap is not
+# kept while a window holds the room (open, or in its close delay and re-warm
+# wait, 2.24.1): the valve sits by the radiator, under the window, and the
+# draught chills its reading far more than the room's, so a low taken then
+# made the valve's own recovery read as a hot radiator.  9 Nov 2026, study,
+# valve shut all night: in a 36-min airing its reading fell 12.7 → 10.4 and
+# the room 20.1 → 19.0 (gap −7.2 → −8.6); with the window shut the valve's
+# reading climbed back faster than the room, the gap stood 2.07 over that
+# low, and the room was "hot" from 02:23 to 04:27.  Without the window's
+# samples it stood at most 1.19 over its low: warm, never an alarm.
 RADIATOR_RISE_C = 2.0
 GAP_WINDOW_S = 3 * 3600.0
 
@@ -1875,7 +1884,9 @@ class OutOfBandMonitor:
         counts as full output while the valve reports heating);
       - or the TRV's own reading stands ``RADIATOR_RISE_C`` further above
         the room than at its lowest in the last ``GAP_WINDOW_S`` (a hot
-        radiator next to a valve that reports nothing).
+        radiator next to a valve that reports nothing).  That gap is not
+        kept while a window holds the room (``window``): a draught chills
+        the valve's reading far more than the room's.
 
       Otherwise the room was warmed by something else (sun, people, an
       appliance: on 16 Oct 2026 four rooms rose 1.5–2.3 °C with every valve
@@ -1888,6 +1899,14 @@ class OutOfBandMonitor:
     * **cold**: setpoint - room >= band for the cold delay, counted again
       from every setpoint rise (and from a restart), so each schedule step
       gets a full heat-up's allowance.
+
+    ``state`` is the latest update's, its numbers live (the log lines are
+    worded from it); ``verdict`` is the state as it was when the verdict
+    (on, reason, since) last changed, and stays as it was until the next
+    change: an empty ``BandState`` outside an excursion.  The sensor shows
+    the verdict, so the recorder writes a row per verdict, not one a minute
+    as the deviation moves (2.24.1; 9 Nov 2026: 2,310 rows in 17 h for four
+    rooms, 34 of them a change of state).
 
     ``min_since`` and the setpoint it belongs to are persisted (``as_dict``
     / ``restore``), so a reload in the middle of a setback keeps the low;
@@ -1913,6 +1932,7 @@ class OutOfBandMonitor:
         self._heated_before_full_open: bool | None = None
         self._gaps: deque[tuple[float, float]] = deque()
         self.state = BandState()
+        self.verdict = BandState()
 
     def update(
         self,
@@ -1927,6 +1947,7 @@ class OutOfBandMonitor:
         valve_heating: bool | None = None,
         trv_c: float | None = None,
         valve_open_pct: float | None = None,
+        window: bool = False,
     ) -> BandState:
         """Take one reading; return (and keep in ``state``) what to show.
 
@@ -1934,7 +1955,9 @@ class OutOfBandMonitor:
         known); ``trv_c``: the TRV's own reading (None: not known);
         ``valve_open_pct``: the zone's heating power, 0-100 % (None: no
         heating power sensor, or no usable value), which weighs this
-        update's heating in the look-back.
+        update's heating in the look-back; ``window``: a window holds the
+        room (open, or in its close delay and re-warm wait), so the TRV −
+        room gap is the draught's and is not kept (see RADIATOR_RISE_C).
         """
         pct = _heating_share(valve_open_pct)
         if valve_heating is not None or pct is not None:
@@ -1945,7 +1968,7 @@ class OutOfBandMonitor:
             self._note_heating(now, pct, True)
         else:
             self._note_heating(now, 1.0 if valve_heating else 0.0, False)
-        if room_c is not None and trv_c is not None:
+        if room_c is not None and trv_c is not None and not window:
             if self._gaps and (now < self._gaps[-1][0] or now - self._gaps[-1][0] > GAP_WINDOW_S):
                 self._gaps.clear()               # clock went back, or a long gap
             self._gaps.append((now, trv_c - room_c))
@@ -1956,8 +1979,7 @@ class OutOfBandMonitor:
             # Nothing to judge (no reading): no excursion runs.
             self._hot_since = self._cold_since = None
             self._heated_before_s = self._heated_before_full_open = None
-            self.state = BandState()
-            return self.state
+            return self._keep(BandState())
 
         if self.setpoint is None or self.min_since is None:
             if self.min_since is None:
@@ -2007,7 +2029,7 @@ class OutOfBandMonitor:
                 reason = BAND_WARM
         elif self._cold_since is not None and now - self._cold_since >= cold_after_s:
             on, reason, since = True, BAND_COLD, self._cold_since
-        self.state = BandState(
+        return self._keep(BandState(
             on=on,
             reason=reason,
             since=since,
@@ -2018,8 +2040,17 @@ class OutOfBandMonitor:
             heated_before_s=round(before, 1) if before is not None else None,
             heated_before_full_open=full_open,
             radiator_rise_c=round(rise, 2) if rise is not None else None,
-        )
-        return self.state
+        ))
+
+    def _keep(self, state: BandState) -> BandState:
+        """Keep *state* as the latest, and as the verdict when the verdict
+        (on, reason, since) has changed: the state then, or an empty one
+        outside an excursion."""
+        self.state = state
+        verdict = self.verdict
+        if (state.on, state.reason, state.since) != (verdict.on, verdict.reason, verdict.since):
+            self.verdict = state if state.reason is not None else BandState()
+        return state
 
     @staticmethod
     def heated_min_s(band_c: float) -> float:

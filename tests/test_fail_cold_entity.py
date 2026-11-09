@@ -569,6 +569,36 @@ class TestOutOfBandEntity:
         assert attrs["heated_during"] is False and attrs["heated_before_min"] == 0.0
         assert attrs["radiator_rise_c"] == pytest.approx(0.0)
 
+    def test_the_attributes_hold_still_while_the_verdict_holds(self, monkeypatch):
+        """2.24.1: the attributes are the verdict, so they change (and the
+        recorder writes a row) only when the room goes out of band, its
+        verdict changes or it comes back, not every cycle as the room
+        moves (9 Nov 2026: 2,310 rows in 17 h for four rooms)."""
+        clock = _Clock(monkeypatch)
+        ent = _entity()
+        band = _band_entity(ent)
+        _feed(ent, 20.5, 12.5, None, heating=False)
+        _cycle(ent)
+        written = [dict(band.extra_state_attributes)]
+        rooms = ([20.5 + 0.01 * (m % 4) for m in range(20)]       # in band, moving
+                 + [21.0 + 0.01 * (m % 6) for m in range(60)]     # 0.5 over, the sun
+                 + [20.6 + 0.01 * (m % 3) for m in range(20)])    # back within it
+        for room in rooms:
+            clock.tick(60)
+            _feed(ent, room, room - 8.0, None, heating=False)
+            _cycle(ent)
+            attrs = dict(band.extra_state_attributes)
+            if attrs != written[-1]:
+                written.append(attrs)
+        assert [a["reason"] for a in written] == [None, "warm", None]
+        assert all(v is None for v in written[0].values())
+        warm = written[1]
+        assert warm["deviation_c"] == pytest.approx(0.5, abs=0.06)
+        assert warm["radiator_heated"] is False and warm["since"] is not None
+        assert written[2] == written[0]
+        # The thermostat's own state moved every cycle meanwhile.
+        assert ent._band_monitor.state.deviation_c != warm["deviation_c"]
+
     def test_hot_when_the_trv_reading_climbs_with_the_valve_silent(self, monkeypatch):
         """No hvac_action from the entity, but the TRV's own reading climbs
         far more than the room: a hot radiator."""

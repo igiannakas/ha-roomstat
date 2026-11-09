@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.24.0-blue)
+![Version](https://img.shields.io/badge/version-2.24.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -517,16 +517,24 @@ heating is on, with no summer mode, no window open and a working room sensor:
   (7.5 minutes at full output for 0.5 °C, so a short top-up can't; with a
   heating power sensor set, 15 minutes at 50 % count as 7.5), or the
   valve's own reading stands 2 °C further above the room than when the
-  radiator was cold. A room warmed by the sun, people or an appliance is
-  **warm**, not an alarm: the sensor stays off and `reason` says `warm`.
+  radiator was cold. That last comparison leaves out the time a window is
+  open and the room's re-warm after it: the draught chills the valve, under
+  the window, far more than the room. A room warmed by the sun, people or an
+  appliance is **warm**, not an alarm: the sensor stays off and `reason`
+  says `warm`.
 - The 2 hours start again with each rise of the target, so a heat-up doesn't
   count.
 - Attributes: `reason` (`hot`, `cold`, or `warm` while off), `deviation_c`
   (room minus target), `since` (when it went out of band, set while on or
   warm), `radiator_heated`, and the evidence for it: `heated_during`,
   `heated_before_min` (minutes at full output when
-  `heated_before_full_open` is true) and `radiator_rise_c`. The room's
-  activity log says the same in words.
+  `heated_before_full_open` is true) and `radiator_rise_c`. They are the
+  verdict: as they stood when the sensor last turned hot, cold or warm, kept
+  until it changes again, and empty otherwise: within the band, or before
+  the 30 minutes or 2 hours are up. So the recorder stores a row per
+  verdict, not one a minute. The **Room error** sensor has the live
+  difference (target minus room). The room's activity log says the same in
+  words.
 - Change the limits under **Configure → Out-of-band alarm**.
 
 A notification for it (put your own entity ids in):

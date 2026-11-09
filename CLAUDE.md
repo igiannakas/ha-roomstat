@@ -969,6 +969,30 @@ is updating.
   its opening (30 % open ≈ 50–65 % of the flow), so the share understates a
   part-open valve's heat; the gap rule is the backstop for a radiator that
   is really hot.
+  **A window's draught is no radiator (2.24.1):** the TRV − room gap is not
+  kept while a window holds the room (`_window_open`: the sensor open, the
+  close delay and the re-warm wait; `OutOfBandMonitor.update(window=…)`).
+  The valve sits by the radiator under the window, so the draught chills
+  its reading far more than the room's, and once shut it climbs back
+  faster. 9 Nov 2026, study, valve shut all night: aired 00:48–01:24, the
+  valve's reading fell 12.7 → 10.4, the room 20.1 → 19.0 (gap −7.2 →
+  −8.6); with the window shut the gap stood 2.07 over that low and the
+  room was "hot" 02:23–04:27, until the low left the 3 h. Without the
+  window's samples it stands at most 1.19 over its low: warm. Replayed minute by minute from the room sensor and the Tado zone
+  (`study_9_nov_window` in `tests/fixtures/out_of_band_2026_11.json`,
+  `TestOutOfBandAfterAWindow`; through the entity in
+  `tests/test_window_recovery.py`). Unchanged: the master bedroom's hot
+  02:04–02:36 the same night (gap 2.03 over a low taken just after its
+  re-warm wait, 6.8 full-open minutes): its valve had run 8 min at full
+  power after the window, so borderline, not a draught.
+  **The sensor shows the verdict (2.24.1):** its attributes are
+  `OutOfBandMonitor.verdict`, the state as it was when the verdict (on,
+  reason, since) last changed, kept until the next change and empty
+  outside an excursion; `state` stays the latest update's, live (the log
+  lines are worded from it). With the live deviation in its attributes the
+  sensor wrote a recorder row almost every cycle: 9 Nov 2026, 2,310 rows in
+  17 h for four rooms, 34 of them a change of state. The live difference
+  (target minus room) is the Room error sensor.
 - **Entity gone:** every coordinator update checks the entity settings (TRV,
   room sensor, fallback, window, presence, summer, schedule). One with
   neither a state nor a registry entry (deleted, renamed), or disabled in the

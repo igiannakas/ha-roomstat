@@ -100,6 +100,14 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
     rise, so a heat-up never counts.  Only while heating is on, with no
     summer lock, no window open and a fresh room reading.  Meant for a
     notification (see the README).
+
+    The attributes are the verdict (``OutOfBandMonitor.verdict``): the
+    excursion as it stood when the sensor last turned hot, warm, cold or
+    back within the band, fixed until the next of those, and empty outside
+    an excursion.  So the recorder writes a row per verdict; with the live
+    deviation in them it wrote one a minute (9 Nov 2026: 2,310 rows in 17 h
+    for four rooms, 34 of them a change of state).  The live difference
+    (target minus room) is the Room error sensor.
     """
 
     _attr_has_entity_name = True
@@ -129,11 +137,12 @@ class RoomstatOutOfBandBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        """How far off the room is, since when, and why."""
+        """How far off the room was when the verdict was reached, since
+        when, and why (all None outside an excursion)."""
         climate = getattr(self.coordinator, "climate_entity", None)
         if climate is None:
             return {}
-        state = climate._band_monitor.state
+        state = climate._band_monitor.verdict
         return {
             "deviation_c": state.deviation_c,
             "since": (

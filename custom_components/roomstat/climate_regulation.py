@@ -214,17 +214,21 @@ class RegulationMixin:
         open and a fresh room reading.  The active TRV's own word (heating or
         not) and reading tell a hot radiator from the sun; the zone's heating
         % (its heating power sensor, when set) weighs how much the valve
-        heated (2.23.0).  A change is logged once; "warm" (too warm,
-        radiator not the cause) at info.
+        heated (2.23.0).  While a window holds the room (open, or in its
+        close delay and re-warm wait) the TRV's reading against the room's
+        is the draught's, and the monitor does not keep it (2.24.1).  A
+        change is logged once; "warm" (too warm, radiator not the cause) at
+        info.
         """
         cfg = self._band_config
         was = self._band_monitor.state
         try:
+            window = self._window_open()
             eligible = (
                 self._hvac_mode == HVACMode.HEAT
                 and not self._summer_active
                 and not self._sensor_degraded
-                and not self._window_open()
+                and not window
             )
             data = self.coordinator.data or {}
             trv = self._active_trv()
@@ -239,6 +243,7 @@ class RegulationMixin:
                 valve_heating=trv.heating,
                 trv_c=trv.internal_c,
                 valve_open_pct=data.get("heating_power"),
+                window=window,
             )
         except Exception:  # noqa: BLE001 - reporting must never stop the state writes
             if not self._band_failed:
