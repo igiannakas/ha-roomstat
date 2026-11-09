@@ -294,6 +294,26 @@ class AutotuneConfig:
     # 10.3 -> 13.1 min and the next morning stopped 0.35 °C short).  The
     # regulator's slope deadband.
     coast_stall_c_per_h: float = 0.1
+    # The same without a full stall (2.23.2): once the room's rise after the
+    # stop has slowed to ``coast_slow_frac`` of the fastest it rose since
+    # the stop (the heat already in the radiator and the air still arrives
+    # for a few minutes, so the rise may first speed up), a rise
+    # ``coast_rebound_c_per_h`` faster than the slowest since (and at least
+    # ``rate_min_c_per_h``) is not the radiator, whose heat only tails off,
+    # and the coast ends at that slowest point.  4 Nov 2026, second bedroom:
+    # stopped at 22:05 rising 0.2 °C/h, 0.4 for 10 min, 0.1 at 22:20, then
+    # 0.7, 1.0, 2.1, 2.5 °C/h by 22:35 with the valve shut and its own
+    # reading falling (the room itself at bedtime): booked as a 133-min
+    # coast and +0.36, it took the braking time 26.4 -> 39.7 min.  7 Nov,
+    # master bedroom: the same at 0.1 -> 0.4-0.5 °C/h, 30-48 min after the
+    # stop (booked as a 26-min coast and +0.08; measured to its slowest
+    # point, 18 min and 0.00).  Replayed on every recorded heat-up of 1-9
+    # Nov (four rooms, ``tests/fixtures/heatups_2026_11.json``), nothing
+    # else moved: the radiator's own speed-up right after a stop (second
+    # bedroom, 2 Nov: 1.9 -> 3.2 °C/h in the 9 min after) comes before the
+    # rise has slowed.
+    coast_slow_frac: float = 0.5
+    coast_rebound_c_per_h: float = 0.3
     # Smaller steps still show overshoot and coast, but the dead time and
     # heating rate need a bigger rise to stand out from sensor noise.  0.6
     # for both: with a 0.01 °C sensor a 0.6 °C rise is 60 steps, and in mild

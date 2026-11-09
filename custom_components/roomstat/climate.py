@@ -43,7 +43,7 @@ from .autotune import (
     SlopeEstimator,
     Tuning,
 )
-from .climate_activity import ActivityMixin
+from .climate_activity import ActivityMixin, local_day_hhmm
 from .climate_controllers import (
     STARTUP_ARM_OPEN,
     STARTUP_RESTORE,
@@ -622,6 +622,7 @@ class RoomstatClimate(
         persisted: PersistedAutomationState | None = None
         # A 2.11.0 save's Away held cold (preheat), for its conversion below.
         legacy_held_cold = False
+        tuner_notes: list[str] = []
         extra = await self.async_get_last_extra_data()
         if extra is not None:
             extra_dict = extra.as_dict()
@@ -632,6 +633,8 @@ class RoomstatClimate(
                     saved_preheat.get("held_cold"), dict
                 )
                 self._autotuner.restore(extra_dict.get("autotune"))
+                # What a save from an older version needed corrected (once).
+                tuner_notes = self._autotuner.take_load_notes(local_day_hhmm)
                 self._apply_active_tuning()
                 # What the tuner last did is in its restored state, not new.
                 self._activity_tuner_seq = self._autotuner.journal_seq
@@ -665,6 +668,8 @@ class RoomstatClimate(
             "started (Home Assistant restart or room reload)%s",
             "" if extra is not None else "; nothing saved to take back",
         )
+        for note in tuner_notes:
+            self._log(_LOGGER).info("auto-tune: %s", note)
         self._lookahead_check_setup()
         self._dosing_check_setup()
         self._dosing_start()

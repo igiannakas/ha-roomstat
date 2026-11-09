@@ -51,7 +51,10 @@ Strong commands where they matter, fine ones near the target:
   to need heat: ``release_below_c`` below the target within
   ``release_lead_s``.  A falling room is released that far ahead, so the
   radiator is warm again in time; a flat one at or just above the target
-  stays shut.  A hold entered while the room is still above the target
+  stays shut.  One that would come while the room is still under the
+  release line (a long braking time on a rising room) is a coast instead:
+  a stop there is released at the next cycle and taken again while the
+  room rises (2.23.2).  A hold entered while the room is still above the target
   commands just below the valve's own reading, where a Tado trickles by
   itself (17 Oct 2026: 16 % for 10 min, +0.2-0.4 °C for the next hour or
   two); the same happened after every restart, when a shut valve resumed
@@ -462,6 +465,15 @@ class FeedforwardPiRegulator:
         # Near the target: fine adjustments, with a firm stop ahead of an
         # overshoot that lasts until the room needs heat again.
         if o.stop_landing_c <= -config.stop_over_c:
+            # Still under the release line (a long braking time on a rising
+            # room), a stop would be released at the next cycle and taken
+            # again while the room rises: the room coasts instead, as after
+            # a heat-up, shut while it rises short of the target and back to
+            # the hold if it stalls short (2.23.2; 8-9 Nov 2026, second
+            # bedroom, braking 39.7 min: off at 0.4 under, on, off, on in 5
+            # min).  Rising, the release forecast is the error itself.
+            if error_c >= config.release_below_c:
+                return MODE_COAST, False
             return MODE_STOP, False
         if mode == MODE_STOP and o.release_c < config.release_below_c:
             return MODE_STOP, False

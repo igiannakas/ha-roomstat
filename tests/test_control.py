@@ -194,14 +194,15 @@ def _replay_morning(hold_push_c):
 
 def test_the_26_oct_morning_push_stops_like_a_heat_up():
     """Replayed: the full push coasts at 06:28 on the heat-up's exit; the
-    stop rule alone shut the valve at 06:31, as it did live."""
+    stop rule alone shut the valve at 06:31, as it did live (a coast since
+    2.23.2: the room was still under the release line)."""
     new = _replay_morning(P.RegulationConfig().hold_push_c)
     old = _replay_morning(float("inf"))
     assert new["06:00"] == "hold"
     assert next(k for k, m in new.items() if m != "hold") == "06:28"
     assert new["06:28"] == "coast"
     assert next(k for k, m in old.items() if m != "hold") == "06:31"
-    assert old["06:31"] == "stop"
+    assert old["06:31"] == "coast"
 
 
 def _morning_peak(plant, hold_push_c, *, t_out=8.0, setback=0.7, seed=3, days=8):

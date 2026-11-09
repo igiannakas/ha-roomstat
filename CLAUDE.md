@@ -299,6 +299,33 @@ Read this before changing `regulation.py` or `parameters.py`.
     valve heats long after a stop, 23 → 17 % in hold) is calmed on 20 min
     and left alone on 10, its swing no worse than untuned. The option-off
     dosing trace test runs on 2.14.1's 20 min.
+    **A stop under the release line is a coast** (2.23.2, `_next_mode`):
+    a stop forecast while the room is still `release_below_c` or more
+    under the target (a long braking time on a rising room) would be
+    released at the next cycle, the release seeing only the error while
+    the room rises, and taken again a cycle later. So the room coasts
+    instead, as after a heat-up: shut while it rises short, a stop once
+    it reaches the target, the hold if it stalls short. 8–9 Nov 2026,
+    second bedroom, braking 39.7 min (see "Auto-tune": a coast that was
+    not the radiator's): the stop looked 40 min ahead from 0.4 under, and
+    the valve went off, on, off, on between 23:59 and 00:04. The
+    activity line reads `Coasting ahead of an overshoot: valve shut 0.4
+    below, rising 0.8 °C/h would pass 20.9 within 40 min; heats again if
+    it stalls short`. In `tests/test_control.py`'s 26 Oct replay the
+    06:31 stop (0.2 under, Td 25 min) is now a coast, the same off.
+    Simulated with the braking time fixed at 25 and 40 min (`plant_sim`,
+    four rooms, mild and cold, three seeds, 20 days, people on half the
+    heat-ups, auto-tune off; scratch `coast2232/`): stops a day fewer
+    (fitted second bedroom at 40 min 8.1 → 4.7 mild, 8.3 → 6.2 cold),
+    stops taken again within 10 min of a release 1.28 → 0.46 / 0.90 →
+    0.41 a day there, commands equal or fewer (−0.1…−1.4 a day), valve
+    time and peaks equal (±0.01, the fitted second bedroom −0.03 at
+    40 min). The price is shorter landings where the braking time is too
+    long: in the fitted second bedroom at 40 min heat-ups under −0.05
+    33 → 41 % mild, 47 → 56 % cold, the target reached 7–8 min later
+    (at 25 min 9 → 15 % mild, cold equal); elsewhere ±2 points. That is
+    the side the owner wants a wrong braking time to err on (see
+    "Auto-tune", `_td_step`).
   - `dose` (2.15.0, the option `dosed_topups`; two phases since 2.16.0):
     a heat-up (`heatup_enter_c` or more short) runs as above, heat then
     coast; everything else is the dosing phase, where a full-power pulse
@@ -1921,6 +1948,80 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   in the room *during* a heat-up steepen its rise, so the exit predicts too
   much coast (25 Oct: 3.3 °C/h at the exit against about 2.5 on empty
   mornings).
+
+  **…also where the rise speeds up again without a full stall** (2.23.2,
+  `_coast_end`, `coast_slow_frac` 0.5, `coast_rebound_c_per_h` 0.3): once
+  the rise since the stop has slowed to half the fastest it was since
+  (judged on 10-min windows wholly after the stop, since the radiator's
+  heat and air may speed it up for a few minutes first), a window 0.3 °C/h
+  faster than the slowest since (and ≥ `rate_min_c_per_h`) ends the coast
+  at that slowest point. 4 Nov 2026, second bedroom: stopped at 22:05
+  rising 0.2 °C/h, 0.4 for 10 min, 0.1 at 22:20, then 0.7, 1.0, 2.1,
+  2.5 °C/h by 22:35 with the valve shut and its own reading falling:
+  booked as a 133-min coast and +0.36 (the coast is the rise after the
+  stop over the rise rate at it, 0.5 ÷ 0.225 °C/h), it took the braking
+  time 26.4 → 39.7 min, its trim to 1.15. Now −0.07, the later rise
+  +0.43 shown, not counted. 7 Nov, master bedroom: 0.1 → 0.4–0.5 °C/h
+  30–48 min after the stop, booked 26 min and +0.08, now 18 min and 0.00.
+  **A coast longer than any radiator's is not counted**
+  (`HeatupMetrics.coast_not_radiator`, `analyse_heatup`): over `td_max_s`
+  (45 min; once the valve shuts a radiator's output only falls, its
+  fitted time constant 30–35 min) the rise had another source, so the
+  coast and the overshoot are dropped; the dead time and heating rate
+  stay, the episode line adds `rose +0.71 °C after the stop, longer than
+  any radiator's coast` and the verdict reads `not the radiator's rise:
+  no coast or overshoot counted`. 7 Nov, study: after 7.75 h off, a
+  70-min heat-up stopped at 16:27 rising 0.8 °C/h and the room crept on
+  +0.71 for 100 min (51 min). Replayed on all 29 heat-ups the four rooms'
+  tuners judged 1–9 Nov (`tests/fixtures/heatups_2026_11.json`, rebuilt
+  from the recorded activity, room-error and command data): those three
+  change, nothing else (the second bedroom's own 1.9 → 3.2 °C/h speed-up
+  right after its 2 Nov stop is kept). **Older saves are re-checked
+  once** (`coast_rules` 2 in the save, `_recheck_coasts`): the stored
+  heat-ups keep only their results, so only the radiator bound applies
+  to them. A dropped overshoot that had voted for more braking takes its
+  trim step back (÷ 1.15, never under 1.0), and a braking time more than
+  the 2-min dead-band above what the other heat-ups give goes down to it
+  at once, not on trial, and so does one in the values a rollback would
+  restore (the last good values, a trial's fallback; a change on trial
+  stays on trial). Each change is
+  an activity line after the start line (`take_load_notes`, with the
+  heat-up's local time from `local_day_hhmm`: the journal's entries from
+  a load count as old). The 9 Nov 2026 states: second bedroom 39.7 → 31.4
+  min (trim 1.0); the study's 7 Nov heat-up (59 min, +0.80 in its save)
+  dropped, its 17.8 min kept (16.2 is inside the dead-band); master
+  bedroom and living room unchanged. The master's stored 7 Nov heat-up
+  can't be re-measured (no readings): measured now it would give 13.8,
+  also inside the dead-band of its 15.7, so it stays until heat-ups
+  measured under the new rules replace it. A changed braking time's
+  verdict names its basis (`…; the braking time follows the learned
+  coast, 31.4 min × 1.00`): on 7 Nov "vote 1 of 2 for a little less
+  braking; changed braking 26.4→39.7 min" read as a contradiction.
+  Simulated (`plant_sim`, the four rooms, 40 days, the daily schedule,
+  people on half the heat-ups at +0.5–1.0 °C/h for 45–120 min from 15–75
+  min in, outdoor 5–13 °C or −2–6 °C day to day, six seeds, from day 7;
+  scratch `coast2232/`), 2.23.1 → 2.23.2:
+  - empty rooms: identical in every metric (generic living and slow,
+    three seeds, braking 9.6 / 9.4 min): an empty heat-up's coast is
+    never cut;
+  - the fitted rooms: braking −0.7…+0.1 min, peaks ±0.01, commands
+    −0.5…0 a day;
+  - the generic rooms in the cold: within ±0.02 (generic living braking
+    24.8 → 23.7 min);
+  - the generic rooms in mild weather brake less. Braking 32.9 → 24.1 min
+    (generic living) and 25.6 → 22.1 (generic slow), the target reached
+    27 / 7 min sooner, rollbacks 6.5 → 4.5 / 5.3 → 4.5, empty heat-ups'
+    own first peaks less short (one seed: −0.46 → −0.33). But heat-ups
+    with people peak hotter: +0.50 → +0.63 / +0.25 → +0.29 (the window's
+    highest reading, top-ups included), above +0.3 34 → 40 % / 20 → 22 %.
+
+  That last trade-off is the radiator bound's, not the speed-up rule's
+  (without the speed-up rule: +0.60 / +0.29). People booked as coast had
+  pushed the braking time to 2.5–3.5 times the radiator's own (33 against
+  9.6 min empty), braking every heat-up for them. The bound is what
+  undoes the second bedroom's 133-min coast. This is the 2.13.0 oracle's
+  trade-off in part (see `_td_step` below: ignoring heat-ups with people
+  left nothing braking for them).
 - **SIMC is used only for Ti** (= 4(τc + θ), τc = 1.5 θ), as a basis for Ki,
   and as the justification for Td ≈ coast. **SIMC's Kc is not used:** the only
   gain estimate (rate / demand) is self-referential, because the demand is
@@ -2078,6 +2179,11 @@ ruff check .
   study's 6 Nov 2026 presses replayed).
 - `tests/test_climate_native.py` (2.23.0: the native temperature API, no
   old name anywhere in the thermostat's classes).
+- `tests/test_coast_rules.py` (2.23.2: the 29 recorded heat-ups of 1–9 Nov
+  2026, `tests/fixtures/heatups_2026_11.json`, measured as before but the
+  three whose room rose by itself; the coast's end on synthetic shapes; the
+  one-time re-check of the four rooms' saves of 9 Nov and its activity
+  lines through the entity).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

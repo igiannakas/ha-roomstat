@@ -287,11 +287,37 @@ class TestModes:
     def test_firm_stop_looks_as_far_ahead_as_the_braking_time(self):
         """11 Oct, living room: a 0.6 °C step went through hold, and the
         radiator coasted 19 min.  0.2 °C short and rising 1.0 °C/h: 10 min
-        ahead is 0.05 short (hold); 30 min ahead is 0.25 over (stop)."""
+        ahead is 0.05 short (hold); 30 min ahead is 0.25 over: the valve
+        shuts.  Still under the release line (0.1 below), it coasts
+        (2.23.2); just under the target, the same forecast is a stop."""
         res, _ = step(make_regulator(), RegulationState(), 19.8, slope_c_per_h=1.0)
         assert res.mode == "hold"
         reg = make_regulator(tuning=CorrectionTuning(td_s=1800.0))
         res, _ = step(reg, RegulationState(), 19.8, slope_c_per_h=1.0)
+        assert res.mode == "coast"
+        assert res.target_for_tado_c == pytest.approx(5.0)
+        res, _ = step(reg, RegulationState(), 19.95, slope_c_per_h=1.0)
+        assert res.mode == "stop"
+
+    def test_a_stop_under_the_release_line_coasts_instead(self):
+        """8-9 Nov 2026, second bedroom, braking 39.7 min, release 0.2 below:
+        0.35 below and rising 0.8 °C/h, the stop's forecast fired, and a stop
+        there was released the next cycle (the room was under the release
+        line) and taken again: off, on, off, on in 5 min.  Now it coasts:
+        shut while it rises, a stop once it reaches the target, back to the
+        hold if it stalls short."""
+        cfg = dict(tuning=CorrectionTuning(td_s=2380.0), release_below_c=0.2)
+        reg = make_regulator(**cfg)
+        res, st = step(reg, RegulationState(), 20.45, sp=20.8, slope_c_per_h=0.8)
+        assert res.mode == "coast"
+        # Still rising, a little closer: still coasting (no release, no flap).
+        res, st = step(reg, st, 20.5, sp=20.8, slope_c_per_h=0.6)
+        assert res.mode == "coast"
+        # It stalls 0.3 short: the hold takes it on.
+        res, st = step(reg, st, 20.5, sp=20.8, slope_c_per_h=0.0)
+        assert res.mode == "hold"
+        # A coast that reaches the target becomes a stop.
+        res, st = step(reg, RegulationState(mode="coast"), 20.8, sp=20.8, slope_c_per_h=0.4)
         assert res.mode == "stop"
 
     def test_firm_stop_looks_at_least_10_min_ahead(self):

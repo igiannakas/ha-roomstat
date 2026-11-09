@@ -418,6 +418,13 @@ def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:
             # regulator's own error (one at or above it is a stop), so a 0.00
             # there is a few thousandths rounded away (28 Oct 06:45, study).
             return f"Heat-up ended: valve shut, {_vs_target(e)}"
+        if (new and f.prev_mode in (MODE_HOLD, MODE_STOP)
+                and o.stop_landing_c <= -cfg.stop_over_c and e >= cfg.release_below_c):
+            # The stop's forecast fired with the room still under the release
+            # line: it coasts, as after a heat-up (2.23.2).
+            return (f"Coasting ahead of an overshoot: valve shut {_gap(e)}, {trend} "
+                    f"would pass {_line_c(over)} within {_minutes(o.stop_lead_s)}; "
+                    "heats again if it stalls short")
         if new and f.prev_mode in (MODE_HEAT, MODE_HOLD):
             # From a hold: a full push ending on the heat-up's exit.
             what = "Coasting" if f.prev_mode == MODE_HEAT else "Full push ended, coasting"

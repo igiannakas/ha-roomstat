@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -335,6 +336,11 @@ class HeatupMetrics:
     # How far the room rose above the heat-up's own peak after its coast was
     # over (people, sun, a small hold push).  Not counted; shown in the status.
     later_rise_c: float | None = None
+    # The rise after the stop was longer than any radiator's coast (more
+    # than ``td_max_s`` of the rise before it): not this radiator, so its
+    # coast and overshoot are not counted (2.23.2, :func:`analyse_heatup`).
+    # ``coast_rise_c`` still says how far the room went.
+    coast_not_radiator: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {k: (round(v, 6) if isinstance(v, float) else v)
@@ -364,6 +370,7 @@ class HeatupMetrics:
         if not _finite(m.kp, m.ki, m.td_s):
             return None
         m.truncated, m.crossed = bool(m.truncated), bool(m.crossed)
+        m.coast_not_radiator = m.coast_not_radiator is True
         return m
 
 
@@ -420,6 +427,12 @@ def _median_filter(values: list[float], k: int = 3) -> list[float]:
 
 _COAST_WINDOW_S = 600.0
 
+# The coast rules a save was measured under: 2 since 2.23.2 (a coast that
+# speeds up again ends, and one longer than any radiator's is not counted).
+# A save without it is checked once when taken back
+# (:meth:`Autotuner._recheck_coasts`).
+_COAST_RULES = 2
+
 
 def _coast_end(ts: list[float], ys: list[float], cross_index: int,
                cfg: AutotuneConfig) -> int:
@@ -433,11 +446,23 @@ def _coast_end(ts: list[float], ys: list[float], cross_index: int,
     the new rise is something else -- people coming in, sun, a small hold
     push below ``heatup_reheat_demand_c`` -- and the coast ends where it
     began.  A coast that just creeps on is kept whole, and so is a stall
-    inside the dead time (before the room was seen rising at all).  Returns
+    inside the dead time (before the room was seen rising at all).
+
+    The same holds without a full stall (2.23.2): once the rise since the
+    stop has slowed to ``cfg.coast_slow_frac`` of the fastest it was since
+    the stop, a window ``cfg.coast_rebound_c_per_h`` faster than the slowest
+    since (and at least ``cfg.rate_min_c_per_h``) ends the coast at that
+    slowest window.  The rise may speed up for a few minutes right after
+    the stop (the heat already in the radiator and the air reaching the
+    sensor), so a speed-up only counts once the coast has slowed.  Returns
     the last index when nothing rose again.
     """
     rising = False
     stall_j: int | None = None
+    fastest = -math.inf            # the fastest window since the stop
+    slowed = False
+    slowest = math.inf             # the slowest window since the coast slowed
+    slowest_j = cross_index
     j0 = 0
     for j in range(len(ts)):
         while ts[j] - ts[j0] > _COAST_WINDOW_S:
@@ -455,6 +480,18 @@ def _coast_end(ts: list[float], ys: list[float], cross_index: int,
             return max(j0, stall_j)
         if rate_h >= cfg.rate_min_c_per_h:
             rising = True
+        if j < cross_index:
+            continue
+        if slowed and rate_h >= max(cfg.rate_min_c_per_h, slowest + cfg.coast_rebound_c_per_h):
+            return max(j0, slowest_j)
+        fastest = max(fastest, rate_h)
+        # Only a window wholly after the stop can show the coast slowing:
+        # the ones before still carry the rise at the stop.
+        if (not slowed and ts[j] - ts[cross_index] >= _COAST_WINDOW_S
+                and rate_h <= max(cfg.coast_stall_c_per_h, cfg.coast_slow_frac * fastest)):
+            slowed = True
+        if slowed and rate_h < slowest:
+            slowest, slowest_j = rate_h, j
     return len(ts) - 1
 
 
@@ -563,6 +600,18 @@ def analyse_heatup(
             if s_cross is not None and s_cross * 3600.0 >= cfg.rate_min_c_per_h:
                 coast_s = _clamp(coast_rise / s_cross, 0.0, 3 * cfg.td_max_s)
 
+    # Longer than any radiator's coast (2.23.2): after the valve shuts, the
+    # radiator's heat output only falls, so the rise it still gives is at
+    # most the rise at the stop times the radiator's own time constant plus
+    # the heat already on its way (here 30-35 min fitted, 11 Oct 2026, and a
+    # few minutes): never more than the longest braking time.  A longer one
+    # had another source (people, sun, the room's own warmth after hours
+    # off), so neither its coast nor its peak is this radiator's.
+    not_radiator = coast_s is not None and coast_s > cfg.td_max_s
+    if not_radiator:
+        coast_s = None
+        overshoot = None
+
     demand0 = None
     early = [s[2] for s in samples if s[0] - start_ts <= 900 and s[2] is not None]
     if early:
@@ -579,6 +628,7 @@ def analyse_heatup(
         kp=tuning.kp, ki=tuning.ki, td_s=tuning.td_s, truncated=truncated,
         crossed=cross_ts is not None,
         later_rise_c=later_rise if later_rise > 0 else None,
+        coast_not_radiator=not_radiator,
     )
 
 
@@ -915,6 +965,10 @@ class Autotuner:
         self.verdicts = 0
         self._update_note = ""
         self._update_until: float | None = None
+        # What taking a save back changed, for the room's log (the journal's
+        # entries from a load count as old: climate.py skips them): each a
+        # text with "{when}" for the local time of its timestamp, if any.
+        self._load_notes: list[tuple[float | None, str]] = []
         self._reset_learning()
         if stored is not None:
             self._load(stored)
@@ -944,6 +998,7 @@ class Autotuner:
         b = self._baseline
         self._params = self._bounded(Tuning(b.kp, b.ki, b.td_s))
         self._last_good = self._params
+        self._load_notes = []
         self._trim = {"kp": 1.0, "ki": 1.0, "td_s": 1.0}
         self._votes = {"kp_up": 0, "ki_up": 0, "td_down": 0}
         self._heatups: list[HeatupMetrics] = []
@@ -1351,11 +1406,15 @@ class Autotuner:
             + (f", coast {m.coast_s / 60:.0f} min" if m.coast_s is not None else "")
             + (f", later rise +{m.later_rise_c:.2f} °C not counted"
                if m.later_rise_c is not None and m.later_rise_c >= 0.05 else "")
+            + (f", rose +{m.coast_rise_c:.2f} °C after the stop, longer than any "
+               "radiator's coast" if m.coast_not_radiator and m.coast_rise_c is not None else "")
         )
         os = m.overshoot_c
         notes: list[str] = []
         if os is None:
-            notes.append("no overshoot vote (cut short below the target)")
+            notes.append(
+                "not the radiator's rise: no coast or overshoot counted"
+                if m.coast_not_radiator else "no overshoot vote (cut short below the target)")
             reason = self._maybe_update(now, "heat-up")
             self._set_verdict(notes)
             return reason
@@ -1627,10 +1686,19 @@ class Autotuner:
         if new.td_s < cur.td_s - 1.0 and tgt.td_s < new.td_s - 1.0:
             # A smoothed step: say where it is heading.
             toward = f", a step towards {tgt.td_s / 60:.1f}"
+        basis = ""
+        coast = self._model()["coast_s"]
+        if abs(new.td_s - cur.td_s) >= 1.0 and coast:
+            # The braking time follows the learned coast; the episode's vote
+            # only trims it.  Say so: "vote 1 of 2 for a little less braking;
+            # changed braking 26.4->39.7 min" read as a contradiction (second
+            # bedroom, 7 Nov 2026).
+            basis = (f"; the braking time follows the learned coast, "
+                     f"{coast / 60:.1f} min × {self._trim['td_s']:.2f}")
         self._update_note = f"changed {_change_text(cur, new)}{toward}" + (
             f" (on trial: judged on the next {c.confirm_up} heat-ups)"
             if self._pending is not None else ""
-        )
+        ) + basis
         _LOGGER.info("Auto-tune update (%s)", self.last_update_reason)
         return self.last_update_reason
 
@@ -1763,6 +1831,7 @@ class Autotuner:
     def as_dict(self) -> dict[str, Any]:
         return {
             "version": self.VERSION,
+            "coast_rules": _COAST_RULES,
             "baseline": _tuning_dict(self._baseline),
             "params": _tuning_dict(self._params),
             "last_good": _tuning_dict(self._last_good),
@@ -1861,12 +1930,86 @@ class Autotuner:
                 self.last_event = "restored learned values"
             else:
                 self.last_event = "waiting for a heat-up"
+            if d.get("coast_rules") != _COAST_RULES:
+                self._recheck_coasts()
         except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             _LOGGER.warning("Auto-tune: stored state unreadable, starting fresh")
             self._reset_learning()
             return False
         self._load_episode(d.get("episode"))
         return True
+
+    def take_load_notes(self, fmt_time: Callable[[float], str]) -> list[str]:
+        """What taking the save back changed (once), for the room's log;
+        *fmt_time* writes a timestamp in the user's time."""
+        notes, self._load_notes = self._load_notes, []
+        return [text.replace("{when}", fmt_time(ts)) if ts is not None else text
+                for ts, text in notes]
+
+    def _recheck_coasts(self) -> None:
+        """A save from before 2.23.2 may hold a coast longer than any
+        radiator's (:func:`analyse_heatup`): its coast and overshoot are
+        dropped, as a heat-up measured now would drop them, and so is the
+        "more braking" trim step its overshoot voted for.  The stored
+        heat-ups keep only their results, not their readings, so this is the
+        one rule that can be applied to them; the speed-up rule
+        (:func:`_coast_end`) applies to heat-ups from now on.
+
+        A braking time those coasts had pulled up goes back down at once to
+        what the room's other heat-ups give (one that is not above it stays
+        as it is), and so does one in the values a rollback would restore.  9 Nov 2026: the second bedroom's 4 Nov heat-up (a
+        133-min coast, +0.36) had taken it 26.4 -> 39.7 min, so that its stop
+        looked 40 min ahead and switched the valve off 0.4 under the target,
+        under the release line (off, on, off, on in 5 min); the study's 7 Nov
+        (a 59-min coast, +0.50) had rolled back its last change.
+        """
+        c = self.cfg
+        dropped = [m for m in self._heatups if m.coast_s is not None and m.coast_s > c.td_max_s]
+        if not dropped:
+            return
+        for m in dropped:
+            voted_more = m.overshoot_c is not None and m.overshoot_c > c.overshoot_target_c + 0.1
+            if voted_more and self._trim["td_s"] > 1.0:
+                # Never below 1.0: a trim under it is the room's own landings.
+                self._trim["td_s"] = max(1.0, self._trim["td_s"] / 1.15)
+            self._load_notes.append((
+                m.start_ts,
+                f"the heat-up of {{when}} rose +{m.coast_rise_c or 0.0:.2f} °C after the "
+                f"valve shut, a {m.coast_s / 60:.0f}-min coast, longer than any radiator's: "
+                "its coast and overshoot are no longer counted"))
+            m.coast_s = None
+            m.overshoot_c = None
+            m.coast_not_radiator = True
+        coast = self._model()["coast_s"]
+        cur = self._params
+        if not self.derivative_allowed or coast is None:
+            return
+        target = _clamp(coast * self._trim["td_s"], 0.0, c.td_max_s)
+
+        def lowered(t: Tuning) -> Tuning:
+            if t.td_s <= target + c.td_deadband_s:
+                return t
+            return self._bounded(Tuning(t.kp, t.ki, target))
+
+        # The values a rollback would go back to may carry the same coast:
+        # they come down with it, so a rollback can't bring it back.
+        self._last_good = lowered(self._last_good)
+        if self._pending is not None:
+            prev = _tuning_from(self._pending.get("prev"))
+            if prev is not None:
+                self._pending["prev"] = _tuning_dict(lowered(prev))
+        new = lowered(cur)
+        if new == cur:
+            return
+        self._params = new
+        if self._pending is None:
+            self._last_good = new
+        self.last_update_reason = (
+            f"coast re-checked: td {cur.td_s / 60:.0f}→{new.td_s / 60:.0f} min")
+        self._load_notes.append((
+            None,
+            f"braking {cur.td_s / 60:.1f}→{new.td_s / 60:.1f} min, what its other heat-ups "
+            f"give (coast {coast / 60:.1f} min × {self._trim['td_s']:.2f})"))
 
     def _load_episode(self, e: Any) -> None:
         """Restore the episode context; anything malformed is simply dropped."""

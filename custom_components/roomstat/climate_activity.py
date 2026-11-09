@@ -56,6 +56,15 @@ def local_hhmm(ts: float, now: float | None = None) -> str:
     return when.strftime("%H:%M" if when.date() == today.date() else "%a %H:%M")
 
 
+def local_day_hhmm(ts: float) -> str:
+    """'4 Nov 19:37' in Home Assistant's time zone."""
+    try:
+        when = datetime.datetime.fromtimestamp(ts, tz=dt_util.get_default_time_zone())
+    except (OverflowError, OSError, ValueError):
+        return "?"
+    return f"{when.day} {when:%b %H:%M}"
+
+
 class ActivityMixin:
     """Activity log methods for RoomstatClimate."""
 

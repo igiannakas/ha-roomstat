@@ -152,6 +152,25 @@ class TestDecisionLines:
             "within 25 min"
         )
 
+    def test_a_stop_under_the_release_line_reads_as_a_coast(self):
+        """2.23.2: the stop's forecast with the room still under the release
+        line coasts (second bedroom, 8 Nov 23:59: 0.4 below, rising 0.8
+        °C/h, braking 39.7 min, release 0.2 below)."""
+        cfg = P.RegulationConfig(release_below_c=0.2)
+        line = act.describe_cycle(_facts(
+            mode="coast", prev_mode="hold", setpoint_c=20.8, room_c=20.44, error_c=0.36,
+            slope_c_per_h=0.8, command_c=5.0, command_off=True, tado="off", tado_c=None,
+            td_s=2380.0), cfg)
+        assert line.startswith(
+            "Coasting ahead of an overshoot: valve shut 0.4 below, rising 0.8 °C/h would "
+            "pass 20.9 within 40 min; heats again if it stalls short")
+        # A full push ending on the heat-up's exit still reads as such.
+        line = act.describe_cycle(_facts(
+            mode="coast", prev_mode="hold", setpoint_c=20.8, room_c=20.65, error_c=0.15,
+            slope_c_per_h=0.8, command_c=5.0, command_off=True, tado="off", tado_c=None,
+            td_s=600.0), cfg)
+        assert line.startswith("Full push ended, coasting")
+
     def test_a_new_stop_just_above_the_target_names_the_overshoot(self):
         """Entered just above the target, still rising: the overshoot forecast
         shut it, never "so it stays off" on the cycle that shuts it."""
@@ -412,7 +431,8 @@ class TestTunerVerdicts:
         # the 6-min gap, which says where it is heading; more heat is on trial.
         assert t.last_verdict == (
             "stopped 0.35 °C short: vote 1 of 2 for less braking; changed braking "
-            "13.0→11.2 min, a step towards 7.0 (on trial: judged on the next 2 heat-ups)")
+            "13.0→11.2 min, a step towards 7.0 (on trial: judged on the next 2 heat-ups); "
+            "the braking time follows the learned coast, 7.0 min × 1.00")
         t._on_heatup(_heatup(2 * DAY, -0.30), 2 * DAY)
         assert t.last_verdict == (
             "stopped 0.30 °C short: less braking (×0.85, 2 of 2 votes); no change while "
