@@ -615,6 +615,9 @@ class RegulationMixin:
         elif not self._sensor_degraded:
             self._slope.add(now, room_temp, self.coordinator.data.get("room_temp_ts"))
             slope = self._slope.slope_c_per_s()
+            # A window's close wait ends at the cycle whose reading shows
+            # the room has stopped re-warming (2.23.1), not at its next poll.
+            self._window_wait_check(now)
 
         # 3c. The valve look-ahead (option): the slope of the valve's own
         # reading and the look-ahead learned so far (None, 0 while off).

@@ -258,7 +258,7 @@ class TestDecisionLines:
         ((3, 3), 0.4, "; heats again in 3 min"),
         ((0, 18), 2.4, " at +2.4 °C/h; heats again once under 1.0 °C/h, at most 18 min"),
         ((0, 18), None, "; heats again within 18 min"),
-        ((0, 0), 1.6, "; heats again at the next check"),
+        ((0, 0), 1.6, "; heats again within a minute"),
     ])
     def test_the_window_wait_says_when_heating_comes_back(self, wait, rate, phrase):
         line = _line(window=act.WINDOW_REWARM, window_wait_min=wait,

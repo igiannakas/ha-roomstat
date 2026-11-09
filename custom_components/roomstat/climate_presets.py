@@ -34,6 +34,7 @@ from .const import (
     safe_float,
 )
 from .parameters import (
+    DEFAULT_CONTROL_INTERVAL_S,
     FROST_PROTECT_C,
     WINDOW_RECOVERY_MAX_S,
     WINDOW_RECOVERY_POLL_S,
@@ -145,7 +146,7 @@ class PresetMixin:
         self.async_write_ha_state()
         await self._async_regulation_cycle(trigger="window_open")
 
-    async def _async_window_close_action(self, _now) -> None:
+    async def _async_window_close_action(self, _now, *, from_cycle: bool = False) -> None:
         """Restore the previous preset once the close delay has run and the
         room has stopped re-warming on its own.
 
@@ -155,14 +156,27 @@ class PresetMixin:
         wait is extended, one poll at a time, while fresh readings since the
         close show the room rising at WINDOW_RECOVERY_RATE_C_PER_H or more,
         for at most WINDOW_RECOVERY_MAX_S after the close.
+
+        *from_cycle*: called right after a regulation cycle whose fresh
+        reading ends the wait (:meth:`_window_wait_check`, 2.23.1), so it
+        ends then, not at the next poll; the pending poll is cancelled.  It
+        does nothing when the wait has ended meanwhile (the poll, a change by
+        hand), and leaves the poll to carry on if the wait is still due.
         """
+        ctrl = self._window_ctrl
+        if not ctrl.close_delay_active:
+            return
         now = time.time()
-        waited = self._window_ctrl.close_delay_elapsed_s(now)
+        waited = ctrl.close_delay_elapsed_s(now)
+        if from_cycle and waited < ctrl.close_delay_s:
+            return             # a new close since the cycle asked: its delay runs
         slope, sensor_ok = self._room_recovery_slope()
         if window_recovery_wait(
             slope, waited, sensor_ok=sensor_ok,
             max_wait_s=WINDOW_RECOVERY_MAX_S, rate_c_per_h=WINDOW_RECOVERY_RATE_C_PER_H,
         ):
+            if from_cycle:
+                return
             if not self._window_recovery_logged:
                 self._window_recovery_logged = True
                 self._log(_LOGGER).info(
@@ -176,6 +190,8 @@ class PresetMixin:
                 self.hass, WINDOW_RECOVERY_POLL_S, self._async_window_close_action
             )
             return
+        if from_cycle:
+            ctrl.stop_close_timer()
         if self._window_recovery_logged:
             self._log(_LOGGER).info(
                 "room recovery over after %d min%s", int(waited / 60),
@@ -184,6 +200,32 @@ class PresetMixin:
         self._window_recovery_logged = False
         self._restore_window_state()
 
+    def _window_wait_check(self, now: float) -> None:
+        """A regulation cycle has just taken a fresh room reading.  When a
+        window's close wait is past its configured delay and that reading
+        ends it (the room's own rise now known and below
+        WINDOW_RECOVERY_RATE_C_PER_H, or WINDOW_RECOVERY_MAX_S since the
+        close), the close action runs right after this cycle instead of at
+        the wait's next 60-s poll, whose phase the cycle's has nothing to do
+        with (2.23.1; 8 Nov 2026, second bedroom: the slope was known at the
+        20:19:31 cycle and the wait ended at the 20:20:26 poll, the card on a
+        bare "Window" meanwhile).  The poll stays armed until then."""
+        ctrl = self._window_ctrl
+        if not ctrl.close_delay_active:
+            return
+        waited = ctrl.close_delay_elapsed_s(now)
+        if waited < ctrl.close_delay_s:
+            return
+        slope, sensor_ok = self._room_recovery_slope()
+        if window_recovery_wait(
+            slope, waited, sensor_ok=sensor_ok,
+            max_wait_s=WINDOW_RECOVERY_MAX_S, rate_c_per_h=WINDOW_RECOVERY_RATE_C_PER_H,
+        ):
+            return
+        self.hass.async_create_task(
+            self._async_window_close_action(None, from_cycle=True)
+        )
+
     def _window_wait(self, now: float) -> tuple[float, float, float, float | None] | None:
         """While a window's close delay runs (else None): when it closed,
         the earliest and the latest time heating can come back
@@ -191,20 +233,40 @@ class PresetMixin:
         None while the fresh slope is unknown).  A room already re-warming
         slower than WINDOW_RECOVERY_RATE_C_PER_H is due at the earliest: the
         latest is then the earliest too.  For the card and the activity
-        log: the window's own close action decides, as before."""
+        log: the window's own close action decides, as before.
+
+        The fresh slope is first known at a regulation cycle
+        (``SlopeEstimator.known_at``): counted from its first reading since
+        the close, or, before there is one, from the first cycle after the
+        close (the cycles run every DEFAULT_CONTROL_INTERVAL_S from the last
+        one), so the earliest is the cycle that ends the wait (2.23.1)."""
         closed = self._window_ctrl.close_since
         if closed is None:
             return None
         slope, sensor_ok = self._room_recovery_slope()
+        known = self._slope.known_at(
+            DEFAULT_CONTROL_INTERVAL_S, first_ts=self._first_cycle_after(closed)
+        )
         earliest, latest = window_wait_bounds(
             closed, self._window_ctrl.close_delay_s,
-            slope_span_s=self._slope.window_s / 2.0,
+            slope_known_ts=known,
             max_wait_s=WINDOW_RECOVERY_MAX_S, sensor_ok=sensor_ok,
         )
         rate = slope * 3600.0 if slope is not None and math.isfinite(slope) else None
         if rate is not None and rate < WINDOW_RECOVERY_RATE_C_PER_H:
             latest = earliest
         return closed, earliest, latest, rate
+
+    def _first_cycle_after(self, ts: float) -> float:
+        """When the first regulation cycle after *ts* is due: the cycles run
+        every DEFAULT_CONTROL_INTERVAL_S from the last one, which has run
+        already (*ts* itself when none has, or the last is in the future: a
+        clock that went back)."""
+        last = self._last_regulation_ts
+        step = float(DEFAULT_CONTROL_INTERVAL_S)
+        if not last or last > ts + step:
+            return ts
+        return last + max(0, math.floor((ts - last) / step) + 1) * step
 
     def _end_window_close_delay(self, reason: str) -> None:
         """A change by hand during the window's close delay ends the wait:

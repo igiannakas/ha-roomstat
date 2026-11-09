@@ -128,6 +128,25 @@ class TestSlopeEstimator:
             est.add(k * 60.0, 20.0 + k)
         assert est.slope_c_per_s() is None
 
+    def test_known_at_is_the_cycle_that_first_gives_a_slope(self):
+        """2.23.1: a window's close wait ends on the slope, and the card
+        shows when: the sample that brings 7.5 min of span, at the cycle
+        cadence, from the first reading (or the first cycle due)."""
+        est = A.SlopeEstimator()
+        assert est.known_at(60.0) is None                      # nothing to count from
+        assert est.known_at(60.0, first_ts=1000.0) == 1480.0
+        for k in range(3):
+            est.add(1005.0 + 60.0 * k, 20.0 + 0.01 * k)
+        assert est.known_at(60.0, first_ts=1000.0) == 1485.0  # from the first reading
+        while est.slope_c_per_s() is None:
+            assert est._buf[-1][0] < 1485.0
+            est.add(est._buf[-1][0] + 60.0, 20.1)
+        assert est._buf[-1][0] == 1485.0                       # known at that very sample
+        # Sparse samples: min_samples counts (5 steps of 120 s, not 4).
+        assert A.SlopeEstimator().known_at(120.0, first_ts=0.0) == 600.0
+        for bad in (0.0, -60.0, float("nan")):
+            assert A.SlopeEstimator().known_at(bad, first_ts=0.0) is None
+
     def test_gap_resets(self):
         est = A.SlopeEstimator()
         for k in range(12):

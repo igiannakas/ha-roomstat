@@ -192,6 +192,27 @@ class SlopeEstimator:
             return None
         return theil_sen(list(buf))
 
+    def known_at(self, interval_s: float, *, first_ts: float | None = None) -> float | None:
+        """When :meth:`slope_c_per_s` first gives a slope, if a sample keeps
+        coming every *interval_s* from the oldest one in the window (from
+        *first_ts* while there is none): the sample that brings both
+        ``min_samples`` samples and a span of ``window_s / 2``.  In the past
+        once the slope is known.  None when it can't be told.
+
+        For a wait that ends on the slope (a window's close wait, 2.23.1):
+        the regulation cycle that will decide, not the bare span, so what
+        the card shows is when it ends."""
+        if not _finite(interval_s) or interval_s <= 0.0:
+            return None
+        if self._buf:
+            first = self._buf[0][0]
+        elif first_ts is not None and _finite(first_ts):
+            first = float(first_ts)
+        else:
+            return None
+        steps = max(self.min_samples - 1, math.ceil(self.window_s / 2.0 / interval_s - 1e-9))
+        return first + steps * interval_s
+
     # -- persistence (the slope survives a restart or reload) ---------------
     # 23 Oct 2026: HA restarted at 20:18 in the middle of four heat-ups.
     # With an empty history the slope was unknown for 8 min, so the heat-up

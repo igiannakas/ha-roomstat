@@ -31,6 +31,7 @@ from tests.ha_harness import (
     _run,
     _settle,
     _start,
+    drain_tasks,
     e2e,
     reset_timers,
 )
@@ -204,19 +205,23 @@ class TestCloseDelayWaitsForTheRecovery:
         _close_window(ent)
         closed = clock.now
         attrs = ent.extra_state_attributes
-        assert ts(attrs["window_closed_at"]) == pytest.approx(closed)
-        # The configured 5 min, but the fresh slope needs 7.5 min; at most 30.
-        assert ts(attrs["window_heat_earliest"]) == pytest.approx(closed + 450.0)
-        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0)
+        assert ts(attrs["window_closed_at"]) == pytest.approx(closed, abs=1.0)
+        # The configured 5 min, but the fresh slope needs 7.5 min of readings
+        # from the first cycle after the close (60 s later here), so it is
+        # first known at the cycle 8 min after that one (2.23.1); at most 30.
+        assert ts(attrs["window_heat_earliest"]) == pytest.approx(closed + 540.0, abs=1.0)
+        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0, abs=1.0)
         assert attrs["window_rewarm_c_per_h"] is None
         room = _recover(ent, clock, 18.0, 12.0, 3)
-        assert "heats again in 5–27 min" in ent._activity.doing
+        assert "heats again in 6–27 min" in ent._activity.doing
+        assert ts(ent.extra_state_attributes["window_heat_earliest"]) == pytest.approx(
+            closed + 540.0, abs=1.0)
         # Re-warming fast once the slope is known: up to the cap.
         room = _recover(ent, clock, room, 12.0, 7)
         _fire_last_timer()
         attrs = ent.extra_state_attributes
         assert attrs["window_rewarm_c_per_h"] == pytest.approx(12.0, abs=0.6)
-        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0)
+        assert ts(attrs["window_heat_latest"]) == pytest.approx(closed + 1800.0, abs=1.0)
         assert "at most 20 min" in ent._activity.doing
         # Slowed below 1 °C/h: due at the next check.
         room = _recover(ent, clock, room, 0.3, 15)
@@ -526,6 +531,167 @@ class TestResumeScheduleGoesBackToTheWait:
         assert ent._window_ctrl.get_saved().preset == "away"
         _wait_ends(ent, clock, room)
         assert ent.preset_mode == "away"
+
+
+def _close_polls():
+    return [t for t in _active_timers()
+            if getattr(t["callback"], "__name__", "") == "_async_window_close_action"]
+
+
+def _ts(attr):
+    import datetime
+    return datetime.datetime.fromisoformat(attr).timestamp()
+
+
+def _run_the_wait(ent, clock, rates, *, closed, first_cycle, until):
+    """Replay a close wait in time order: the regulation cycles every 60 s
+    from *first_cycle*, each with a fresh reading rising at the rate
+    *rates(t)* gives (°C/h), and the wait's own timer (the configured delay,
+    then its 60-s polls) between them, as in HA.  Queued tasks (the cycle's
+    check, the restore's cycle) run as they come.  Stops once the wait is
+    over or at *until*; returns when it ended (None: still on) and the
+    earliest time the card showed at each step while it was on."""
+    room = 20.2
+    shown = []
+    polls = [closed + CLOSE_DELAY + 60.0 * j for j in range(40)]
+    cycles = [first_cycle + 60.0 * k for k in range(40)]
+    for t, kind in sorted([(t, "poll") for t in polls] + [(t, "cycle") for t in cycles]):
+        if t > until or not ent._window_ctrl.close_delay_active:
+            break
+        clock.now = t
+        if kind == "poll":
+            if _close_polls():
+                _fire("_async_window_close_action")
+        else:
+            room += rates(t) / 60.0
+            _feed(ent, room, 12.0, 5.0)
+            _cycle(ent)
+        drain_tasks(ent)
+        if ent._window_ctrl.close_delay_active:
+            shown.append((t, _ts(ent.extra_state_attributes["window_heat_earliest"])))
+        else:
+            return t, shown
+    return None, shown
+
+
+class TestTheWaitEndsAtTheCycleThatKnows:
+    """2.23.1.  8 Nov 2026, second bedroom: the window reported shut at
+    20:11:26, the cycles ran at :31, and the room re-warmed at 0.8 °C/h by
+    itself.  The card promised heating at 20:18:56 (the close + 7.5 min);
+    the fresh slope was first known at the 20:19:31 cycle (7.5 min of
+    readings from the 20:11:31 one), and the wait ended at the 20:20:26
+    poll, the card reading a bare "Window" meanwhile.  Now the cycle that
+    knows ends the wait, and the card's earliest is that cycle."""
+
+    def _setup(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        ent = _entity(clock)
+        _open_window(ent, clock)
+        ent.hass.keep_tasks = True
+        last_cycle = clock.now
+        clock.tick(55.0)                       # shut 5 s before the next cycle
+        _close_window(ent)
+        return clock, ent, clock.now, last_cycle + 60.0
+
+    def test_the_second_bedroom_on_8_nov(self, monkeypatch):
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        assert first_cycle == closed + 5.0
+        # Before any reading since the close: the cycle the slope will come at.
+        earliest = _ts(ent.extra_state_attributes["window_heat_earliest"])
+        assert earliest == pytest.approx(first_cycle + 480.0, abs=0.01)
+        ended, shown = _run_the_wait(ent, clock, lambda t: 0.8, closed=closed,
+                                     first_cycle=first_cycle, until=closed + 1800.0)
+        # The cycle 8 min after the first one ends it: 20:19:31, not 20:20:26.
+        assert ended == pytest.approx(first_cycle + 480.0)
+        assert ent.preset_mode == "comfort"
+        assert not ent._window_ctrl.is_active
+        assert _close_polls() == []                     # the poll was cancelled
+        # The card's earliest was that cycle throughout, never in the past.
+        assert {round(e, 2) for _, e in shown} == {round(first_cycle + 480.0, 2)}
+        assert all(e >= t for t, e in shown)
+        logged = [e.text for e in ent._activity.entries()]
+        assert any(m.startswith("Room recovery over after 8 min") for m in logged)
+        assert sum(m.startswith("Window closed, restoring the previous preset")
+                   for m in logged) == 1
+
+    def test_a_fast_re_warm_waits_for_the_cycle_where_it_slows(self, monkeypatch):
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        slows = closed + 900.0
+
+        def rate(t):
+            return 6.0 if t < slows else 0.0
+
+        ended, shown = _run_the_wait(ent, clock, rate, closed=closed,
+                                     first_cycle=first_cycle, until=closed + 1800.0)
+        assert ended is not None and ended > slows
+        assert (ended - first_cycle) % 60.0 == pytest.approx(0.0)   # at a cycle
+        assert ent.preset_mode == "comfort"
+        assert _close_polls() == []
+        # While it re-warmed fast the polls carried the wait on.
+        assert any(t >= closed + CLOSE_DELAY + 60.0 for t, _ in shown)
+
+    def test_the_30_min_end_comes_at_a_cycle_too(self, monkeypatch):
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        ended, _ = _run_the_wait(ent, clock, lambda t: 6.0, closed=closed,
+                                 first_cycle=first_cycle, until=closed + 2000.0)
+        # The first event at or after 30 min from the close: the poll at
+        # exactly 30 min (its timer fires on the close's own phase).
+        assert ended == pytest.approx(closed + 1800.0)
+        assert ent.preset_mode == "comfort"
+
+    def test_a_late_check_after_the_wait_ended_does_nothing(self, monkeypatch):
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        ended, _ = _run_the_wait(ent, clock, lambda t: 0.8, closed=closed,
+                                 first_cycle=first_cycle, until=closed + 1800.0)
+        assert ended is not None
+        before = [e.text for e in ent._activity.entries()]
+        _run(ent._async_window_close_action(None, from_cycle=True))
+        _run(ent._async_window_close_action(None))
+        drain_tasks(ent)
+        assert ent.preset_mode == "comfort"
+        assert [e.text for e in ent._activity.entries()] == before
+
+    def test_a_check_that_finds_the_wait_still_due_leaves_the_poll(self, monkeypatch):
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        _run_the_wait(ent, clock, lambda t: 6.0, closed=closed,
+                      first_cycle=first_cycle, until=closed + 600.0)
+        assert ent._window_ctrl.close_delay_active
+        polls = len(_close_polls())
+        assert polls == 1
+        _run(ent._async_window_close_action(None, from_cycle=True))
+        assert ent._window_ctrl.close_delay_active
+        assert len(_close_polls()) == polls            # untouched, still armed
+
+    def test_a_check_from_before_a_new_close_waits_for_its_delay(self, monkeypatch):
+        """A cycle's check queued, then the window opened and shut again
+        before it ran: the new close's configured delay runs whatever the
+        sensor can show."""
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        _run_the_wait(ent, clock, lambda t: 6.0, closed=closed,
+                      first_cycle=first_cycle, until=closed + 600.0)
+        ent.hass.set(WINDOW, "on")                     # opened again within the wait
+        ent._async_window_changed(_event("on"))
+        assert not ent._window_ctrl.close_delay_active
+        clock.tick(30.0)
+        _close_window(ent)
+        ent._sensor_degraded = True
+        _run(ent._async_window_close_action(None, from_cycle=True))
+        assert ent._window_ctrl.close_delay_active
+        assert ent.preset_mode == "frost_protection"
+
+    def test_no_fresh_reading_the_poll_still_ends_it(self, monkeypatch):
+        """With no fresh reading (the room sensor degraded) no cycle takes
+        one to check, so the wait's own poll ends it, as before 2.23.1."""
+        clock, ent, closed, first_cycle = self._setup(monkeypatch)
+        ended, _ = _run_the_wait(ent, clock, lambda t: 0.8, closed=closed,
+                                 first_cycle=first_cycle, until=closed + 450.0)
+        assert ended is None and ent._window_ctrl.close_delay_active
+        ent._sensor_degraded = True                    # no recovery to show
+        clock.now = closed + CLOSE_DELAY + 60.0 * 3
+        _fire("_async_window_close_action")
+        drain_tasks(ent)
+        assert not ent._window_ctrl.close_delay_active
+        assert ent.preset_mode == "comfort"
 
 
 class TestTunerAfterAWindow:

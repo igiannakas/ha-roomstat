@@ -437,17 +437,29 @@ class TestWindowWaitBounds:
     "Window closed · 6–28 min" and the activity line)."""
 
     bounds = staticmethod(_ctrl_mod.window_wait_bounds)
-    KW = dict(slope_span_s=450.0, max_wait_s=1800.0, sensor_ok=True)
+    # The fresh slope first known at the cycle 8 min after the first reading
+    # since the close (5 s after it): 1485 (SlopeEstimator.known_at).
+    KW = dict(slope_known_ts=1485.0, max_wait_s=1800.0, sensor_ok=True)
 
     def test_the_fresh_slope_comes_after_a_short_delay(self):
-        # 5 min configured, the slope needs 7.5 min of readings, at most 30.
-        assert self.bounds(1000.0, 300.0, **self.KW) == (1450.0, 2800.0)
+        # 5 min configured, the slope's cycle later, at most 30.
+        assert self.bounds(1000.0, 300.0, **self.KW) == (1485.0, 2800.0)
 
     def test_a_longer_delay_is_the_earliest(self):
         assert self.bounds(1000.0, 600.0, **self.KW) == (1600.0, 2800.0)
 
     def test_a_delay_longer_than_the_cap(self):
         assert self.bounds(1000.0, 2400.0, **self.KW) == (3400.0, 3400.0)
+
+    def test_a_slope_already_known_leaves_the_delay(self):
+        kw = dict(self.KW, slope_known_ts=900.0)
+        assert self.bounds(1000.0, 300.0, **kw) == (1300.0, 2800.0)
+        kw = dict(self.KW, slope_known_ts=None)
+        assert self.bounds(1000.0, 300.0, **kw) == (1300.0, 2800.0)
+
+    def test_never_after_the_latest(self):
+        kw = dict(self.KW, slope_known_ts=5000.0)
+        assert self.bounds(1000.0, 300.0, **kw) == (2800.0, 2800.0)
 
     def test_no_sensor_ends_at_the_configured_delay(self):
         kw = dict(self.KW, sensor_ok=False)

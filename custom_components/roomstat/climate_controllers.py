@@ -118,27 +118,33 @@ def window_wait_bounds(
     closed_ts: float,
     close_delay_s: float,
     *,
-    slope_span_s: float,
+    slope_known_ts: float | None,
     max_wait_s: float,
     sensor_ok: bool,
 ) -> tuple[float, float]:
     """When heating can come back after a window closed: the earliest and
     the latest time (epoch s), for the card and the activity log.
 
-    The earliest is the configured close delay, or the first reading of
-    the room's fresh slope if that comes later (``slope_span_s`` of
-    readings since the close: until then :func:`window_recovery_wait` keeps
-    waiting); the latest ``max_wait_s`` after the close, never before the
-    configured delay.  A room sensor that can't show a recovery ends the
-    wait at the configured delay (both the same).  Between the two it ends
-    once the room's own rise has slowed below the recovery rate, at the
-    next poll."""
+    The earliest is the configured close delay, or the regulation cycle
+    that first gives the room's fresh slope (*slope_known_ts*, from
+    ``SlopeEstimator.known_at``: until then :func:`window_recovery_wait`
+    keeps waiting) if that comes later; the latest ``max_wait_s`` after the
+    close, never before the configured delay.  A room sensor that can't
+    show a recovery ends the wait at the configured delay (both the same).
+    Between the two it ends at the first cycle whose fresh reading shows the
+    room's own rise below the recovery rate (2.23.1: that cycle ends it, not
+    the next 60-s poll).  Until 2.23.1 the earliest was the close plus the
+    slope's bare 7.5-min span, and the wait ended at the poll after the
+    cycle that knew: 8 Nov 2026, second bedroom, the card's 20:18:56 came
+    and went, the slope was known at the 20:19:31 cycle, and the wait ended
+    at the 20:20:26 poll, with the card on a bare "Window" meanwhile."""
     delay = max(0.0, float(close_delay_s))
     if not sensor_ok:
         end = closed_ts + delay
         return end, end
     latest = closed_ts + max(delay, float(max_wait_s))
-    earliest = min(closed_ts + max(delay, float(slope_span_s)), latest)
+    known = closed_ts if slope_known_ts is None else float(slope_known_ts)
+    earliest = min(max(closed_ts + delay, known), latest)
     return earliest, latest
 
 
@@ -364,6 +370,14 @@ class WindowAutomationController:
             self._close_since = _time_now()
         _cl = call_later or _get_call_later()
         self._close_timer = _cl(hass, delay_s, on_timer_expire)
+
+    def stop_close_timer(self) -> None:
+        """The wait ends before its pending timer fires (a regulation
+        cycle's fresh reading shows the room has stopped re-warming,
+        2.23.1): cancel the timer, so it can't fire after the restore.  The
+        caller restores next (:meth:`restore`)."""
+        if self._close_timer is not None:
+            self._close_timer()
 
     def interrupt_close_delay(self) -> None:
         """A change by hand ends the close delay: its timer is cancelled,

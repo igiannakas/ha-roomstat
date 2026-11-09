@@ -114,10 +114,12 @@ _CASES = [
       "window_close_delay_active": True, "window_heat_earliest": 3 * 60 - 1,
       "window_heat_latest": 3 * 60 - 1},
      "Window · 3 min", "mdi:window-closed-variant", False),
+    # Its times past and the wait still on (2.23.1, card 1.5.4): it ends at
+    # the next regulation cycle.
     ({"preset_mode": "frost_protection", "window_open_active": True,
       "window_close_delay_active": True, "window_heat_earliest": -120,
       "window_heat_latest": -30},
-     "Window", "mdi:window-closed-variant", False),
+     "Window · <1 min", "mdi:window-closed-variant", False),
     ({"preset_mode": "frost_protection", "window_open_active": True,
       "window_close_delay_active": True},
      "Window", "mdi:window-closed-variant", False),

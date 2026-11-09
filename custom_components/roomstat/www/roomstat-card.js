@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.3";
+const CARD_VERSION = "1.5.4";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -100,7 +100,9 @@ const esc = (s) =>
 // and for the room to stop re-warming by itself (at most 30 min from the
 // close): until heating can first come back the line shows the range
 // ("Window · 6–28 min"), then the most it can still take ("Window · up to
-// 18 min"); a room that can't extend the wait shows just the minutes.
+// 18 min"); a room that can't extend the wait shows just the minutes.  Its
+// times past and the wait still on, it ends at the next regulation cycle
+// ("Window · <1 min", card 1.5.4; a bare "Window" said nothing, 8 Nov 2026).
 function windowStatus(a) {
   if (!a.window_close_delay_active) return "Window open";
   const early = minsUntil(a.window_heat_earliest);
@@ -108,6 +110,7 @@ function windowStatus(a) {
   if (early !== null && late !== null && late > early) return `Window · ${early}–${late} min`;
   if (early !== null) return `Window · ${early} min`;
   if (late !== null) return `Window · up to ${late} min`;
+  if (a.window_heat_latest) return "Window · <1 min";
   return "Window";
 }
 

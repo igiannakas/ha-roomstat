@@ -384,7 +384,7 @@ def _rewarm_phrase(f: CycleFacts) -> str:
                 f"{WINDOW_RECOVERY_RATE_C_PER_H:.1f} °C/h, at most {late} min")
     if late > 0:
         return f"{phrase}; heats again within {late} min"
-    return f"{phrase}; heats again at the next check"
+    return f"{phrase}; heats again within a minute"
 
 
 def _phrase(f: CycleFacts, cfg: RegulationConfig) -> str:

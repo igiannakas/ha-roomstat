@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.23.0-blue)
+![Version](https://img.shields.io/badge/version-2.23.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -123,7 +123,9 @@ changes.
   (at most 30 minutes after the close). 0 resumes at once. Meanwhile the
   card says how long: "Window · 6–28 min" until heating can first
   come back, then "Window · up to 18 min" while the room is still re-warming (the
-  activity log adds the re-warm rate). A preset, Boost or temperature you
+  activity log adds the re-warm rate), and "Window · <1 min" for the last
+  minute. The wait ends at the first reading that shows the room has
+  stopped re-warming. A preset, Boost or temperature you
   pick meanwhile ends the wait; Resume schedule and the schedule itself
   don't: they take effect when it ends. Resume schedule after such a change
   goes back to the wait, if the room would still be in it. Auto-tune does

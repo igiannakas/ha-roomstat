@@ -793,6 +793,28 @@ is updating.
   activity line `…; heats again in 6–28 min` or `… at +2.4 °C/h; heats
   again once under 1.0 °C/h, at most 18 min`. Only shown: the close action
   decides as before.
+  **The wait ends at the cycle that shows it is over, and the earliest is
+  that cycle** (2.23.1; owner, 8 Nov 2026, "Fix this": the second
+  bedroom's card read a bare `Window` for 1.5 min). The window reported
+  shut at 20:11:26, the cycles ran at :31, the room re-warmed 0.8 °C/h by
+  itself. The card's earliest was the close + 7.5 min (20:18:56), but the
+  fresh slope is first known at the cycle 7.5 min after the *first
+  reading* (20:19:31: `SlopeEstimator.known_at`, from the first cycle after
+  the close, `_first_cycle_after`, while no reading has come yet), and the
+  wait ended only at the close timer's next poll (20:20:26, on the close's
+  own phase). Now `window_wait_bounds` takes that time (`slope_known_ts`),
+  and every regulation cycle with a fresh reading asks the close wait
+  again (`_window_wait_check`, step 3b, after the slope is fed): once past
+  the configured delay and over by `window_recovery_wait`, it queues the
+  close action (`from_cycle=True`: it only ends a wait that is over, never
+  re-arms one, and cancels the pending poll, `stop_close_timer`). The poll
+  stays for a room with no fresh reading (sensor degraded or bridged) and
+  for the configured delay itself; the 30-min end comes at whichever of
+  the two is first. Should the bounds
+  still pass (a cycle late, a slope that needs one more reading), the card
+  reads `Window · <1 min` (card 1.5.4) and the activity line `heats again
+  within a minute`, never a bare `Window`. Replayed in
+  `tests/test_window_recovery.py` (`TestTheWaitEndsAtTheCycleThatKnows`).
   Switching on or off by hand ends the window state (its saved preset is
   restored; OFF → HEAT re-arms the window if it is still open), but **Heat
   while already heating is no change and leaves the window alone** (2.10.4;
