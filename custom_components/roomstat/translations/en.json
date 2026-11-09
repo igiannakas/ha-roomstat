@@ -141,7 +141,7 @@
               "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster.",
               "integral_deadband_c": "The integral only builds up when the room is this close to the target, so heat-ups never wind it up.",
               "hold_stop_over_c": "Near the target, the valve is shut once the room is predicted to be this far over the target within the braking time (at least 10 min). The radiator's leftover heat can still take it a little higher. Below this line, over the target, the valve is asked for less than its own reading, where a Tado can still trickle, so a higher line lets the room run warmer.",
-              "hold_release_below_c": "After a stop, heating starts again only once the room is predicted to be this far under the target within the heat again look-ahead below (10 min unless changed). With the stop above, this is the band the room swings in: a wider band means fewer stops and restarts and a bigger swing, but not always fewer commands. Auto-tune allows for the band's own swing. Dosed top-ups use their own zone instead.",
+              "hold_release_below_c": "After a stop, heating starts again only once the room is predicted to be this far under the target within the heat again look-ahead below (10 min unless changed). With the stop above, this is the band the room swings in: a wider band means fewer stops and restarts and a bigger swing, but not always fewer commands. Auto-tune allows for the band's own swing.",
               "hold_release_lead_min": "A cooling room heats again this many minutes before it is predicted to reach the line above, so the heat arrives about when the room bottoms out. Measured here, a room stops cooling about 3-10 min after its valve reopens; longer releases rooms while they are still warm, often above the target, and they then overshoot. 0 = heat again only at the line.",
               "derivative_time_min": "How far ahead Roomstat predicts where the radiator's leftover heat will carry the room, and so how early heating stops, in heat-ups and near the target (there at least 10 min). 0 = no anticipation in heat-ups. When auto-tune learns braking, this is only its starting value."
             }
@@ -184,28 +184,14 @@
           },
           "valve_lookahead": {
             "name": "Valve look-ahead",
-            "description": "Experimental. A Tado valve looks ahead on how fast its own reading moves, so when its reading falls (the radiator cooling after a heat-up) it opens harder than Roomstat asked. With this on, Roomstat lowers its hold commands while the valve's reading falls, by a look-ahead it learns from the valve's own answers. It only ever takes heat away: the room may spend a little more time just under its target.",
+            "description": "A Tado valve looks ahead on how fast its own reading moves, so when its reading falls (the radiator cooling after a heat-up) it opens harder than Roomstat asked. With this on, Roomstat lowers its hold commands while the valve's reading falls, by a look-ahead it learns from the valve's own answers. It only ever takes heat away: the room may spend a little more time just under its target.",
             "data": {
               "valve_lookahead": "Cancel the valve's look-ahead",
               "heating_power_entity_id": "Valve heating power sensor"
             },
             "data_description": {
               "valve_lookahead": "Lowers a hold command by the learned look-ahead times how fast the valve's reading is falling (at most 1.5 °C). Starts at 0 and is learned a step at a time, from 6 top-ups on (3 of them on a reading falling 1 °C/h or more); full-power heat-ups are not touched. Auto-tune's reset forgets it too.",
-              "heating_power_entity_id": "The zone's heating power in % (for a Tado zone, the zone's Heating sensor). Roomstat learns the look-ahead from the valve's first answer to each top-up. Required while the look-ahead is on."
-            }
-          },
-          "dosed_topups": {
-            "name": "Dosed top-ups",
-            "description": "Experimental. A room is either heating up (0.8 °C or more short) or topped up with short full-power pulses, instead of holding the valve part-open. Each pulse is sized from the heat already on its way to the room and from how fast the room is cooling, so the room stays in the zone set below instead of overshooting after every top-up. What a pulse does in this room is learned from the room's own pulses. Rooms with this on time their pulses together where they can, so the boiler fires once for several radiators. Uses the heating power sensor picked in the Valve look-ahead section.",
-            "data": {
-              "dosed_topups": "Dosed top-ups",
-              "dose_zone_above_c": "Zone above the target",
-              "dose_zone_below_c": "Zone below the target"
-            },
-            "data_description": {
-              "dosed_topups": "Pulses last at least 3 minutes, and at most what the room's own heating rate (from auto-tune) says its shortfall needs, with 0.2 °C to spare (12 minutes until that rate is known). A shortfall of 0.8 °C or more is a normal heat-up; anything less is dosed, never held. Windows, presence and boost work as before. Auto-tune's reset forgets what was learned.",
-              "dose_zone_above_c": "How far over the target a pulse may take the room. Each pulse aims 0.1 °C less than this (never below the target), and a pulse that would go higher waits or ends early. A wider zone means fewer, longer pulses and fewer boiler starts. 0.1 with 0.1 below keeps the room centred on the target.",
-              "dose_zone_below_c": "How far under the target the room may cool before the next pulse is due. The pulse is timed so the room bottoms out about here."
+              "heating_power_entity_id": "The zone's heating power in % (for a Tado zone, the zone's Heating sensor). Roomstat learns the look-ahead from the valve's first answer to each top-up, so it is required while the look-ahead is on. Whether the look-ahead is on or not, Roomstat also uses it to send an off again when the zone still reports heating a few minutes after an off, and the Out of band sensor uses it to weigh how much the radiator heated."
             }
           },
           "out_of_band": {
@@ -240,8 +226,7 @@
     "error": {
       "temp_entity_not_found": "External temperature sensor not found.",
       "temp_not_temperature": "Please select a temperature sensor (device_class: temperature).",
-      "lookahead_needs_heating_power": "Pick the valve's heating power sensor: the look-ahead learns from it.",
-      "dosing_needs_heating_power": "Pick the valve's heating power sensor in the Valve look-ahead section: dosed top-ups check each pulse with it."
+      "lookahead_needs_heating_power": "Pick the valve's heating power sensor: the look-ahead learns from it."
     },
     "abort": {
       "trv_in_use": "That thermostat is already used by another Roomstat room."
@@ -337,9 +322,6 @@
       "valve_lookahead": {
         "name": "Valve look-ahead"
       },
-      "topup_dose": {
-        "name": "Top-up gain"
-      },
       "regulation_command": {
         "name": "Command to valve"
       },
@@ -352,8 +334,7 @@
           "heat": "Heat-up",
           "coast": "Coast",
           "hold": "Hold",
-          "stop": "Stop",
-          "dose": "Top-up pulse"
+          "stop": "Stop"
         }
       },
       "activity": {

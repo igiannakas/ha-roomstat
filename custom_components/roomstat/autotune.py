@@ -291,15 +291,6 @@ class AutotuneSample:
     # What the valve look-ahead (lookahead.py) took off the command the TRV
     # holds: the valve answers it as Roomstat's push, so it counts back in.
     lookahead_c: float = 0.0
-    # The room is in the dosing phase of dosed top-ups (dosing.py): pulses,
-    # not the PI, are in charge, so no hold window counts the cycle (Kp and
-    # Ki are judged on the hold they drive; 2.15.0 review: Ki 0.001 ->
-    # 0.0012 in 36 h on dosed cycles), and a target step it doses is no
-    # heat-up (review 3, 31 Oct 2026: six dosed 0.7 steps took the braking
-    # time 10 -> 14.7 min, and the heating rate the pulses' cap is sized on
-    # came from pulses).  Heat-ups (heatup_enter_c or more) are judged as
-    # always.
-    dosed: bool = False
 
     @property
     def demand_c(self) -> float | None:
@@ -840,8 +831,6 @@ class _HoldTracker:
     def add(self, s: AutotuneSample) -> str:
         if not s.eligible or s.setpoint_c is None or abs(s.setpoint_c - self.setpoint_c) > 0.05:
             return _ABORT
-        if s.dosed:
-            return _ABORT
         if not 0 <= s.ts - self._last_cycle_ts <= self.cfg.max_gap_s:
             return _ABORT
         self._last_cycle_ts = s.ts
@@ -1262,8 +1251,7 @@ class Autotuner:
         s = AutotuneSample(s.ts, sp, room, s.tado_internal_c, s.tado_setpoint_c,
                            s.eligible and sp is not None, s.command_saturated,
                            s.room_temp_ts if _finite(s.room_temp_ts) else None,
-                           window=bool(s.window), lookahead_c=s.lookahead_c,
-                           dosed=s.dosed is True)
+                           window=bool(s.window), lookahead_c=s.lookahead_c)
         resumed = (
             self._prev_ts is not None
             and (not self._prev_eligible or s.ts - self._prev_ts > self.cfg.max_gap_s)
@@ -1304,10 +1292,9 @@ class Autotuner:
 
         # Start of a heat-up: a setpoint step up (or heating resuming after a
         # summer / off / away period) with the room well below target.  Not
-        # after a window: the room is recovering by itself.  Not one dosed
-        # top-ups take (no heat-up at all).
+        # after a window: the room is recovering by itself.
         if (
-            self._heatup is None and s.eligible and not s.dosed and room is not None
+            self._heatup is None and s.eligible and room is not None
             and sp - room >= self.cfg.heatup_min_error_c
         ):
             step_up = (
@@ -1343,7 +1330,7 @@ class Autotuner:
 
         # Start of a hold window.
         if (
-            self._heatup is None and self._hold is None and s.eligible and not s.dosed
+            self._heatup is None and self._hold is None and s.eligible
             and room is not None and self._sp_since_ts is not None
             and s.ts - self._sp_since_ts >= self.cfg.hold_settle_s
             and s.ts - self._last_heatup_end_ts >= self.cfg.hold_after_heatup_s

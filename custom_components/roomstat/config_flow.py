@@ -8,6 +8,7 @@ from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .climate_controllers import (
+    DOSING_OPTIONS,
     OBSOLETE_OPTIONS,
     change_trv,
     options_form_errors,
@@ -23,9 +24,6 @@ from .const import (
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
-    CONF_DOSE_ZONE_ABOVE_C,
-    CONF_DOSE_ZONE_BELOW_C,
-    CONF_DOSED_TOPUPS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEAT_TIMER_S,
@@ -63,9 +61,6 @@ from .const import (
 )
 from .parameters import (
     DEFAULT_SENSOR_GRACE_S,
-    DOSE_ZONE_MAX_C,
-    DOSE_ZONE_MIN_C,
-    DOSE_ZONE_STEP_C,
     HOLD_BAND_MAX_C,
     HOLD_BAND_MIN_C,
     HOLD_BAND_STEP_C,
@@ -74,7 +69,6 @@ from .parameters import (
     BehaviourConfig,
     OutOfBandConfig,
     RegulationConfig,
-    dose_zone_option,
     hold_band_option,
     release_lead_option,
 )
@@ -86,8 +80,9 @@ class RoomstatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
     # 2: one controller (no switch, no gain scheduling); Kp is the gain near
-    # the target.  __init__.py async_migrate_entry converts older options.
-    MINOR_VERSION = 2
+    # the target.  3: no dosed top-ups.  __init__.py async_migrate_entry
+    # converts older options.
+    MINOR_VERSION = 3
 
     async def async_step_user(self, user_input=None):
         errors: dict[str, str] = {}
@@ -177,7 +172,7 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 if key not in cleaned:
                     merged.pop(key, None)
             merged.update(cleaned)
-            for key in OBSOLETE_OPTIONS:
+            for key in (*OBSOLETE_OPTIONS, *DOSING_OPTIONS):
                 merged.pop(key, None)
 
             # The TRV lives in the entry data (it is also the unique ID).
@@ -473,7 +468,9 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                     default=bool(opts.get(CONF_VALVE_LOOKAHEAD, False)),
                 ): selector.BooleanSelector(),
                 # The zone's heating power (Tado's heating %), e.g.
-                # sensor.<zone>_heating: what the look-ahead learns from.
+                # sensor.<zone>_heating: what the look-ahead learns from, and
+                # what the lost-off check and the out-of-band sensor read
+                # whether the look-ahead is on or not.
                 vol.Optional(CONF_HEATING_POWER_ENTITY_ID): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
@@ -484,38 +481,6 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
             lookahead_section_schema = self.add_suggested_values_to_schema(
                 lookahead_section_schema, {CONF_HEATING_POWER_ENTITY_ID: heating_power_entity}
             )
-
-        # --- Build the dosed top-ups section schema (2.15.0) ---
-        # It uses the heating power sensor picked in the look-ahead section.
-        # The zone (2.17.0): how far over and under the target the room may
-        # go between pulses.
-        zone_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=DOSE_ZONE_MIN_C, max=DOSE_ZONE_MAX_C, step=DOSE_ZONE_STEP_C,
-                mode=selector.NumberSelectorMode.BOX,
-                unit_of_measurement="°C",
-            )
-        )
-        dosing_section_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_DOSED_TOPUPS,
-                    default=bool(opts.get(CONF_DOSED_TOPUPS, False)),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_DOSE_ZONE_ABOVE_C,
-                    default=dose_zone_option(
-                        opts.get(CONF_DOSE_ZONE_ABOVE_C), defaults.dose.zone_above_c
-                    ),
-                ): zone_selector,
-                vol.Required(
-                    CONF_DOSE_ZONE_BELOW_C,
-                    default=dose_zone_option(
-                        opts.get(CONF_DOSE_ZONE_BELOW_C), defaults.dose.zone_below_c
-                    ),
-                ): zone_selector,
-            }
-        )
 
         # The hold's band (2.20.0): the stop's line over the target and the
         # release's under it.
@@ -684,12 +649,6 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                 # Section: Valve look-ahead
                 vol.Required("valve_lookahead"): section(
                     lookahead_section_schema,
-                    {"collapsed": True},
-                ),
-
-                # Section: Dosed top-ups
-                vol.Required("dosed_topups"): section(
-                    dosing_section_schema,
                     {"collapsed": True},
                 ),
 

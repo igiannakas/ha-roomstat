@@ -102,17 +102,11 @@ TADO_SERVICE_TIMER = "set_climate_timer"
 # Valve look-ahead (lookahead.py, climate_lookahead.py): cancel the Tado
 # valve's own look-ahead on its falling reading, learned from the zone's
 # heating power sensor (Tado's heating %, e.g. sensor.<zone>_heating).
-# Off by default.
+# Off by default.  The heating power sensor is read whenever it is set: the
+# lost-off check (climate_regulation._check_lost_off) and the out-of-band
+# sensor's weighting of the valve's heating use it too.
 CONF_VALVE_LOOKAHEAD = "valve_lookahead"
 CONF_HEATING_POWER_ENTITY_ID = "heating_power_entity_id"
-# Dosed top-ups (2.15.0): in the settled state, full-power pulses sized by a
-# Smith predictor replace the hold (dosing.py).  Needs the heating power
-# sensor above, to check each pulse opened the valve.
-CONF_DOSED_TOPUPS = "dosed_topups"
-# The dosing zone (2.17.0, parameters.DoseConfig.zone_above_c / zone_below_c):
-# how far over and under the target a dosed room may go, °C.
-CONF_DOSE_ZONE_ABOVE_C = "dose_zone_above_c"
-CONF_DOSE_ZONE_BELOW_C = "dose_zone_below_c"
 
 # Out-of-band alarm (binary_sensor.<room>_out_of_band; parameters.OutOfBandConfig)
 CONF_BAND_C = "band_c"

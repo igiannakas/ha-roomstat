@@ -15,9 +15,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .card import async_register_card
 from .climate_controllers import (
+    DOSING_OPTIONS,
     MissingEntityWatch,
     heating_report,
     migrate_options_v1_to_v2,
+    migrate_options_v2_to_v3,
     plausible_c,
     read_trv,
     trv_on_schedule,
@@ -60,7 +62,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Bring options written by older versions to the current meaning."""
+    """Bring options written by older versions to the current meaning.
+
+    One step per minor version, in order, so an entry from any older
+    version goes through every step after it.
+    """
     if entry.version > 1:
         return False                 # written by a newer Roomstat
     if entry.minor_version < 2:
@@ -75,7 +81,35 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.title, options.get("correction_kp", defaults.kp),
             options.get("derivative_time_min", defaults.td_s / 60.0),
         )
+    if entry.minor_version < 3:
+        dropped = [key for key in DOSING_OPTIONS if key in entry.options]
+        options = migrate_options_v2_to_v3(entry.options)
+        sensor = _async_remove_topup_gain_sensor(hass, entry)
+        hass.config_entries.async_update_entry(entry, options=options, minor_version=3)
+        _LOGGER.info(
+            "%s: settings migrated: dosed top-ups are no longer part of Roomstat "
+            "(settings dropped: %s; Top-up gain sensor: %s)",
+            entry.title, ", ".join(dropped) or "none",
+            f"{sensor} removed" if sensor is not None else "none registered",
+        )
     return True
+
+
+def _async_remove_topup_gain_sensor(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
+    """Remove the room's Top-up gain sensor from the entity registry.
+
+    Every room had one while dosed top-ups existed (2.15.0 to 2.23.x);
+    nothing provides it any more, so it would stay behind as an orphaned
+    entity.  Safe to repeat.  Returns its entity ID, or None when it was
+    not registered.
+    """
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        Platform.SENSOR, DOMAIN, f"{entry.entry_id}_topup_dose"
+    )
+    if entity_id is not None:
+        registry.async_remove(entity_id)
+    return entity_id
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -83,6 +117,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # 1. Ensure DOMAIN dict exists in hass.data
     hass.data.setdefault(DOMAIN, {})
+
+    # The Top-up gain sensor went with dosed top-ups (2.24.0).  The migration
+    # to minor version 3 removes it; this catches one that an older Roomstat
+    # made again after a downgrade, when no migration runs.  One registry
+    # lookup.
+    removed = _async_remove_topup_gain_sensor(hass, entry)
+    if removed is not None:
+        _LOGGER.info(
+            "%s: removed %s, the Top-up gain sensor an older Roomstat made "
+            "(dosed top-ups are no longer part of Roomstat)",
+            entry.title, removed,
+        )
 
     # A deleted, renamed or disabled entity, or a room sensor that stays
     # unavailable, becomes a repair (repairs.py).
@@ -158,12 +204,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
         # The zone's heating power (Tado's heating %): what the valve
-        # look-ahead learns from, what dosed top-ups check each pulse with,
-        # and the room's share of the boiler-call signal the pulse
-        # coordinator lets other rooms ride (every room reports it, dosing or
-        # not).  The value and when it last changed (a new report of the
-        # cloud's polling).  Read whenever the sensor is set: one state
-        # lookup.
+        # look-ahead learns from, what the lost-off check reads after an off
+        # and what the out-of-band sensor weighs the valve's heating by.  The
+        # value and when it last changed (a new report of the cloud's
+        # polling).  Read whenever the sensor is set: one state lookup.
         data.update(heating_report(None, None, changed_ts=0.0, reported_ts=0.0,
                                    from_tado=False, max_ahead_s=REPORT_TS_MAX_AHEAD_S))
         power_id = entry.options.get(CONF_HEATING_POWER_ENTITY_ID)

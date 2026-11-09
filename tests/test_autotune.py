@@ -905,23 +905,16 @@ class TestNewGains:
         t._on_hold(_hold(DAY + 4 * 3600, mean=0.3), DAY + 4 * 3600)
         assert t._trim["ki"] > 1.0
 
-    def test_dosed_cycles_make_no_hold_window(self):
-        """A room settled under dosed top-ups: pulses, not the PI, are in
-        charge, so no hold window is collected or judged on its cycles
-        (2.15.0); the same cycles undosed start one."""
-        def feed(t, dosed):
-            for k in range(6 * 60):
-                ts = DAY + 60.0 * k
-                room = 20.0 - 0.05 * math.sin(k / 9.0)
-                t.observe(A.AutotuneSample(
-                    ts, 20.0, room, room - 3.0, 25.0 if k % 30 < 4 else 5.0,
-                    room_temp_ts=ts, dosed=dosed,
-                ))
-        dosed, plain = _tuner(), _tuner()
-        feed(dosed, True)
-        feed(plain, False)
-        assert dosed._hold is None and not dosed._holds
-        assert plain._hold is not None or plain._holds
+    def test_a_steady_room_near_its_target_makes_a_hold_window(self):
+        t = _tuner()
+        for k in range(6 * 60):
+            ts = DAY + 60.0 * k
+            room = 20.0 - 0.05 * math.sin(k / 9.0)
+            t.observe(A.AutotuneSample(
+                ts, 20.0, room, room - 3.0, 25.0 if k % 30 < 4 else 5.0,
+                room_temp_ts=ts,
+            ))
+        assert t._hold is not None or t._holds
 
     def test_observe_survives_garbage(self):
         t = _tuner()
@@ -1020,6 +1013,31 @@ class TestPersistence:
         t = _tuner()
         t._on_heatup(_heatup(DAY, 0.6), DAY)
         assert _tuner(stored=t.as_dict()).last_event == t.last_event
+
+    def test_unknown_keys_in_a_save_are_ignored(self):
+        """A save is read key by key, so keys this version does not know,
+        at any level, change nothing: it loads as the same save without
+        them.  (``dosed`` here: the samples' flag went with dosed top-ups in
+        2.24.0, though the tuner never saved it.)"""
+        import json
+        t = _tuner()
+        t._on_heatup(_heatup(DAY, 0.6), DAY)
+        t._on_hold(_hold(DAY + 4 * 3600, mean=0.05), DAY + 4 * 3600)
+        t.observe(A.AutotuneSample(2 * DAY, 18.0, 18.5, 18.0, 5.0))
+        t.observe(A.AutotuneSample(2 * DAY + 60.0, 20.0, 18.5, 18.0, 25.0))
+        assert t._heatup is not None
+        clean = json.loads(json.dumps(t.as_dict()))
+        old = json.loads(json.dumps(clean))
+        old["dosed"] = True
+        old["episode"]["dosed"] = True
+        old["episode"]["heatup"]["dosed"] = False
+        old["heatups"][0]["dosed"] = False
+        old["holds"][0]["dosed"] = True
+        loaded = _tuner(stored=old)
+        assert loaded.as_dict() == _tuner(stored=clean).as_dict()
+        assert loaded.active_tuning() == t.active_tuning()
+        assert len(loaded._heatups) == 1 and len(loaded._holds) == 1
+        assert loaded.phase == A.PHASE_HEATUP
 
     def test_nothing_learned_still_waiting_after_restart(self):
         # Older stored state has no last_event; nothing learned yet.

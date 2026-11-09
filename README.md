@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.23.2-blue)
+![Version](https://img.shields.io/badge/version-2.24.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -53,14 +53,15 @@ changes.
   nothing has changed for 15 seconds, so pressing Comfort then Frost
   protection sends nothing. A Tado valve that gets an off seconds after a
   heat command can heat for a quarter of an hour anyway, so an off sent
-  within a minute of a heat command is sent once more a minute later, and a
-  valve that still reports heating after an off gets it again (3 minutes
-  after it on a Tado zone, whose heating sensor says when the valve itself
-  reported; 8 minutes otherwise). More
-  heat also waits while a window's open delay runs. Less heat and off always
-  go at once; the schedule, presence and windows wait only within those 15
-  seconds. **Heat** sent to a room that is already heating no longer ends
-  an open window's frost protection.
+  within a minute of a heat command is sent once more a minute later. With
+  the zone's heating power sensor set (**Configure → Valve look-ahead →
+  Valve heating power sensor**), a valve that still reports heating after
+  an off gets it again, at most twice per heat command: 3 minutes after the
+  off on a Tado zone, whose heating sensor says when the valve itself
+  reported, 8 minutes otherwise. More heat also waits while a window's open
+  delay runs. Less heat and off always go at once; the schedule, presence
+  and windows wait only within those 15 seconds. **Heat** sent to a room
+  that is already heating no longer ends an open window's frost protection.
 - **You can override an open window.** A preset, Boost or temperature you
   pick while a window is open (from the card, a script or the thermostat)
   heats the room now, as if the window were shut, until the window closes;
@@ -136,23 +137,12 @@ changes.
   not learn from the heating that follows a window.
 - **Auto-tune.** Learns Kp, Ki and the braking time of each room in the
   background, from everyday heat-ups. Off by default. See [Auto-tune](#auto-tune).
-- **Valve look-ahead (experimental).** A Tado valve looks ahead on how fast
-  its own reading moves. After a heat-up, when the radiator cools and the
-  valve's reading falls, it opens harder than Roomstat asked. With this on,
+- **Valve look-ahead.** A Tado valve looks ahead on how fast its own
+  reading moves. After a heat-up, when the radiator cools and the valve's
+  reading falls, it opens harder than Roomstat asked. With this on,
   Roomstat lowers its hold commands while the valve's reading falls, by a
   look-ahead it learns from the valve's own answers. Off by default. See
   [Valve look-ahead](#valve-look-ahead).
-- **Dosed top-ups (experimental).** A room is either heating up (0.8 °C or
-  more short) or dosed: everything else is topped up with full-power pulses
-  (at least 3 minutes) instead of holding the valve part-open. Each pulse is
-  sized from the heat
-  already on its way to the room and from how fast the room is cooling, so
-  the room stays in a zone around its target (by default 0.1 °C under to
-  0.2 °C over) instead of overshooting after every top-up. What a pulse
-  does is learned from the room's own pulses, pooled over the last two
-  days. Rooms with it on time their pulses together where they can, so an
-  on/off boiler fires once for several radiators. Off by default. See
-  [Dosed top-ups](#dosed-top-ups).
 - **A trace per room.** Diagnostic sensors for the command sent to the valve,
   the room error and the regulation mode, updated every cycle. The first two
   keep long-term statistics, so you can look at a room's behaviour weeks later
@@ -282,6 +272,9 @@ Controller → Heat-up braking time**, with **Learn heat-up braking** off.
 
 Turn it on per room: **Configure → Valve look-ahead**, then pick the
 zone's heating power sensor (for a Tado zone, `sensor.<zone>_heating`).
+The sensor is worth setting with the look-ahead off too: Roomstat also uses
+it to catch an off the valve didn't take (see "Quick changes don't reach
+the valve" above) and to weigh the [Out of band](#fail-safe) evidence.
 
 - While the room holds near its target, each command is lowered by the
   look-ahead times how fast the valve's own reading is falling (at most
@@ -304,80 +297,6 @@ zone's heating power sensor (for a Tado zone, `sensor.<zone>_heating`).
   Judge it on your own room's trace sensors.
 - **Reset auto-tune** forgets the learned look-ahead too. Another valve
   (a changed TRV) starts afresh.
-
-## Dosed top-ups
-
-Turn it on per room: **Configure → Dosed top-ups**. It uses the zone's
-heating power sensor picked under **Valve look-ahead** (for a Tado zone, the
-zone's Heating sensor), to check that each pulse opened the valve.
-
-- **The zone:** two settings in the same section, **Zone above the
-  target** (0.2 °C) and **Zone below the target** (0.1 °C), each 0.1–0.5
-  in tenths.
-  The room may cool to the zone's bottom before the next pulse; each pulse
-  aims 0.1 °C under the zone's top (0.1 °C over the target by default,
-  never below the target), and a pulse that would take the room over the
-  top waits or ends early. A wider zone means fewer, longer pulses and fewer
-  boiler starts. 0.1 and 0.1 is 2.16.0's band, centred on the target.
-- **When:** a room is either heating up or dosed, never held. A shortfall
-  of 0.8 °C or more is a heat-up as before (full power, then the coast);
-  everything else is dosed: a coast that stops short, a room cooling from
-  its target, a target raised by less than 0.8. Windows, presence and boost
-  work as before (dosing waits while a window is open or a boost runs).
-- **What:** instead of a hold command, a pulse at 25 °C (a timer when
-  **Full-power time limit** is set), then off. A Tado valve answers 25 °C the same
-  way every time; it answers a mid-range command late and partly.
-- **How much:** Roomstat keeps a model of its own heat on its way to the
-  room (a Smith predictor): the room sees a pulse only 8–12 minutes later.
-  A pulse lasts until the heat on its way covers what the room is short of
-  plus what it will lose until that heat has landed, at least 3 minutes.
-  The next pulse waits at least until the model says the last one's heat
-  has landed; heat still on its way counts as already there. A raised
-  target doesn't wait; heat from a hold or a heat-up must show first.
-- **The cap:** each pulse also has a cap from the room's own heating rate
-  (auto-tune's, learned on its heat-ups): when the pulse starts, the time
-  that rate says the room's shortfall to the pulse's aim (plus its cooling
-  until the heat lands) takes, with 0.2 °C to spare. A fast room short 0.1 °C gets a few
-  minutes at most, a slow room short 0.7 °C up to an hour. It is the
-  safety net for a model that is wrong, so a pulse can't overheat the room
-  by much; on a cold day it can end a pulse early, and the room then lands
-  a little short and gets another pulse. Until the room's heating rate is
-  known the cap is 12 minutes. A long pulse also ends like a heat-up once
-  its heat shows and the room rises onto its aim.
-- **When the next:** the room fires a pulse so that it reaches the zone's
-  bottom just as the heat starts to show, which puts the bottom of its
-  swing there and the landing on the aim. A room whose shortest pulse
-  would take it over the zone's top waits until it needs more; a room
-  warming by itself (sun, people) gets that much less.
-- **The cooling** it covers is measured all the time: the room's cooling
-  less the effect of the heat Roomstat sent. Cold nights get bigger pulses,
-  mild evenings smaller ones; people and sun count as they happen.
-- **Learning:** the model is fitted on the room's last pulses together
-  (up to 10, from the last 48 hours), with the room's own cooling allowed to
-  drift slowly between them. One pulse alone can't tell a strong radiator
-  from a room that cooled faster; several of different sizes can. Stretches
-  with a window, Boost, a hold's or heat-up's heat, a gap in the readings
-  or Roomstat off are left out. The model only moves once the fit is sure
-  enough (within about ±20 %) and further than that uncertainty: at once
-  when it means smaller pulses, at most 15 % every 12 hours when it means
-  bigger ones; its delay and spread follow the fit. It starts from
-  auto-tune's heating rate and a top-up's typical delay (5 min) and spread
-  (8 min); with few pulses the fit leans on those. The **Top-up
-  gain** sensor shows the rise per minute in use, how sure the last fit
-  was, the rest of the model and the pulses of the last 24 hours; the
-  diagnostics have every pulse and the last fit in full. An update from
-  2.16 starts the learning afresh.
-- **The boiler:** a room at or below its aim rides another zone's call
-  for heat, and a room due within a few minutes fires with another room's
-  pulse, if a minimum pulse would not take it more than 0.05 °C over its
-  aim. Each room judges this on its own zone.
-- **The activity log** says each pulse, its landing and what was learned.
-- **Safety:** every pulse is a full-power command, so the fail-cold rules
-  apply (timer, watchdog, a lost room sensor ends it). A valve that still
-  reports heating after an off gets the off again, at most twice (also
-  without dosed top-ups): 3 minutes after it on a Tado zone, 8 otherwise.
-- **Reset auto-tune** forgets what dosed top-ups learned. Another valve (a
-  changed TRV) starts afresh.
 
 ## Activity log
 

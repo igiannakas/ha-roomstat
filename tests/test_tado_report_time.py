@@ -18,7 +18,7 @@ import pytest
 from tests.ha_harness import _CALL_LATER, TRV, _run, _start, e2e, reset_timers
 from tests.pure_modules import climate_controllers as cc
 from tests.pure_modules import parameters as P
-from tests.test_dosing_entity import POWER, _Clock, _cycle, _entity, _is_heat, _is_off, _Plant
+from tests.tado_plant import POWER, Clock, Plant, cycle, is_heat, is_off, room_entity
 
 UTC = dt.UTC
 
@@ -179,7 +179,7 @@ class TestHeatingReport:
 # Through the entity
 # ---------------------------------------------------------------------------
 
-class _PolledPlant(_Plant):
+class _PolledPlant(Plant):
     """A Tado zone as Home Assistant sees it: polled every ``poll_s``, each
     poll bringing the cloud's state as it is then, with the valve's own time
     of its last report (``valve_report_ts``).  ``keeps_heating``: the valve
@@ -198,7 +198,7 @@ class _PolledPlant(_Plant):
         if self.keeps_heating and self.heat_cmd:
             calls = self.ent.hass.service_calls
             # The zone takes the off and shows it; the valve keeps heating.
-            if any(_is_off(c) for c in calls[self.seen:]):
+            if any(is_off(c) for c in calls[self.seen:]):
                 self.told_off = True
             self.seen = len(calls)
             return
@@ -230,8 +230,8 @@ def _timers():
 
 
 def _room(monkeypatch, *, options=None, room=19.4, **kw):
-    clock = _Clock(monkeypatch)
-    ent = _entity({"heating_power_entity_id": POWER, **(options or {})})
+    clock = Clock(monkeypatch)
+    ent = room_entity({"heating_power_entity_id": POWER, **(options or {})})
     plant = _PolledPlant(ent, clock, room=room, **kw)
     plant.feed()
     _run(_start(ent))
@@ -243,7 +243,7 @@ def _minutes(ent, clock, plant, n):
         clock.tick(60.0)
         plant.advance(60.0)
         plant.feed()
-        _cycle(ent)
+        cycle(ent)
 
 
 def _until_resend(ent, clock, plant, limit=240):
@@ -252,7 +252,7 @@ def _until_resend(ent, clock, plant, limit=240):
     off_ts = None
     for _ in range(limit):
         _minutes(ent, clock, plant, 1)
-        offs = [c for c in ent.hass.service_calls if _is_off(c)]
+        offs = [c for c in ent.hass.service_calls if is_off(c)]
         if offs and off_ts is None:
             off_ts, first = clock.now, len(offs)
         if off_ts is not None and len(offs) > first:
@@ -294,8 +294,8 @@ class TestLostOffThroughTheEntity:
         ent, clock, plant = _room(monkeypatch)
         with caplog.at_level(logging.WARNING):
             _minutes(ent, clock, plant, 240)
-        heats = [c for c in ent.hass.service_calls if _is_heat(c)]
-        offs = [c for c in ent.hass.service_calls if _is_off(c)]
+        heats = [c for c in ent.hass.service_calls if is_heat(c)]
+        offs = [c for c in ent.hass.service_calls if is_off(c)]
         assert heats and len(offs) == len(heats), (len(heats), len(offs))
         assert not [r for r in caplog.records if "still reports heating" in r.getMessage()]
 
@@ -322,7 +322,7 @@ def test_the_lookahead_judges_an_answer_by_the_valves_time(monkeypatch):
         if minute == 10:
             ent.coordinator.data.update({"heating_power": 45.0, "heating_power_ts": clock.now,
                                          "heating_power_valve_ts": released_at + 420.0})
-        _cycle(ent)
+        cycle(ent)
     (release,) = ent._lookahead.releases
     assert release.response_pct == 45.0
 
@@ -347,7 +347,7 @@ def _updates(hass):
 
 
 def _commanded(options, *, cloud=True, entity_id=TRV, ent=None):
-    ent = ent or _entity({"heating_power_entity_id": POWER, **options})
+    ent = ent or room_entity({"heating_power_entity_id": POWER, **options})
     ent._config_entry.data["source_entity_id"] = entity_id
     ent.coordinator.data = {"tado_cloud": cloud}
     _run(ent._async_call_trv(entity_id, "set_hvac_mode", {"hvac_mode": "off"}))
@@ -360,7 +360,7 @@ ON = {"refresh_after_command": True}
 @e2e
 class TestRefreshAfterCommand:
     def test_one_refresh_half_a_minute_after_a_command(self, monkeypatch):
-        clock = _Clock(monkeypatch)
+        clock = Clock(monkeypatch)
         ent = _commanded(ON)
         timers = _refresh_timers()
         assert len(timers) == 1 and timers[0]["delay"] == pytest.approx(P.COMMAND_REFRESH_DELAY_S)
@@ -379,10 +379,10 @@ class TestRefreshAfterCommand:
         assert not _refresh_timers()
 
     def test_two_rooms_share_one_refresh(self, monkeypatch):
-        clock = _Clock(monkeypatch)
+        clock = Clock(monkeypatch)
         a = _commanded(ON, entity_id="climate.a")
         clock.tick(20.0)
-        b = _entity(ON)
+        b = room_entity(ON)
         b.hass = a.hass                                  # one Home Assistant
         _commanded(ON, entity_id="climate.b", ent=b)
         timers = _refresh_timers()
@@ -392,9 +392,9 @@ class TestRefreshAfterCommand:
         assert _updates(a.hass) == [{"entity_id": ["climate.a", "climate.b"]}]
 
     def test_one_commanded_just_before_the_cap_gets_its_own(self, monkeypatch):
-        clock = _Clock(monkeypatch)
+        clock = Clock(monkeypatch)
         a = _commanded(ON, entity_id="climate.a")
-        b = _entity(ON)
+        b = room_entity(ON)
         b.hass = a.hass
         clock.tick(25.0)                                 # a again at 25 s
         _commanded(ON, entity_id="climate.a", ent=a)
@@ -411,7 +411,7 @@ class TestRefreshAfterCommand:
     def test_a_timed_out_command_is_refreshed_another_failure_not(self, monkeypatch):
         for err, refreshed in ((TimeoutError(), True), (RuntimeError("refused"), False)):
             reset_timers()
-            ent = _entity(ON)
+            ent = room_entity(ON)
             ent.coordinator.data = {"tado_cloud": True}
 
             async def failing(domain, service, service_data=None, blocking=False, *, _e=err, **_):
@@ -422,7 +422,7 @@ class TestRefreshAfterCommand:
             assert bool(_refresh_timers()) is refreshed, err
 
     def test_the_refresh_does_not_block_and_a_failure_is_logged_once(self, monkeypatch, caplog):
-        clock = _Clock(monkeypatch)
+        clock = Clock(monkeypatch)
         ent = _commanded(ON)
         seen = []
 
@@ -441,7 +441,7 @@ class TestRefreshAfterCommand:
         assert len([r for r in caplog.records if "after a command failed" in r.getMessage()]) == 1
 
     def test_nothing_while_home_assistant_stops(self, monkeypatch):
-        clock = _Clock(monkeypatch)
+        clock = Clock(monkeypatch)
         ent = _commanded(ON)
         ent.hass.is_stopping = True
         clock.tick(30.0)
@@ -457,7 +457,7 @@ class TestRefreshAfterCommand:
     def test_a_regulation_command_asks_for_it(self, monkeypatch):
         ent, clock, plant = _room(monkeypatch, options=ON)
         _minutes(ent, clock, plant, 3)
-        assert [c for c in ent.hass.service_calls if _is_heat(c)], "a heat-up started"
+        assert [c for c in ent.hass.service_calls if is_heat(c)], "a heat-up started"
         assert _refresh_timers()
 
 

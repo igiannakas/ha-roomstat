@@ -143,7 +143,7 @@ class PreheatMixin:
         # heat waits PREHEAT_SETTLE_S from then (_preheat_settle_remaining_s).
         self._preheat_change_ts: float = 0.0
         # The entity was removed (a reload): a retarget's cycle queued just
-        # before runs nothing (as dosing's wakes, _dosing_live).
+        # before runs nothing.
         self._preheat_removed: bool = False
 
     @property

@@ -72,11 +72,9 @@ class TestTheOption:
         granularity".  The form steps by 0.1; a value saved by 2.20.0 in
         0.05 steps is read to the nearest tenth, halves up."""
         assert P.hold_band_option(value, 0.1) == expected
-        assert P.dose_zone_option(value, 0.2) == expected
 
     def test_the_form_steps_in_tenths(self):
         assert (P.HOLD_BAND_MIN_C, P.HOLD_BAND_MAX_C, P.HOLD_BAND_STEP_C) == (0.1, 0.5, 0.1)
-        assert (P.DOSE_ZONE_MIN_C, P.DOSE_ZONE_MAX_C, P.DOSE_ZONE_STEP_C) == (0.1, 0.5, 0.1)
 
     def test_the_release_look_ahead_is_10_min(self):
         assert P.RegulationConfig().release_lead_s == 600.0
@@ -87,10 +85,6 @@ class TestTheOption:
     ])
     def test_the_release_look_ahead_option(self, value, seconds):
         assert P.release_lead_option(value, 600.0) == pytest.approx(seconds)
-
-    def test_the_dosing_zone_option(self):
-        assert P.dose_zone_option(0.3, 0.2) == pytest.approx(0.3)
-        assert P.dose_zone_option(0.6, 0.2) == pytest.approx(0.2)
 
 
 # ---------------------------------------------------------------------------

@@ -1280,15 +1280,10 @@ def change_trv(
 def options_form_errors(flat: Mapping[str, Any]) -> dict[str, str]:
     """What the options form must refuse (``base`` error keys, strings.json).
 
-    The valve look-ahead learns from the zone's heating power sensor, and
-    dosed top-ups check with it that each pulse opened the valve, so neither
-    can be switched on without one.  (Keys as in const.py.)"""
-    if flat.get("heating_power_entity_id"):
-        return {}
-    if flat.get("valve_lookahead"):
+    The valve look-ahead learns from the zone's heating power sensor, so it
+    can't be switched on without one.  (Keys as in const.py.)"""
+    if flat.get("valve_lookahead") and not flat.get("heating_power_entity_id"):
         return {"base": "lookahead_needs_heating_power"}
-    if flat.get("dosed_topups"):
-        return {"base": "dosing_needs_heating_power"}
     return {}
 
 
@@ -2451,4 +2446,22 @@ def migrate_options_v1_to_v2(
         if not math.isfinite(td_min) or td_min <= 0:
             new["derivative_time_min"] = braking_time_min
     return new
+
+
+# Options of dosed top-ups (2.15.0 to 2.23.x, config entry minor version 2),
+# a mode the owner removed on 9 Nov 2026: full-power pulses in place of the
+# hold near the target, and the zone the pulses kept the room in.  Keys as
+# in const.py had them.
+DOSING_OPTIONS = ("dosed_topups", "dose_zone_above_c", "dose_zone_below_c")
+
+
+def migrate_options_v2_to_v3(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Options of a minor version 2 entry, in the current meaning.
+
+    The dosed top-ups' keys go; a room that was dosed is regulated by the
+    hold again.  Everything else stays, the zone's heating power sensor
+    included: the valve look-ahead learns from it, the lost-off check and
+    the out-of-band sensor read it whenever it is set.
+    """
+    return {k: v for k, v in options.items() if k not in DOSING_OPTIONS}
 

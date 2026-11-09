@@ -272,6 +272,22 @@ class TestCheck:
         _check(hass, entry, watch, 1760)
         assert hass.issues == {}
 
+    def test_the_heating_power_sensor_is_watched_whenever_it_is_set(self):
+        """The lost-off check and the out-of-band evidence read it with the
+        valve look-ahead off too (2.24.0; until then only the look-ahead and
+        dosed top-ups made it watched)."""
+        power = "sensor.zone_heating"
+        opts = {"heating_power_entity_id": power, "valve_lookahead": False}
+        hass, entry, watch = _setup(opts)
+        hass.present(power)
+        _check(hass, entry, watch, 1000)
+        assert hass.issues == {}
+        hass.remove(power)
+        _check(hass, entry, watch, 1060)
+        _check(hass, entry, watch, 1400)
+        issue = _issue(hass, "heating_power_entity_id")
+        assert issue["severity"] == "warning" and issue["is_fixable"] is True
+
     def test_delete_all(self):
         hass, entry, watch = _setup()
         hass.remove(TRV)

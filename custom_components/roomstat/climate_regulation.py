@@ -71,7 +71,7 @@ from .parameters import (
     TRV_COMMAND_TIMEOUT_S,
     TRV_DRIFT_GRACE_S,
 )
-from .regulation import MODE_COAST, MODE_DOSE, MODE_HEAT, MODE_HOLD, resume_mode
+from .regulation import MODE_COAST, MODE_HEAT, MODE_HOLD, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -311,7 +311,6 @@ class RegulationMixin:
                     room_temp_ts=self.coordinator.data.get("room_temp_ts"),
                     window=self._window_open(),
                     lookahead_c=held_lookahead,
-                    dosed=bool(getattr(result, "settled", False)),
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop
@@ -459,9 +458,6 @@ class RegulationMixin:
         # is this cycle's decision (the watchdog counts it as completed).
         if self._summer_active:
             self._note_cycle_completed(now)
-            # A running pulse ends with the lock (review 3: switched back on
-            # within its cap, the old pulse carried on with a new 25 °C).
-            self._dosing_interrupted(now, "summer mode began")
             await self._async_summer_enforce(now)
             self._activity_cycle(now, PATH_SUMMER)
             return
@@ -470,7 +466,6 @@ class RegulationMixin:
         # run by switching Roomstat off sends the off at once.
         if self._hvac_mode == HVACMode.OFF:
             self._note_cycle_completed(now)
-            self._dosing_interrupted(now, "Roomstat was switched off")
             await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
             self._activity_cycle(now, PATH_OFF)
             return
@@ -489,9 +484,6 @@ class RegulationMixin:
         trv = self._active_trv()
         self._note_trv_source(trv)
         tado_internal = trv.internal_c
-        # This room's zone heating, for the house's pulse coordinator (dosed
-        # rooms ride any zone's call for heat): every room, dosing or not.
-        self._dosing_note_zone(now, trv)
 
         # The TRV had no setpoint when the entity was added (its integration
         # still loading after a restart): decide the resume mode now, from
@@ -504,7 +496,6 @@ class RegulationMixin:
         if held is not None:
             self._resume_pending = False
             self._reg_state.mode = resume_mode(held, self._config)
-            self._dosing_resume(now)
             self._last_sent_was_max = is_maximum(held, self._config.max_target_c)
             _LOGGER.debug(
                 "%s: resuming as %s from %.1f held by the valve",
@@ -564,10 +555,7 @@ class RegulationMixin:
             # or any maximum the TRV took (a hold clamped at 25), is ended
             # (coast).  Until the TRV has taken the stop, it is tried again
             # (once per rate-limit interval).
-            # A dosed room leaves the dosing phase, and a running pulse ends.
-            at_max = self._reg_state.mode in (MODE_HEAT, MODE_DOSE) or self._last_sent_was_max
-            self._dosing_interrupted(now, "the room sensor was lost")
-            if at_max:
+            if self._reg_state.mode == MODE_HEAT or self._last_sent_was_max:
                 await self._async_decide_and_send(
                     now, trv, self._config.min_target_c, strong=True
                 )
@@ -623,34 +611,18 @@ class RegulationMixin:
         # reading and the look-ahead learned so far (None, 0 while off).
         trv_slope, valve_lookahead_s = self._lookahead_inputs(now, trv)
 
-        # 3d. Dosed top-ups (option): the heat still on its way, the learned
-        # model and the pulse coordinator's verdict ({} while off).
-        room_fresh = not self._sensor_degraded
-        dose_kwargs = self._dosing_inputs(
-            now, trv, setpoint, room_temp, slope, room_fresh=room_fresh
-        )
-
-        # 4. Compute regulation.  The dosed step never stops the cycle: if
-        # it raises, dosing is off for the session and the cycle is
-        # computed without it (compute does not change the state it reads).
+        # 4. Compute regulation.
         prev_mode = self._reg_state.mode
-        compute_args = {
-            "setpoint_c": setpoint,
-            "room_temp_c": room_temp,
-            "tado_internal_c": tado_internal,
-            "time_delta_s": dt,
-            "state": self._reg_state,
-            "room_slope_c_per_s": slope,
-            "trv_slope_c_per_s": trv_slope,
-            "valve_lookahead_s": valve_lookahead_s,
-        }
-        try:
-            result = self._regulator.compute(**compute_args, **dose_kwargs)
-        except Exception as err:
-            if not dose_kwargs:
-                raise
-            self._dosing_fail(err)
-            result = self._regulator.compute(**compute_args)
+        result = self._regulator.compute(
+            setpoint_c=setpoint,
+            room_temp_c=room_temp,
+            tado_internal_c=tado_internal,
+            time_delta_s=dt,
+            state=self._reg_state,
+            room_slope_c_per_s=slope,
+            trv_slope_c_per_s=trv_slope,
+            valve_lookahead_s=valve_lookahead_s,
+        )
         self._reg_state = result.new_state
         self._last_result = result
         self._lookahead_note_result(result)
@@ -668,10 +640,6 @@ class RegulationMixin:
         )
         self._lookahead_after_send(now, trv, result, was_shut)
         self._lookahead_observe(now, trv)
-        # Dosed top-ups: episodes, the coordinator, a running pulse's end.
-        self._dosing_after_compute(
-            now, result, setpoint, room_temp, slope, trv, room_fresh=room_fresh
-        )
 
         # The braking time this cycle decided with (the tuner may change it).
         td_used_s = self._config.tuning.td_s
@@ -793,8 +761,6 @@ class RegulationMixin:
         self._last_attempt_ok = ok
         self._last_attempt_shown = False
         self._last_attempt_entity = trv.entity_id
-        # Dosed top-ups book the valve's open time from the commands tried.
-        self._dosing_note_command(now, command_c, ok)
         # What the sending cycle saw: a state that already looked like the
         # command can't tell whether it arrived (it may be a stale one).
         self._last_attempt_seen_other = not self._trv_holds(command_c, trv)
@@ -1607,9 +1573,6 @@ class RegulationMixin:
             self._last_reason = f"{'sent' if sent else 'send_failed'}(watchdog)"
             if sent:
                 self._reg_state.mode = MODE_COAST
-                # A dosed pulse it shut has ended: out of the dosing phase,
-                # and the next one waits its refractory from this one.
-                self._dosing_interrupted(now, "the watchdog shut the valve")
                 self._log(_LOGGER).warning(
                     "watchdog switched %s off",
                     trv.entity_id,

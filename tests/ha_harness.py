@@ -194,16 +194,30 @@ def _install_ha_stubs() -> None:
         "homeassistant.components.number",
         NumberDeviceClass=NumberDeviceClass, NumberEntity=NumberEntity, NumberMode=NumberMode,
     )
+
+    class Platform(enum.StrEnum):
+        BINARY_SENSOR = "binary_sensor"
+        BUTTON = "button"
+        CLIMATE = "climate"
+        NUMBER = "number"
+        SENSOR = "sensor"
+
     mod("homeassistant.config_entries", ConfigEntry=object)
     mod("homeassistant.const", ATTR_TEMPERATURE="temperature", PRECISION_TENTHS=0.1,
         UnitOfTemperature=types.SimpleNamespace(CELSIUS="°C"),
         UnitOfTime=types.SimpleNamespace(MINUTES="min"),
-        EntityCategory=EntityCategory)
+        EntityCategory=EntityCategory, Platform=Platform)
     mod("homeassistant.core", CALLBACK_TYPE=object, HomeAssistant=object,
         callback=lambda f: f)
     mod("homeassistant.exceptions", HomeAssistantError=HomeAssistantError,
         ServiceValidationError=ServiceValidationError)
     mod("homeassistant.helpers")
+    # For the integration's __init__.py (tests/test_migration.py); a test
+    # gives its hass object an entity registry.
+    mod("homeassistant.helpers.config_validation",
+        config_entry_only_config_schema=lambda domain: None)
+    mod("homeassistant.helpers.entity_registry", async_get=lambda hass: hass.entity_registry)
+    mod("homeassistant.helpers.typing", ConfigType=dict)
     mod("homeassistant.helpers.device_registry", DeviceInfo=dict)
     mod("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     mod(
@@ -214,7 +228,8 @@ def _install_ha_stubs() -> None:
     )
     mod("homeassistant.helpers.restore_state", ExtraStoredData=ExtraStoredData,
         RestoreEntity=RestoreEntity)
-    mod("homeassistant.helpers.update_coordinator", CoordinatorEntity=CoordinatorEntity)
+    mod("homeassistant.helpers.update_coordinator", CoordinatorEntity=CoordinatorEntity,
+        DataUpdateCoordinator=object)
     mod("homeassistant.util")
     mod("homeassistant.util.dt", get_default_time_zone=lambda: datetime.UTC)
 
@@ -274,11 +289,6 @@ class _Hass:
         # instead of being discarded.
         self.keep_tasks = False
         self.tasks: list = []
-        # The executor jobs and background tasks started (run inline), and
-        # any exception a background task let escape.
-        self.executor_jobs: list[str] = []
-        self.background_tasks: list[str] = []
-        self.task_errors: list[BaseException] = []
 
     def set(self, entity_id, state, attributes=None):
         self.states_by_id[entity_id] = _State(state, attributes)
@@ -291,38 +301,6 @@ class _Hass:
             self.tasks.append(coro)
         else:
             coro.close()
-
-    async def async_add_executor_job(self, target, *args):
-        """The executor, inline: the job runs at once, deterministically."""
-        self.executor_jobs.append(getattr(target, "__name__", repr(target)))
-        return target(*args)
-
-    def async_create_background_task(self, coro, name, eager_start=True):
-        """A background task, run to its end at once.  With the inline
-        executor nothing the integration starts this way suspends, so this
-        is HA's eager start carried through (the result is there when the
-        call returns).  An exception escaping the task is kept, as HA's task
-        handler would log it, never raised into the caller."""
-        self.background_tasks.append(name)
-        try:
-            coro.send(None)
-        except StopIteration:
-            return _DoneTask()
-        except Exception as err:  # noqa: BLE001 - HA logs a task's exception
-            self.task_errors.append(err)
-            return _DoneTask()
-        coro.close()
-        raise AssertionError(f"background task {name!r} suspended; the harness runs them inline")
-
-
-class _DoneTask:
-    """A finished task (what async_create_background_task hands back)."""
-
-    def done(self) -> bool:
-        return True
-
-    def cancel(self) -> bool:
-        return False
 
 
 class _Entry:
@@ -417,11 +395,9 @@ def _settle(clock=None):
 
 def reset_timers() -> None:
     """Forget all recorded call_later timers (call before/after each test),
-    and the house's pulse coordinator (one per process, like the pacer)."""
+    and a refresh after a command still pending (one per process, like the
+    pacer)."""
     _CALL_LATER.clear()
-    mod = sys.modules.get("roomstat_e2e.climate_dosing")
-    if mod is not None:
-        mod.PULSE_COORDINATOR.reset()
     reg = sys.modules.get("roomstat_e2e.climate_regulation")
     if reg is not None:
         reg.COMMAND_REFRESHER.cancel()

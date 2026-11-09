@@ -1346,6 +1346,58 @@ class TestMigrateOptions:
         assert old == self.OLD
 
 
+migrate_options_v2_to_v3 = _ctrl_mod.migrate_options_v2_to_v3
+
+
+class TestMigrateOptionsV2ToV3:
+    """Entries made by 2.2 to 2.23.x (minor version 2): dosed top-ups were
+    removed (owner, 9 Nov 2026); everything else stays."""
+
+    OLD = {
+        "dosed_topups": True, "dose_zone_above_c": 0.3, "dose_zone_below_c": 0.1,
+        "valve_lookahead": True, "heating_power_entity_id": "sensor.living_room_heating",
+        "hold_stop_over_c": 0.2, "hold_release_below_c": 0.1, "correction_kp": 4.0,
+        "comfort_target": 20.5,
+    }
+
+    def test_the_dosing_options_go_and_the_rest_stays(self):
+        assert migrate_options_v2_to_v3(self.OLD) == {
+            "valve_lookahead": True, "heating_power_entity_id": "sensor.living_room_heating",
+            "hold_stop_over_c": 0.2, "hold_release_below_c": 0.1, "correction_kp": 4.0,
+            "comfort_target": 20.5,
+        }
+
+    def test_the_heating_power_sensor_stays_without_the_lookahead(self):
+        """The lost-off check and the out-of-band sensor read it too."""
+        old = {"dosed_topups": True, "heating_power_entity_id": "sensor.study_heating"}
+        assert migrate_options_v2_to_v3(old) == {"heating_power_entity_id": "sensor.study_heating"}
+
+    def test_the_keys_dropped(self):
+        assert _ctrl_mod.DOSING_OPTIONS == (
+            "dosed_topups", "dose_zone_above_c", "dose_zone_below_c")
+        assert not set(_ctrl_mod.DOSING_OPTIONS) & set(_ctrl_mod.OBSOLETE_OPTIONS)
+
+    def test_an_entry_without_them_is_unchanged(self):
+        assert migrate_options_v2_to_v3({"comfort_target": 21}) == {"comfort_target": 21}
+        assert migrate_options_v2_to_v3({}) == {}
+
+    def test_input_is_not_changed(self):
+        old = dict(self.OLD)
+        migrate_options_v2_to_v3(old)
+        assert old == self.OLD
+
+    def test_a_minor_version_1_entry_goes_all_the_way(self):
+        """v1 -> v2 -> v3, as async_migrate_entry chains them: the old
+        controller's keys and the dosing keys go, Kp and the braking time
+        take their current meaning, the rest stays."""
+        old = {**TestMigrateOptions.OLD, "dosed_topups": False, "dose_zone_below_c": 0.2}
+        new = migrate_options_v2_to_v3(migrate_options_v1_to_v2(old, 4.0, 10.0))
+        assert new == {
+            "correction_kp": 4.0, "correction_ki": 0.003, "derivative_time_min": 10.0,
+            "min_command_interval_s": 120, "comfort_target": 21,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Changing the room's TRV (e.g. HomeKit valve -> Tado cloud thermostat)
 # ---------------------------------------------------------------------------

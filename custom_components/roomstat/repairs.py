@@ -36,7 +36,6 @@ from .climate_controllers import (
     replace_entity_setting,
 )
 from .const import (
-    CONF_DOSED_TOPUPS,
     CONF_EXTERNAL_TEMPERATURE_ENTITY_ID,
     CONF_FALLBACK_ENTITY_ID,
     CONF_HEATING_POWER_ENTITY_ID,
@@ -48,7 +47,6 @@ from .const import (
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SOURCE_ENTITY_ID,
     CONF_SUMMER_MODE_ENTITY_ID,
-    CONF_VALVE_LOOKAHEAD,
     CONF_WINDOW_SENSOR_ID,
     DOMAIN,
 )
@@ -82,7 +80,10 @@ ROLES: tuple[EntityRole, ...] = (
     EntityRole(CONF_PREHEAT_ARRIVAL_ENTITY_ID, ("sensor",), device_class="timestamp"),
     EntityRole(CONF_PREHEAT_CLOSE_ENTITY_ID, ("binary_sensor",)),
     EntityRole(CONF_PREHEAT_NEARBY_ENTITY_ID, ("binary_sensor",)),
-    # The zone's heating power (Tado's heating %), for the valve look-ahead.
+    # The zone's heating power (Tado's heating %): the valve look-ahead
+    # learns from it, the lost-off check and the out-of-band sensor's
+    # evidence read it.  Watched whenever it is set: without it the lost-off
+    # check quietly stops, whether the look-ahead is on or not.
     EntityRole(CONF_HEATING_POWER_ENTITY_ID, ("sensor",)),
 )
 ROLE_BY_KEY = {role.key: role for role in ROLES}
@@ -90,22 +91,14 @@ ROLE_BY_KEY = {role.key: role for role in ROLES}
 PREHEAT_ROLES = frozenset({
     CONF_PREHEAT_ARRIVAL_ENTITY_ID, CONF_PREHEAT_CLOSE_ENTITY_ID, CONF_PREHEAT_NEARBY_ENTITY_ID,
 })
-# Read only while the valve look-ahead or dosed top-ups are on.
-LOOKAHEAD_ROLES = frozenset({CONF_HEATING_POWER_ENTITY_ID})
 
 
 def configured_entities(entry: ConfigEntry) -> dict[str, str]:
     """Setting key -> entity id, for every entity setting in use."""
     out: dict[str, str] = {}
     preheat_off = entry.options.get(CONF_PREHEAT_MODE, "off") == "off"
-    lookahead_off = not (
-        entry.options.get(CONF_VALVE_LOOKAHEAD, False)
-        or entry.options.get(CONF_DOSED_TOPUPS, False)
-    )
     for role in ROLES:
         if preheat_off and role.key in PREHEAT_ROLES:
-            continue
-        if lookahead_off and role.key in LOOKAHEAD_ROLES:
             continue
         if role.in_data:
             entity_id = entry.data.get(role.key)
