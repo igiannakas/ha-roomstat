@@ -1553,6 +1553,30 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   starts later on; a Boost ends the same way). A gap (restart, a valve
   that dropped off) resumes as before.
 
+  **A heat-up's step is measured from the last target that stood**
+  (2.24.2, `_step_reference`, `heatup_step_settle_s` = `MANUAL_SETTLE_S`,
+  15 s): a target taken back within that time is skipped, for the step
+  and for heating that resumes (`resumed_heatup`). Off (no target) is a
+  target too: Off that stood and heating back is a heat-up, Off taken back
+  in seconds is not. The step is still judged only on the cycle where the
+  target moved; the target held, since when, and the one that stood ride
+  along in `episode` (`sp_held`, `sp_held_since`, `sp_settled`; a save
+  from before takes its last target as one that stood). 10 Nov 2026
+  15:01, study: 15.5 °C by hand and Resume schedule 3 s later, the room
+  0.48 under Comfort 20.0 on a radiator still hot from preheat, read as a
+  step 15.5 → 20.0 and booked as a heat-up (no dead time, a 20.5-min coast,
+  +0.15). As the fifth kept, it pushed out one with an 8.9-min dead time;
+  with 8.5 and 7 Nov's 28.6 left, the dead time went 18.5 min, the heating
+  rate 1.76 → 1.42 °C/h, Ki 0.00068 → 0.00048 towards a SIMC 0.00032, and
+  preheat started the study with a 19-min start-up on 11 Nov. A target
+  that stood 20 s still counts (Frost, then Comfort 20 s later).
+  Replayed in `tests/test_heatup_start.py`, also through the entity.
+  Not done: keeping heat-ups after hours off out of the dead time (the
+  11 Nov review's option): the study's 4 Nov one measured 8.2–8.9 min
+  like its mornings, and its 28.6 was the measuring error below; the
+  master's after-off dead times (43–46 min, measured before the stop) are
+  real and stay.
+
   **A heat-up is measured only up to its own first peak** (2.9.2,
   `_coast_end`). Once the room, having risen, has stalled after the stop
   (10-min slope ≤ `coast_stall_c_per_h`, 0.1 °C/h) and then rises again
@@ -1597,12 +1621,18 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   (`HeatupMetrics.coast_not_radiator`, `analyse_heatup`): over `td_max_s`
   (45 min; once the valve shuts a radiator's output only falls, its
   fitted time constant 30–35 min) the rise had another source, so the
-  coast and the overshoot are dropped; the dead time and heating rate
-  stay, the episode line adds `rose +0.71 °C after the stop, longer than
-  any radiator's coast` and the verdict reads `not the radiator's rise:
-  no coast or overshoot counted`. 7 Nov, study: after 7.75 h off, a
-  70-min heat-up stopped at 16:27 rising 0.8 °C/h and the room crept on
-  +0.71 for 100 min (51 min). Replayed on all 29 heat-ups the four rooms'
+  coast and the overshoot are dropped; the episode line adds `rose +0.71
+  °C after the stop, longer than any radiator's coast` and the verdict
+  reads `not the radiator's rise: no coast or overshoot counted`. **Its
+  dead time and heating rate are measured only up to the stop** (2.24.2;
+  2.23.2 kept them as measured up to the peak, which for such a heat-up
+  is in the room's own creep): otherwise the steepest 10-min rise may
+  lie after the stop (often rightly: the radiator is full; the study's
+  6 Nov steepest window ended 10 min after it). 7 Nov, study: after
+  7.75 h off, a 70-min heat-up stopped at 16:27 rising 0.8 °C/h and the
+  room crept on +0.71 for 100 min (51 min); its steepest window ended
+  31 min after the stop and gave 28.1 min and 1.08 °C/h (live 28.6),
+  up to the stop 15.5 min and 0.96 °C/h. Replayed on all 29 heat-ups the four rooms'
   tuners judged 1–9 Nov (`tests/fixtures/heatups_2026_11.json`, rebuilt
   from the recorded activity, room-error and command data): those three
   change, nothing else (the second bedroom's own 1.9 → 3.2 °C/h speed-up
@@ -1623,7 +1653,21 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   bedroom and living room unchanged. The master's stored 7 Nov heat-up
   can't be re-measured (no readings): measured now it would give 13.8,
   also inside the dead-band of its 15.7, so it stays until heat-ups
-  measured under the new rules replace it. A changed braking time's
+  measured under the new rules replace it. **`coast_rules` 3** (2.24.2,
+  `_recheck_rise_after_coast`): a stored heat-up whose coast was not the
+  radiator's loses its dead time and heating rate (where they were
+  measured is not saved), with an activity line for each and one for the
+  model (`dead time 18.5 min→not known until 2 heat-ups give one;
+  heating rate 1.42→1.76 °C/h`, the study's 12 Nov save,
+  `tests/fixtures/autotune_study_2026_11_12.json`). Only the model moves:
+  Kp, Ki and the braking time in use follow at the tuner's own pace (the
+  study's Ki target becomes its configured 0.00057 × 1.04, a raise on
+  trial). The study then needs two heat-ups with a dead time (the next
+  pushes out 6 Nov's 8.5 min); meanwhile preheat uses its own start-up
+  delay (20 min). Of the four rooms' saves on 12 Nov only the study's
+  has such a heat-up; the 9 Nov saves (`heatups_2026_11.json`) also lose
+  the second bedroom's 4 Nov 2.43 °C/h, the room's jump with the valve
+  shut. A changed braking time's
   verdict names its basis (`…; the braking time follows the learned
   coast, 31.4 min × 1.00`): on 7 Nov "vote 1 of 2 for a little less
   braking; changed braking 26.4→39.7 min" read as a contradiction.
@@ -1839,6 +1883,10 @@ ruff check .
   three whose room rose by itself; the coast's end on synthetic shapes; the
   one-time re-check of the four rooms' saves of 9 Nov and its activity
   lines through the entity).
+- `tests/test_heatup_start.py` (2.24.2: a heat-up's step from the last
+  target that stood, the study's 10 Nov tap through the tuner and the
+  entity, Off, preheat's arrival, a reload, an older save, the clock; the
+  study's 12 Nov save re-checked, `tests/fixtures/autotune_study_2026_11_12.json`).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

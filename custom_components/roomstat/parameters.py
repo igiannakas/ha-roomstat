@@ -272,6 +272,14 @@ class AutotuneConfig:
     # Heat-up episode detection.
     heatup_min_step_c: float = 0.5     # setpoint step that starts an episode
     heatup_min_error_c: float = 0.4    # room must be at least this far below
+    # The step is measured from the last target that stood at least this
+    # long (2.24.2): one taken back within the settle of a change by hand is
+    # no target the room was on.  10 Nov 2026, study: 15.5 °C picked by hand
+    # and Resume schedule 3 s later, the room 0.48 under Comfort on a
+    # radiator still hot from preheat, read as a step 15.5 -> 20.0 and
+    # booked as a heat-up; it pushed a heat-up with an 8.9-min dead time out
+    # of the five kept, and the dead time went to 18.5 min.
+    heatup_step_settle_s: float = MANUAL_SETTLE_S
     # An episode that started this far below the target or more ran at full
     # power, heat then coast, with Kp and Ki unused (RegulationConfig's
     # heatup_enter_c, kept equal by a test); one that started closer was a

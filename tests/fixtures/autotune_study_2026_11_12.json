@@ -1,0 +1,34 @@
+{
+  "note": "The study's auto-tune state on 12 Nov 2026 10:31 (diagnostics, Roomstat 2.24.1). Its last heat-up is the 10 Nov 15:01 tap (15.5 °C by hand, Resume schedule 3 s later); the 7 Nov 15:17 one carries a dead time and heating rate measured on the room's own rise after the stop. Configured Kp 2.5, Ki 0.00056964, braking 10 min.",
+  "state": {
+    "version": 1,
+    "coast_rules": 2,
+    "baseline": {"kp": 2.5, "ki": 0.00056964, "td_s": 600.0},
+    "params": {"kp": 2.5, "ki": 0.0004785, "td_s": 1070.4},
+    "last_good": {"kp": 2.5, "ki": 0.0004785, "td_s": 1070.4},
+    "trim": {"kp": 1.0, "ki": 1.0382451771428571, "td_s": 0.8282857146922682},
+    "votes": {"kp_up": 0, "ki_up": 0, "td_down": 0},
+    "heatups": [
+      {"ts": 1793949275.017038, "start_ts": 1793943000.038275, "setpoint_c": 20.0, "step_c": 0.83, "overshoot_c": 0.025, "theta_s": 509.029494, "rate_c_per_h": 1.757119, "demand0_c": 11.6, "coast_s": 1069.114235, "coast_rise_c": 0.49, "reach_s": 2194.906152, "kp": 2.5, "ki": 0.000684, "td_s": 1070.4, "truncated": false, "crossed": true, "later_rise_c": null, "coast_not_radiator": false},
+      {"ts": 1794000591.34304, "start_ts": 1793997323.67342, "setpoint_c": 20.0, "step_c": 1.185, "overshoot_c": null, "theta_s": null, "rate_c_per_h": null, "demand0_c": 11.8, "coast_s": null, "coast_rise_c": null, "reach_s": null, "kp": 2.5, "ki": 0.00082, "td_s": 983.1, "truncated": true, "crossed": false, "later_rise_c": null, "coast_not_radiator": false},
+      {"ts": 1794035512.053998, "start_ts": 1794029400.029149, "setpoint_c": 20.0, "step_c": 0.575001, "overshoot_c": 0.254999, "theta_s": null, "rate_c_per_h": null, "demand0_c": 2.0, "coast_s": 1176.923075, "coast_rise_c": 0.509998, "reach_s": 1671.946853, "kp": 2.5, "ki": 0.00082, "td_s": 983.1, "truncated": false, "crossed": true, "later_rise_c": null, "coast_not_radiator": false},
+      {"ts": 1794078772.957817, "start_ts": 1794064634.186143, "setpoint_c": 20.0, "step_c": 1.120001, "overshoot_c": null, "theta_s": 1713.408468, "rate_c_per_h": 1.079987, "demand0_c": 11.8, "coast_s": null, "coast_rise_c": 0.795, "reach_s": 5138.447796, "kp": 2.5, "ki": 0.00082, "td_s": 983.1, "truncated": false, "crossed": true, "later_rise_c": null, "coast_not_radiator": true},
+      {"ts": 1794328294.627092, "start_ts": 1794322877.670374, "setpoint_c": 20.0, "step_c": 0.474999, "overshoot_c": 0.145, "theta_s": null, "rate_c_per_h": null, "demand0_c": 1.7, "coast_s": 1230.030837, "coast_rise_c": 0.205, "reach_s": 1516.889392, "kp": 2.5, "ki": 0.000684, "td_s": 1070.4, "truncated": false, "crossed": true, "later_rise_c": null, "coast_not_radiator": false}
+    ],
+    "holds": [],
+    "last_change_ts": 1794328294.6270916,
+    "pending": null,
+    "counters": {"heatups": 14, "holds": 0, "updates": 7, "rollbacks": 1},
+    "last_update_reason": "heat-up: ki 0.00068→0.00048",
+    "last_event": "hold window ignored (no heating – passive cool-down)",
+    "episode": {
+      "heatup": null,
+      "prev_sp": 5.0,
+      "prev_ts": 1794479495.9392648,
+      "prev_eligible": true,
+      "sp_since_ts": 1794478399.3416824,
+      "last_heatup_end_ts": 1794328294.6270916,
+      "last_window_ts": 1794477813.0937004
+    }
+  }
+}

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.24.1-blue)
+![Version](https://img.shields.io/badge/version-2.24.2-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -232,15 +232,21 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 - It learns from heat-ups: a target that rises by 0.5 °C or more while the
   room is cooler, for example a schedule going from Night to Comfort. The
   dead time and heat-up rate need a rise of 0.6 °C or more.
+- The rise is counted from the last target that stood for 15 seconds or
+  more. A target picked by mistake and taken back within seconds (say 15.5,
+  then Resume schedule) is not where a heat-up starts from.
 - It measures a heat-up only up to the room's own peak. If the room's rise
   slows after the valve shuts and then speeds up again with no heat (people,
   sun), that later rise is not counted. The status shows how much was left
   out. A rise after the valve shuts that lasts longer than any radiator's
   leftover heat (more than 45 minutes' worth) is not counted at all: it
-  came from something else.
-- Since 2.23.2, saved heat-ups are checked once against that last rule when
-  the room starts. A braking time that such a heat-up had pulled up goes
-  back to what the room's other heat-ups give, and the activity log says so.
+  came from something else. That heat-up's dead time and heat-up rate are
+  then measured only up to the moment the valve shut.
+- Saved heat-ups are checked once against those rules when the room starts
+  (since 2.23.2 and 2.24.2). A braking time that such a heat-up had pulled
+  up goes back to what the room's other heat-ups give. A dead time or
+  heat-up rate it may have taken from the room's own rise is dropped. The
+  activity log says what changed.
 - The first values appear after the first heat-up, and they settle in about a
   week.
 - A heat-up carries on after a restart or a settings change. If readings stop

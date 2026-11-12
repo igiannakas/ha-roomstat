@@ -419,10 +419,11 @@ def _median_filter(values: list[float], k: int = 3) -> list[float]:
 _COAST_WINDOW_S = 600.0
 
 # The coast rules a save was measured under: 2 since 2.23.2 (a coast that
-# speeds up again ends, and one longer than any radiator's is not counted).
-# A save without it is checked once when taken back
-# (:meth:`Autotuner._recheck_coasts`).
-_COAST_RULES = 2
+# speeds up again ends, and one longer than any radiator's is not counted),
+# 3 since 2.24.2 (after such a coast, the dead time and heating rate are
+# measured only up to the stop).  An older save is checked once when taken
+# back (:meth:`Autotuner._recheck_coasts`).
+_COAST_RULES = 3
 
 
 def _coast_end(ts: list[float], ys: list[float], cross_index: int,
@@ -532,11 +533,42 @@ def analyse_heatup(
     peak_i = max(range(own_end + 1), key=lambda i: ys[i])
     peak = ys[peak_i]
     later_rise = max(ys[own_end:]) - peak if own_end < len(ys) - 1 else 0.0
-
-    # Tangent method on the rising part: steepest 10-min Theil-Sen line.
     win = 600.0
+
+    # Coast: how much the room still rises after the TRV demand went <= 0.
+    coast_s = coast_rise = None
+    if cross_index is not None and 0 < cross_index < len(samples) - 1:
+        t_c = ts[cross_index]
+        pre = [(t, y) for t, y in zip(ts, ys) if t_c - win <= t <= t_c]
+        s_cross = theil_sen(pre) if len(pre) >= 5 else None
+        y_cross = _median(ys[max(0, cross_index - 1):cross_index + 2])
+        post_peak = max(ys[cross_index:own_end + 1])
+        if y_cross is not None:
+            coast_rise = max(0.0, post_peak - y_cross)
+            if s_cross is not None and s_cross * 3600.0 >= cfg.rate_min_c_per_h:
+                coast_s = _clamp(coast_rise / s_cross, 0.0, 3 * cfg.td_max_s)
+
+    # Longer than any radiator's coast (2.23.2): after the valve shuts, the
+    # radiator's heat output only falls, so the rise it still gives is at
+    # most the rise at the stop times the radiator's own time constant plus
+    # the heat already on its way (here 30-35 min fitted, 11 Oct 2026, and a
+    # few minutes): never more than the longest braking time.  A longer one
+    # had another source (people, sun, the room's own warmth after hours
+    # off), so neither its coast nor its peak is this radiator's.
+    not_radiator = coast_s is not None and coast_s > cfg.td_max_s
+
+    # Tangent method on the rising part: steepest 10-min Theil-Sen line,
+    # up to the peak (the first minutes after the stop are often the
+    # steepest: the radiator is full).  After a coast that is not the
+    # radiator's, only up to the stop (2.24.2): the rise after it had
+    # another source.  7 Nov 2026, study: its steepest window ended 31 min
+    # after the stop, in the room's own creep, and gave a 28.6-min dead time
+    # and 1.08 °C/h; up to the stop, 15.5 min and 0.96 °C/h.
     best = None  # (slope, t_center, y_center)
-    rise_end = peak_i if cross_index is None else max(peak_i, cross_index)
+    if not_radiator:
+        rise_end = cross_index
+    else:
+        rise_end = peak_i if cross_index is None else max(peak_i, cross_index)
     j0 = 0
     for j in range(rise_end + 1):
         while ts[j] - ts[j0] > win:
@@ -577,28 +609,6 @@ def analyse_heatup(
     overshoot: float | None = peak - setpoint_c
     if truncated and overshoot <= cfg.overshoot_target_c:
         overshoot = None
-
-    # Coast: how much the room still rises after the TRV demand went <= 0.
-    coast_s = coast_rise = None
-    if cross_index is not None and 0 < cross_index < len(samples) - 1:
-        t_c = ts[cross_index]
-        pre = [(t, y) for t, y in zip(ts, ys) if t_c - win <= t <= t_c]
-        s_cross = theil_sen(pre) if len(pre) >= 5 else None
-        y_cross = _median(ys[max(0, cross_index - 1):cross_index + 2])
-        post_peak = max(ys[cross_index:own_end + 1])
-        if y_cross is not None:
-            coast_rise = max(0.0, post_peak - y_cross)
-            if s_cross is not None and s_cross * 3600.0 >= cfg.rate_min_c_per_h:
-                coast_s = _clamp(coast_rise / s_cross, 0.0, 3 * cfg.td_max_s)
-
-    # Longer than any radiator's coast (2.23.2): after the valve shuts, the
-    # radiator's heat output only falls, so the rise it still gives is at
-    # most the rise at the stop times the radiator's own time constant plus
-    # the heat already on its way (here 30-35 min fitted, 11 Oct 2026, and a
-    # few minutes): never more than the longest braking time.  A longer one
-    # had another source (people, sun, the room's own warmth after hours
-    # off), so neither its coast nor its peak is this radiator's.
-    not_radiator = coast_s is not None and coast_s > cfg.td_max_s
     if not_radiator:
         coast_s = None
         overshoot = None
@@ -937,6 +947,13 @@ class Autotuner:
         self._prev_ts: float | None = None
         self._prev_eligible = True
         self._sp_since_ts: float | None = None
+        # The target now and since when, and the last one that stood
+        # ``heatup_step_settle_s``: what a heat-up's step is measured from
+        # (_step_reference).  Unlike _sp_since_ts, kept through ineligible
+        # cycles: a target is a target whoever is in charge.
+        self._sp_held: float | None = None
+        self._sp_held_since: float | None = None
+        self._sp_settled: float | None = None
         self._last_heatup_end_ts = -math.inf
         # When a window was last open (or in its close delay): the room then
         # re-warms on its own, which no heat-up episode may learn from.
@@ -1292,14 +1309,18 @@ class Autotuner:
 
         # Start of a heat-up: a setpoint step up (or heating resuming after a
         # summer / off / away period) with the room well below target.  Not
-        # after a window: the room is recovering by itself.
+        # after a window: the room is recovering by itself.  The step is
+        # measured from the last target that stood (_step_reference), so a
+        # target taken back within seconds is not where it started from.
+        ref = self._step_reference(sp, s.ts)
         if (
             self._heatup is None and s.eligible and room is not None
             and sp - room >= self.cfg.heatup_min_error_c
         ):
+            moved = self._prev_sp is not None and abs(sp - self._prev_sp) > 0.05
             step_up = (
-                self._prev_sp is not None
-                and sp - self._prev_sp >= self.cfg.heatup_min_step_c
+                moved and ref is not None
+                and sp - ref >= self.cfg.heatup_min_step_c
             )
             # Resuming after a period the tuner sat out is a heat-up only if
             # the target was lower meanwhile (away, summer, off: the room
@@ -1311,8 +1332,8 @@ class Autotuner:
             # that dropped off) resumes as before.
             resumed_heatup = resumed and (
                 self._prev_eligible
-                or self._prev_sp is None
-                or sp - self._prev_sp >= self.cfg.heatup_min_step_c
+                or ref is None
+                or sp - ref >= self.cfg.heatup_min_step_c
             )
             if (step_up or resumed_heatup) and after_window:
                 self._hold = None
@@ -1346,6 +1367,34 @@ class Autotuner:
         self._prev_ts = s.ts
         self._prev_eligible = s.eligible
         return event
+
+    def _step_reference(self, sp: float | None, ts: float) -> float | None:
+        """The target a heat-up's step is measured from: the last one that
+        stood at least ``heatup_step_settle_s`` (2.24.2), as seen by the
+        cycles (a change by hand runs one at once).  A target taken back
+        within that time (a press undone, Resume schedule straight after) is
+        skipped: 15.5 for 3 s between two spells of 20.0 is no step to 20.0
+        (study, 10 Nov 2026).  A step from it to a third target counts from
+        the one before it.  No target (off) is one too: it returns None, as
+        before anything was seen, and heating that resumes from it is a
+        heat-up.  Called once per cycle, before the start check.
+        """
+        settle = self.cfg.heatup_step_settle_s
+        held, since = self._sp_held, self._sp_held_since
+        if since is not None and ts < since:          # the clock went back
+            self._sp_held_since = since = ts
+        changed = (
+            since is None
+            or (sp is None) != (held is None)
+            or (sp is not None and held is not None and abs(sp - held) > 0.05)
+        )
+        if changed:
+            if since is not None and ts - since >= settle:
+                self._sp_settled = held
+            self._sp_held, self._sp_held_since = sp, ts
+        elif ts - since >= settle:
+            self._sp_settled = sp
+        return self._sp_settled
 
     # -- episode handlers ------------------------------------------------------
     def _trim_by(self, name: str, factor: float) -> None:
@@ -1837,6 +1886,9 @@ class Autotuner:
                 "prev_ts": self._prev_ts,
                 "prev_eligible": self._prev_eligible,
                 "sp_since_ts": self._sp_since_ts,
+                "sp_held": self._sp_held,
+                "sp_held_since": self._sp_held_since,
+                "sp_settled": self._sp_settled,
                 "last_heatup_end_ts": (self._last_heatup_end_ts
                                        if _finite(self._last_heatup_end_ts) else None),
                 "last_window_ts": (self._last_window_ts
@@ -1917,8 +1969,9 @@ class Autotuner:
                 self.last_event = "restored learned values"
             else:
                 self.last_event = "waiting for a heat-up"
-            if d.get("coast_rules") != _COAST_RULES:
-                self._recheck_coasts()
+            rules = d.get("coast_rules")
+            if rules != _COAST_RULES:
+                self._recheck_coasts(rules if isinstance(rules, int) else 1)
         except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             _LOGGER.warning("Auto-tune: stored state unreadable, starting fresh")
             self._reset_learning()
@@ -1933,7 +1986,60 @@ class Autotuner:
         return [text.replace("{when}", fmt_time(ts)) if ts is not None else text
                 for ts, text in notes]
 
-    def _recheck_coasts(self) -> None:
+    def _recheck_coasts(self, rules: int) -> None:
+        """Apply what a save measured under older coast *rules* lacks."""
+        if rules < 2:
+            self._recheck_radiator_bound()
+        if rules < 3:
+            self._recheck_rise_after_coast()
+
+    def _recheck_rise_after_coast(self) -> None:
+        """Since 2.24.2 a heat-up whose coast was not the radiator's has its
+        dead time and heating rate measured only up to the stop
+        (:func:`analyse_heatup`).  A stored one keeps only its results, so
+        where they were measured is not known: they are dropped.  9-12 Nov
+        2026, study: its 7 Nov heat-up's 28.6-min dead time and 1.08 °C/h,
+        measured on the room's own rise 31 min after the stop (15.5 min and
+        0.96 °C/h up to it), had made its dead time 18.5 min with one other
+        heat-up.  Only the model moves; the values in use follow it at the
+        tuner's usual pace and rules.
+        """
+        hit = [m for m in self._heatups if m.coast_not_radiator
+               and (m.theta_s is not None or m.rate_c_per_h is not None)]
+        if not hit:
+            return
+        before = self._model()
+        for m in hit:
+            parts = []
+            if m.theta_s is not None:
+                parts.append(f"dead time ({m.theta_s / 60:.1f} min)")
+            if m.rate_c_per_h is not None:
+                parts.append(f"heating rate ({m.rate_c_per_h:.2f} °C/h)")
+            self._load_notes.append((
+                m.start_ts,
+                f"the heat-up of {{when}}: its {' and '.join(parts)} may come from the "
+                "room's own rise after the valve shut: no longer counted"))
+            m.theta_s = None
+            m.rate_c_per_h = None
+        after = self._model()
+        changes = []
+        th0, th1 = before["theta_s"], after["theta_s"]
+        if th0 is not None and th0 != th1:
+            if th1 is None:
+                changes.append(f"dead time {th0 / 60:.1f} min→not known until "
+                               f"{self.cfg.simc_min_episodes} heat-ups give one")
+            else:
+                changes.append(f"dead time {th0 / 60:.1f}→{th1 / 60:.1f} min")
+        r0, r1 = before["rate_c_per_h"], after["rate_c_per_h"]
+        if r0 is not None and r0 != r1:
+            if r1 is None:
+                changes.append(f"heating rate {r0:.2f} °C/h→not known")
+            else:
+                changes.append(f"heating rate {r0:.2f}→{r1:.2f} °C/h")
+        if changes:
+            self._load_notes.append((None, "; ".join(changes)))
+
+    def _recheck_radiator_bound(self) -> None:
         """A save from before 2.23.2 may hold a coast longer than any
         radiator's (:func:`analyse_heatup`): its coast and overshoot are
         dropped, as a heat-up measured now would drop them, and so is the
@@ -2013,6 +2119,16 @@ class Autotuner:
             self._prev_ts = opt("prev_ts")
             self._prev_eligible = e.get("prev_eligible") is not False
             self._sp_since_ts = opt("sp_since_ts")
+            if "sp_settled" in e:
+                self._sp_held = opt("sp_held")
+                self._sp_held_since = opt("sp_held_since")
+                self._sp_settled = opt("sp_settled")
+            else:
+                # A save from before 2.24.2: its last target is taken as
+                # one that stood, as the step was measured from it then.
+                self._sp_held = self._sp_settled = self._prev_sp
+                self._sp_held_since = (self._sp_since_ts if self._sp_since_ts is not None
+                                       else self._prev_ts)
             end = opt("last_heatup_end_ts")
             self._last_heatup_end_ts = end if end is not None else -math.inf
             window = opt("last_window_ts")
@@ -2021,6 +2137,7 @@ class Autotuner:
         except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             self._heatup = None
             self._prev_sp = self._prev_ts = self._sp_since_ts = None
+            self._sp_held = self._sp_held_since = self._sp_settled = None
             self._prev_eligible = True
             self._last_heatup_end_ts = -math.inf
             self._last_window_ts = -math.inf

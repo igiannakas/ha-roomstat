@@ -91,14 +91,19 @@ class TestRecordedHeatups:
     def test_a_coast_longer_than_any_radiator_is_not_counted(self):
         """Study, 7 Nov: after 7.75 h off, a 70-min heat-up stopped at 16:27
         rising 0.8 °C/h, and the room crept on for 100 min (+0.71): a
-        51-min coast, more than the radiator gives."""
+        51-min coast, more than the radiator gives.  Its dead time and
+        heating rate are measured up to the stop (2.24.2): 2.23.1 took the
+        steepest rise 31 min after it, in the room's own creep (28.1 min,
+        1.08 °C/h)."""
         e = EPISODES[("study", "2026-11-07T15:17")]
         assert e["measured_2_23_1"]["coast_s"] > CFG.td_max_s
         m = _analyse(e)
         assert m.coast_not_radiator
         assert m.coast_s is None and m.overshoot_c is None
         assert m.coast_rise_c == pytest.approx(0.71)
-        assert m.theta_s == pytest.approx(e["measured_2_23_1"]["theta_s"])  # the rise is kept
+        assert e["measured_2_23_1"]["theta_s"] / 60 == pytest.approx(28.1, abs=0.05)
+        assert m.theta_s / 60 == pytest.approx(15.5, abs=0.05)
+        assert m.rate_c_per_h == pytest.approx(0.96, abs=0.005)
         t = A.Autotuner(CFG, A.Tuning(2.5, 0.00057, 600.0))
         t._on_heatup(m, m.ts)
         assert "rose +0.71 °C after the stop, longer than any radiator's coast" in t.last_event
@@ -165,6 +170,10 @@ class TestOlderSaves:
             "the heat-up of 04 Nov 19:37 rose +0.50 °C after the valve shut, a 133-min "
             "coast, longer than any radiator's: its coast and overshoot are no longer counted",
             "braking 39.7→31.4 min, what its other heat-ups give (coast 31.4 min × 1.00)",
+            # 2.24.2: its 2.43 °C/h was the room's jump with the valve shut.
+            "the heat-up of 04 Nov 19:37: its heating rate (2.43 °C/h) may come from the "
+            "room's own rise after the valve shut: no longer counted",
+            "heating rate 1.20→1.18 °C/h",
         ]
         assert t.take_load_notes(_when) == []               # once
         # What a rollback of that trial would restore was set before the
@@ -192,7 +201,14 @@ class TestOlderSaves:
         assert t._heatups[-1].coast_not_radiator
         assert t.active_tuning().td_s == pytest.approx(1070.4)
         notes = t.take_load_notes(_when)
-        assert len(notes) == 1 and notes[0].startswith("the heat-up of 07 Nov 15:17 rose +0.80 °C")
+        assert len(notes) == 3 and notes[0].startswith("the heat-up of 07 Nov 15:17 rose +0.80 °C")
+        # 2.24.2: and its dead time and rate, from the room's own creep.
+        assert notes[1:] == [
+            "the heat-up of 07 Nov 15:17: its dead time (28.6 min) and heating rate "
+            "(1.08 °C/h) may come from the room's own rise after the valve shut: no "
+            "longer counted",
+            "dead time 8.9→8.7 min; heating rate 1.76→1.88 °C/h",
+        ]
 
     @pytest.mark.parametrize("room", ["living", "master"])
     def test_rooms_with_no_such_heatup_are_untouched(self, room):
@@ -206,7 +222,7 @@ class TestOlderSaves:
     def test_a_new_save_is_not_checked_again(self):
         t = _tuner("second")
         saved = t.as_dict()
-        assert saved["coast_rules"] == 2
+        assert saved["coast_rules"] == 3
         again = _tuner("second", state=copy.deepcopy(saved))
         assert again.take_load_notes(_when) == []
         # Saved to a tenth of a second, as every save is.
