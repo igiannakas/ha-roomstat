@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.24.2-blue)
+![Version](https://img.shields.io/badge/version-2.25.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -114,7 +114,7 @@ changes.
   learn it.
 - **The band near the target is yours to set.** **Stop this far over the
   target** and **Heat again this far under the target** (Controller section,
-  0.1 °C each by default, 0.1–0.5 in tenths) are where the valve is shut ahead of an
+  0.1 °C each by default, 0.1–0.5 in steps of 0.05) are where the valve is shut ahead of an
   overshoot and where heating starts again. A wider band means fewer stops
   and restarts and a bigger swing; auto-tune allows for the band's own swing.
   **Heat again look-ahead** (10 minutes by default, 0–30) is how far ahead a

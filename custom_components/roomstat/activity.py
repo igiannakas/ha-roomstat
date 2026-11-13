@@ -279,8 +279,8 @@ def _num(value: float | None) -> str:
 def _line_c(value: float) -> str:
     """A temperature the stop or the release acts at: one decimal, two
     when it lies between tenths (a target set to hundredths by a service
-    call; the band options are tenths since 2.21.0), so a release at 19.75
-    does not read as 19.8."""
+    call, or a band option in 0.05 steps), so a release at 19.75 does not
+    read as 19.8."""
     if abs(value * 10.0 - round(value * 10.0)) < 0.05:
         return f"{value:.1f}"
     return f"{value:.2f}"

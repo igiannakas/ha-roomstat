@@ -227,14 +227,22 @@ Read this before changing `regulation.py` or `parameters.py`.
     the simulator does not reproduce the trickle, so the live traces are
     the evidence.
     **Both lines are options per room** (2.20.0, `hold_stop_over_c` /
-    `hold_release_below_c`, Controller section, 0.1–0.5 in tenths since
-    2.21.0 (0.05 steps in 2.20.0; owner, 3 Nov 2026: "these numbers must be
-    at 0.1C granularity"), `hold_band_option`: read to the nearest tenth,
-    halves up, out of range keeps 0.1; owner, 3 Nov 2026: "The -0.1 / +0.1
-    target is currently hard coded. Can you make this a parameter?"). The
-    minimum 0.1 keeps the two rules above: no stop at the target itself, no
-    flat release at or above it. The activity line names a line between
-    tenths with two decimals (`_line_c`: "heats again at 19.75"). The
+    `hold_release_below_c`, Controller section, 0.1–0.5 in 0.05 steps
+    (2.20.0, and again since 2.25.0: owner, 13 Nov 2026, "I think we need
+    to tighten the allowable over/under runs. -0.15 to +0.15"; in tenths
+    2.21.0–2.24.2 after the owner's 3 Nov "these numbers must be at 0.1C
+    granularity", so values saved then are steps too),
+    `hold_band_option`: read to the nearest 0.05, halves up, out of range
+    keeps 0.1; owner, 3 Nov 2026: "The -0.1 / +0.1 target is currently hard
+    coded. Can you make this a parameter?"). The minimum 0.1 keeps the two
+    rules above: no stop at the target itself, no flat release at or above
+    it. Estimated on the living room's 35 top-ups of 5–12 Nov 2026 (the
+    release 0.05 higher, each top-up's swing unchanged; the stop line's own
+    0.05 not counted), −0.2/+0.1 → −0.15/+0.15: cold-night top-ups' troughs
+    −0.20 → −0.15 (median) and landings +0.06 → +0.11; the short ones of
+    mild nights peak +0.24 → +0.29, over +0.25 8 → 12 of 20 (their swing,
+    0.41, is wider than either band). The activity line names a line
+    between tenths with two decimals (`_line_c`: "heats again at 19.85"). The
     auto-tuner is told the band (`AutotuneConfig.hold_band_over_c` /
     `hold_band_under_c`, `Autotuner.set_hold_band`; see "Auto-tune").
     Simulated (`plant_sim`,
@@ -1869,7 +1877,8 @@ ruff check .
 - `tests/test_hold_band.py` (2.20.0: the hold's band options, the
   regulator's stop and release on them, the activity line's numbers, the
   tuner's thresholds following the band, through the entity with and
-  without a reload; 2.21.0: the release look-ahead option).
+  without a reload; 2.21.0: the release look-ahead option; 2.25.0: 0.05
+  steps, the owner's ±0.15).
 - `tests/test_window_override.py` (2.22.0: a change by hand overrides an
   open window, the study's 3 Nov 2026 presses, the open delay, Frost and
   Boost, what does not override it, while overridden, Resume schedule back

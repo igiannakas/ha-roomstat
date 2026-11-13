@@ -570,7 +570,7 @@ class RegulationConfig:
     # just below its reading (0.05-0.08 °C RMS, +0.3 °C peaks).
     # Both are options per room since 2.20.0 (hold_band_option; owner, 3 Nov
     # 2026: "The -0.1 / +0.1 target is currently hard coded. Can you make
-    # this a parameter?"), 0.1-0.5 in tenths.
+    # this a parameter?"), 0.1-0.5 in 0.05 steps (tenths 2.21.0-2.24.2).
     stop_over_c: float = 0.1
     stop_lead_s: float = 600.0
     release_below_c: float = 0.10
@@ -711,34 +711,36 @@ def _option_in_range(value: object, default: float, lo: float, hi: float) -> flo
     return round(number, 3)
 
 
-def _tenths_option(value: object, default: float, lo: float, hi: float) -> float:
-    """A temperature option in tenths (°C): the value, to the nearest tenth
-    (halves up: 0.15 is 0.2), when that is within lo..hi, otherwise the
-    default.  A value saved in hundredths by an older version (0.05 steps)
-    is read in tenths: 0.05, the old minimum, is 0.1."""
+def _stepped_option(value: object, default: float, lo: float, hi: float, step: float) -> float:
+    """A temperature option in steps of ``step`` (°C): the value, to the
+    nearest step (halves up), when that is within lo..hi, otherwise the
+    default."""
     number = _option_in_range(value, float("nan"), -math.inf, math.inf)
     if math.isnan(number):
         return default
-    tenths = math.floor(number * 10.0 + 0.5 + 1e-9) / 10.0
-    if not lo - 1e-9 <= tenths <= hi + 1e-9:
+    steps = math.floor(number / step + 0.5 + 1e-9)
+    stepped = round(steps * step, 3)
+    if not lo - 1e-9 <= stepped <= hi + 1e-9:
         return default
-    return round(tenths, 1)
+    return stepped
 
 
 # The hold's band (RegulationConfig.stop_over_c / release_below_c), options
-# per room since 2.20.0, °C, in tenths since 2.21.0 (0.05 steps in 2.20.0).
-# At least 0.1: a stop at the target itself was dropped (2-3x the
-# commands), and a release at or above it parks the hold just below the
-# valve's reading, where a Tado trickles.
+# per room since 2.20.0, °C.  In 0.05 steps (2.20.0, and again since 2.25.0:
+# the owner, 13 Nov 2026, "-0.15 to +0.15"); in tenths 2.21.0-2.24.2 (the
+# owner, 3 Nov 2026: "these numbers must be at 0.1C granularity"), so
+# values saved then are steps too.  At least 0.1: a stop at the target
+# itself was dropped (2-3x the commands), and a release at or above it parks
+# the hold just below the valve's reading, where a Tado trickles.
 HOLD_BAND_MIN_C = 0.1
 HOLD_BAND_MAX_C = 0.5
-HOLD_BAND_STEP_C = 0.1
+HOLD_BAND_STEP_C = 0.05
 
 
 def hold_band_option(value: object, default: float) -> float:
-    """A hold band option (°C): the value in tenths when within
-    HOLD_BAND_MIN_C..HOLD_BAND_MAX_C, otherwise the default."""
-    return _tenths_option(value, default, HOLD_BAND_MIN_C, HOLD_BAND_MAX_C)
+    """A hold band option (°C): the value to the nearest 0.05 (halves up)
+    when within HOLD_BAND_MIN_C..HOLD_BAND_MAX_C, otherwise the default."""
+    return _stepped_option(value, default, HOLD_BAND_MIN_C, HOLD_BAND_MAX_C, HOLD_BAND_STEP_C)
 
 
 # The release's look-ahead (RegulationConfig.release_lead_s), an option per

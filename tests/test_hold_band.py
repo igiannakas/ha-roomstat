@@ -4,8 +4,10 @@ The owner, 3 Nov 2026: "The -0.1 / +0.1 target is currently hard coded. Can
 you make this a parameter?"  Near the target the valve is shut once the room
 is predicted to be ``stop_over_c`` over the target, and heats again once it
 is predicted to be ``release_below_c`` under it.  Both are options now
-(``hold_stop_over_c``, ``hold_release_below_c``, 0.1-0.5 in tenths since
-2.21.0, out of range keeps the stock 0.1).
+(``hold_stop_over_c``, ``hold_release_below_c``, 0.1-0.5 in 0.05 steps
+since 2.25.0, in tenths 2.21.0-2.24.2; out of range keeps the stock 0.1).
+The owner, 13 Nov 2026: "I think we need to tighten the allowable
+over/under runs. -0.15 to +0.15."
 
 The auto-tuner judges the hold's swings: a swing beyond +-0.15 °C around the
 mean is an oscillation (Kp or Ki cut) and +-0.3 an emergency (both cut).  The
@@ -64,17 +66,18 @@ class TestTheOption:
         assert P.hold_band_option(value, 0.1) == pytest.approx(expected)
 
     @pytest.mark.parametrize(("value", "expected"), [
-        (0.05, 0.1), (0.15, 0.2), (0.25, 0.3), (0.35, 0.4), (0.45, 0.5), (0.12, 0.1),
-        (0.30000000000000004, 0.3), (0.19999999999999998, 0.2), ("0.25", 0.3),
+        (0.15, 0.15), (0.25, 0.25), (0.45, 0.45), ("0.15", 0.15), (0.2, 0.2),
+        (0.12, 0.1), (0.13, 0.15), (0.125, 0.15), (0.17, 0.15), (0.175, 0.2), (0.52, 0.5),
+        (0.30000000000000004, 0.3), (0.19999999999999998, 0.2), (0.15000000000000002, 0.15),
     ])
-    def test_in_tenths(self, value, expected):
-        """The owner, 3 Nov 2026: "these numbers must be at 0.1C
-        granularity".  The form steps by 0.1; a value saved by 2.20.0 in
-        0.05 steps is read to the nearest tenth, halves up."""
+    def test_in_steps_of_0_05(self, value, expected):
+        """The owner, 13 Nov 2026: "-0.15 to +0.15".  The form steps by
+        0.05; anything else is read to the nearest 0.05, halves up.  Tenths
+        (2.21.0-2.24.2) are steps too."""
         assert P.hold_band_option(value, 0.1) == expected
 
-    def test_the_form_steps_in_tenths(self):
-        assert (P.HOLD_BAND_MIN_C, P.HOLD_BAND_MAX_C, P.HOLD_BAND_STEP_C) == (0.1, 0.5, 0.1)
+    def test_the_form_steps_by_0_05(self):
+        assert (P.HOLD_BAND_MIN_C, P.HOLD_BAND_MAX_C, P.HOLD_BAND_STEP_C) == (0.1, 0.5, 0.05)
 
     def test_the_release_look_ahead_is_10_min(self):
         assert P.RegulationConfig().release_lead_s == 600.0
@@ -134,6 +137,23 @@ class TestTheRegulator:
         assert _mode(_reg(release_lead_s=0.0), 19.90, mode="stop", slope_c_per_h=-3.0) == "hold"
         assert _mode(_reg(release_lead_s=0.0), 19.91, mode="stop", slope_c_per_h=-3.0) == "stop"
 
+    def test_a_band_of_0_15_either_side(self):
+        """The owner's 13 Nov 2026 band: shut once heading 0.15 over, heat
+        again once heading 0.15 under."""
+        reg = _reg(stop_over_c=0.15, release_below_c=0.15)
+        assert _mode(reg, 20.14) == "hold"
+        assert _mode(reg, 20.16) == "stop"
+        assert _mode(reg, 19.86, mode="stop") == "stop"
+        assert _mode(reg, 19.84, mode="stop") == "hold"
+        # 0.05 under and rising 1.2 °C/h: 10 min ahead 0.13 over, under the
+        # line; rising 1.5 °C/h, 0.18 over: shut.
+        assert _mode(reg, 19.95, slope_c_per_h=1.2) == "hold"
+        assert _mode(reg, 19.95, slope_c_per_h=1.5) == "stop"
+        # On target and falling 0.9 °C/h (0.8 beyond the deadband): 10 min
+        # ahead 0.13 under, not yet; falling 1.1 °C/h, 0.17 under: heats.
+        assert _mode(reg, 20.0, mode="stop", slope_c_per_h=-0.9) == "stop"
+        assert _mode(reg, 20.0, mode="stop", slope_c_per_h=-1.1) == "hold"
+
     def test_a_heat_up_is_unchanged(self):
         """The band is the hold's: 0.8 under still heats at full power, and
         the heat-up still ends on its own exit (0.1)."""
@@ -162,7 +182,7 @@ class TestTheActivityLog:
     def test_a_stop_names_the_configured_release(self):
         """Two decimals when the line falls between tenths (0.05 steps):
         19.75 must not read as 19.8."""
-        cases = [(0.25, "19.75"), (0.2, "19.8"), (0.1, "19.9")]
+        cases = [(0.25, "19.75"), (0.2, "19.8"), (0.15, "19.85"), (0.1, "19.9")]
         for release, at in cases:
             cfg = P.RegulationConfig(release_below_c=release)
             line = _line(cfg, error_c=-0.36, slope_c_per_h=0.8, **self.OFF)
@@ -273,10 +293,31 @@ class TestTheEntity:
         at = ent._autotuner.cfg
         assert (at.hold_band_over_c, at.hold_band_under_c) == (0.3, 0.2)
 
-    def test_a_value_saved_in_hundredths_is_read_in_tenths(self):
-        ent = _make_entity({"hold_stop_over_c": 0.25, "hold_release_below_c": 0.15})
+    def test_a_band_in_0_05_steps_reaches_the_regulator_and_the_tuner(self):
+        ent = _make_entity({"hold_stop_over_c": 0.15, "hold_release_below_c": 0.15})
         _run(_start(ent))
-        assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.3, 0.2)
+        assert (ent._config.stop_over_c, ent._config.release_below_c) == (0.15, 0.15)
+        at = ent._autotuner.cfg
+        assert (at.hold_band_over_c, at.hold_band_under_c) == (0.15, 0.15)
+
+    def test_the_options_form_steps_by_the_band_s_step(self):
+        """The form's band fields step by HOLD_BAND_STEP_C and show the saved
+        value through hold_band_option, so 0.15 is offered as 0.15
+        (config_flow.py needs the real voluptuous: read, not run)."""
+        import ast
+        from pathlib import Path
+
+        src = (Path(__file__).resolve().parent.parent / "custom_components" / "roomstat"
+               / "config_flow.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        steps = [kw.value.id for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 for kw in node.keywords
+                 if kw.arg == "step" and isinstance(kw.value, ast.Name)]
+        assert "HOLD_BAND_STEP_C" in steps
+        defaults = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "hold_band_option"]
+        assert len(defaults) == 2
+        assert P.hold_band_option(0.15, 0.1) == 0.15
 
     def test_none_set_is_the_stock_band(self):
         ent = _make_entity()
