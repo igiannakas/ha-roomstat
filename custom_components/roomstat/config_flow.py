@@ -567,8 +567,12 @@ class RoomstatOptionsFlow(config_entries.OptionsFlow):
                                 CONF_CORRECTION_KI,
                                 default=opts.get(CONF_CORRECTION_KI, defaults.tuning.ki),
                             ): selector.NumberSelector(
+                                # Any decimals: Ki lives around 0.0003-0.001,
+                                # and the frontend refuses a box value off its
+                                # step (0.001 was the finest Home Assistant
+                                # allows, so 0.00036 could not be typed).
                                 selector.NumberSelectorConfig(
-                                    min=0.0, max=0.1, step=0.001,
+                                    min=0.0, max=0.1, step="any",
                                     mode=selector.NumberSelectorMode.BOX,
                                 )
                             ),

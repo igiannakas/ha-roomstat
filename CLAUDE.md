@@ -21,13 +21,18 @@ English everywhere: talking to the user, code, comments, commits and docs.
 
 ## Working rules
 
-- Make changes on `main`, in the working tree. **Do not commit or push.** The
-  owner reviews the changes and commits them with GitHub Desktop.
-- No feature branches and no pull requests.
-- Before handing over, all tests and the linter must pass:
-  `python -m pytest tests/ -q` and `ruff check .`
-- End with a ready-to-use commit title: `feat: …`, `fix: …`, `docs: …` or
-  `refactor: …`, with `!` for breaking changes (`feat!: …`).
+- Make changes on `main`. No feature branches and no pull requests.
+- All tests and the linter must pass: `python -m pytest tests/ -q` and
+  `ruff check .`
+- **Then release it yourself** (owner, 13 Nov 2026: "commit all, pull via
+  hacs and restart. From now on do this automatically"; until then the
+  owner committed with GitHub Desktop): commit as the owner (the repo's own
+  git user), push `main`, update Roomstat in HACS to that commit, restart
+  Home Assistant, and check that the rooms come back loaded on the new
+  version. The repo has no releases, so HACS installs from the default
+  branch.
+- Commit titles: `feat: …`, `fix: …`, `docs: …` or `refactor: …`, with `!`
+  for breaking changes (`feat!: …`).
 
 ## Architecture
 
@@ -132,7 +137,10 @@ Build new logic in the HA-free modules first (`parameters.py`,
   only while its option is on).
   `button.py`: resume schedule, reset auto-tune.
   `binary_sensor.py`: sensor degraded, out of band.
-- `config_flow.py`: setup and the options flow (sections).
+- `config_flow.py`: setup and the options flow (sections). The Ki field
+  steps by `"any"` (2.25.1; owner, 13 Nov 2026: it "cannot accept
+  multi-decimal values": with step 0.001, the finest Home Assistant allows
+  as a number, the frontend refused 0.00036).
 - `repairs.py`: repairs for entity settings whose entity was deleted, renamed
   or disabled, with a fix flow to pick a replacement.
 - `card.py` + `www/roomstat-card.js`: the dashboard card

@@ -138,7 +138,7 @@
             },
             "data_description": {
               "correction_kp": "How firmly the valve is pushed near the target: by (1 + Kp) × the room's error. A Tado reacts late and only partly to small changes, so this is high. Typical 3–6.",
-              "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster.",
+              "correction_ki": "Corrects a lasting offset near the target. Higher values correct it faster. Typical 0.0003–0.001; auto-tune adjusts the value in use from here.",
               "integral_deadband_c": "The integral only builds up when the room is this close to the target, so heat-ups never wind it up.",
               "hold_stop_over_c": "Near the target, the valve is shut once the room is predicted to be this far over the target within the braking time (at least 10 min). The radiator's leftover heat can still take it a little higher. Below this line, over the target, the valve is asked for less than its own reading, where a Tado can still trickle, so a higher line lets the room run warmer.",
               "hold_release_below_c": "After a stop, heating starts again only once the room is predicted to be this far under the target within the heat again look-ahead below (10 min unless changed). With the stop above, this is the band the room swings in: a wider band means fewer stops and restarts and a bigger swing, but not always fewer commands. Auto-tune allows for the band's own swing.",
