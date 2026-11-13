@@ -185,6 +185,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data[f"{prefix}_setpoint"] = trv["setpoint"]
             data[f"{prefix}_min_temp"] = trv["min"]
             data[f"{prefix}_max_temp"] = trv["max"]
+            # The setpoint step it takes (a Tado cloud zone: 0.5): commands
+            # are sent on it (climate_controllers.to_valve_step).
+            data[f"{prefix}_step"] = trv["step"]
             data[f"{prefix}_off"] = trv["off"]
             # What the valve says it is doing (hvac_action), for the
             # out-of-band sensor: None when the entity does not say.

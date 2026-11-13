@@ -42,6 +42,7 @@ from .climate_controllers import (
     off_confirm_after,
     pending_command,
     resend_grace_s,
+    to_valve_step,
     trv_holds_command,
     trv_setpoint_drifted,
 )
@@ -861,6 +862,7 @@ class RegulationMixin:
             trv_off=trv.off,
             floor_c=self._config.min_target_c,
             trv_scheduled=trv.scheduled,
+            step_c=trv.step_c,
         )
 
     def _note_trv_shows(self, trv: TrvReading) -> None:
@@ -976,6 +978,7 @@ class RegulationMixin:
         # is known (e.g. after a quick HVAC OFF → HEAT cycle).
         floor = self._config.min_target_c
         time_since_last = now - self._last_command_sent_ts
+        self._cycle_valve_c = None
         # A TRV that no longer holds our last command (lost on the way, a
         # Tado schedule block or an expired timer overlay ended the override,
         # or it was switched off in the Tado app) is compared with what it
@@ -990,6 +993,7 @@ class RegulationMixin:
             trv_off=trv.off,
             floor_c=floor,
             trv_scheduled=trv.scheduled,
+            step_c=trv.step_c,
         ):
             again = ""
             if self._resend_count:
@@ -1014,6 +1018,7 @@ class RegulationMixin:
             trv_off=trv.off,
             floor_c=floor,
             trv_scheduled=trv.scheduled,
+            step_c=trv.step_c,
         ):
             self._resend_count = 0
             self._resend_due = False
@@ -1036,22 +1041,6 @@ class RegulationMixin:
         # else is refused before it is sent).
         lo, hi = command_limits(floor, self._config.max_target_c, trv.min_c, trv.max_c)
         kept = max(lo, min(hi, target))
-        # Raised to what the valve accepts: that much less was taken off.
-        lookahead_c = max(0.0, lookahead_c - max(0.0, kept - target))
-        target = kept
-
-        # Fail cold: the maximum to a cloud TRV is a timer overlay, renewed
-        # once half of it has passed while the command is still the maximum
-        # (whatever the mode: heat, or a hold clamped there).  If Home
-        # Assistant, the network or the cloud stop renewing it, the zone
-        # falls back to its Tado schedule (5 °C or Off) on its own.
-        maximum = is_maximum(target, hi)
-        timer_s = heat_timer_duration(
-            target, hi, cloud=trv.is_cloud, heat_timer_s=self._config.heat_timer_s
-        )
-        timer_refresh_due = timer_s is not None and heat_timer_refresh_due(
-            now, self._heat_timer_sent_ts, timer_s
-        )
 
         current_tado_setpoint = (
             self._last_sent_setpoint
@@ -1066,6 +1055,32 @@ class RegulationMixin:
             # (Not while our heat command may simply not show yet: the drift
             # check sends it again if it still does not after the grace.)
             current_tado_setpoint = floor
+
+        # On the valve's own setpoint step, as it will hold it (2.25.2): a
+        # Tado cloud zone takes half degrees.  A command that rounds to the
+        # step it holds is already at target, and one hovering at a
+        # midpoint stays on its step (to_valve_step).
+        kept = to_valve_step(
+            kept, trv.step_c, lo, hi, floor_c=floor, held_c=current_tado_setpoint
+        )
+        # Raised to what the valve accepts or holds: that much less was
+        # taken off.
+        lookahead_c = max(0.0, lookahead_c - max(0.0, kept - target))
+        target = kept
+        self._cycle_valve_c = target
+
+        # Fail cold: the maximum to a cloud TRV is a timer overlay, renewed
+        # once half of it has passed while the command is still the maximum
+        # (whatever the mode: heat, or a hold clamped there).  If Home
+        # Assistant, the network or the cloud stop renewing it, the zone
+        # falls back to its Tado schedule (5 °C or Off) on its own.
+        maximum = is_maximum(target, hi)
+        timer_s = heat_timer_duration(
+            target, hi, cloud=trv.is_cloud, heat_timer_s=self._config.heat_timer_s
+        )
+        timer_refresh_due = timer_s is not None and heat_timer_refresh_due(
+            now, self._heat_timer_sent_ts, timer_s
+        )
         is_rate_limited = time_since_last < self._config.min_command_interval_s
 
         should_send = False

@@ -75,7 +75,8 @@ Build new logic in the HA-free modules first (`parameters.py`,
 - `climate_controllers.py`: window, presence, summer and schedule state
   machines (`window_recovery_wait`: the close delay runs on until the room
   has stopped re-warming by itself), restart persistence helpers,
-  `choose_trv` (configured TRV or its fallback), `trv_on_schedule`, the
+  `choose_trv` (configured TRV or its fallback), `trv_on_schedule`,
+  `to_valve_step` (a command on the valve's own setpoint step), the
   last command's bookkeeping (`pending_command`, `resend_grace_s`,
   `trv_holds_command`, `CommandRecord`), the
   fail-cold helpers (timer overlays, watchdog test, `OutOfBandMonitor`),
@@ -496,6 +497,30 @@ Read this before changing `regulation.py` or `parameters.py`.
   command creeping by 0.1 °C does not end it, and a resend of a command the
   valve had shown and then left does not add to it. The same pacing holds
   for the summer lock and Roomstat's own off.
+- **Commands on the valve's own step (2.25.2, `to_valve_step`):** the
+  coordinator reads the TRV's `target_temp_step` (`TrvReading.step_c`; 0.5
+  on a Tado cloud zone, which holds 17.7 as 17.5, 16.8 as 17.0), and a heat
+  command is sent on that step, after `command_limits`: the nearest step,
+  kept inside the range, never rounded down to the frost level (that is an
+  off; it takes the first step above). A command moves from the step the
+  valve holds (the baseline, `current_tado_setpoint`) to the next only once
+  it is `VALVE_STEP_HYSTERESIS_FRAC` (0.2) of a step past their midpoint
+  (17.0 → 17.5 from 17.4, back from 17.1), so a hold hovering at a
+  midpoint does not flip the valve every rate-limit interval. One that
+  rounds to the step held is `already_at_target`. The drift check and
+  `trv_holds_command` take a setpoint within half the step of the command
+  as held (`_setpoint_matches`), so a command from before 2.25.2 (17.7 held
+  as 17.5) is not sent again. A step of a tenth or finer, or none, changes
+  nothing (the HomeKit valves, and the test harness by default). Evidence:
+  13 Nov 2026, living room, minimum change 0.1 (the owner's, from about
+  04:00): every command off the half degree read as lost after the drift
+  grace, 20 resends with back-off, 121 commands in a day against 43–75
+  before (at 0.3, the most the rounding moves, 0.25, never counted). In
+  `tests/test_valve_step.py`'s six hours on a half-degree zone: 36 → 11
+  commands at 0.1, 13 → 11 at 0.3. The activity line's `Tado` note compares
+  the command on the step (`CycleFacts.valve_command_c`); its push, and the
+  command trace sensor, are the regulator's command before rounding. The
+  valve look-ahead books the command sent, the auto-tuner the setpoint held.
 
 ## Activity log
 
@@ -1895,6 +1920,10 @@ ruff check .
   study's 6 Nov 2026 presses replayed).
 - `tests/test_climate_native.py` (2.23.0: the native temperature API, no
   old name anywhere in the thermostat's classes).
+- `tests/test_valve_step.py` (2.25.2: a half-degree Tado zone through the
+  entity: commands on the step, nothing sent again, fewer commands, a
+  minimum change of 0.1 no dearer than 0.3, the activity line, a command
+  from before the change held as the zone rounded it).
 - `tests/test_coast_rules.py` (2.23.2: the 29 recorded heat-ups of 1–9 Nov
   2026, `tests/fixtures/heatups_2026_11.json`, measured as before but the
   three whose room rose by itself; the coast's end on synthetic shapes; the

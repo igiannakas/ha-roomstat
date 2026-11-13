@@ -188,6 +188,8 @@ class ActivityMixin:
             facts.room_bridged = self._sensor_degraded
             facts.command_c = result.target_for_tado_c
             facts.command_off = is_off_command(result.target_for_tado_c, floor)
+            if not facts.command_off:
+                facts.valve_command_c = self._cycle_valve_c
             facts.p_c = result.p_correction_c
             facts.i_c = result.i_correction_c
             facts.saturated = result.is_saturated

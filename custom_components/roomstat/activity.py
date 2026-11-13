@@ -250,6 +250,9 @@ class CycleFacts:
     room_bridged: bool = False      # a short sensor gap: the last reading was used
     command_c: float | None = None  # this cycle's target for the valve
     command_off: bool = False
+    # The same on the valve's own setpoint step, as sent (a Tado cloud zone:
+    # half degrees; see to_valve_step).  None: as command_c.
+    valve_command_c: float | None = None
     p_c: float = 0.0
     i_c: float = 0.0
     saturated: bool = False
@@ -457,10 +460,12 @@ def _tado_note(f: CycleFacts, cfg: RegulationConfig) -> str:
     """Why the valve does not have this cycle's command (if it does not)."""
     if f.command_c is None or f.path != PATH_REGULATED:
         return ""
-    want = "off" if f.command_off else f"{f.command_c:.1f}"
+    # What goes to the valve: the command on its own setpoint step.
+    command = f.valve_command_c if f.valve_command_c is not None else f.command_c
+    want = "off" if f.command_off else f"{command:.1f}"
     told_off = f.tado == "off"
     same = (f.command_off and told_off) or (
-        not f.command_off and f.tado_c is not None and abs(f.command_c - f.tado_c) < 0.05
+        not f.command_off and f.tado_c is not None and abs(command - f.tado_c) < 0.05
     )
     if f.send.startswith("send_failed"):
         return f" ({want} failed)"

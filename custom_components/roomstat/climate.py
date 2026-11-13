@@ -432,6 +432,9 @@ class RoomstatClimate(
         # Diagnostics
         self._last_result = None
         self._last_reason = "startup"
+        # This cycle's heat command as the valve takes it (on its setpoint
+        # step, see to_valve_step); None when none was decided.
+        self._cycle_valve_c: float | None = None
 
     # ------------------------------------------------------------------
     # Config builders
@@ -1383,6 +1386,7 @@ class RoomstatClimate(
                 data.get(f"{prefix}_setpoint"),
                 min_c=data.get(f"{prefix}_min_temp"),
                 max_c=data.get(f"{prefix}_max_temp"),
+                step_c=data.get(f"{prefix}_step"),
                 off=bool(data.get(f"{prefix}_off")),
                 is_cloud=bool(data.get(f"{prefix}_cloud")),
                 scheduled=bool(data.get(f"{prefix}_scheduled")),

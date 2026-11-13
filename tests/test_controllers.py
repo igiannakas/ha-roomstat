@@ -891,9 +891,20 @@ class TestTrvSource:
     def test_reads_reading_setpoint_and_range(self):
         assert read_trv("heat", {"current_temperature": 20.4, "temperature": "21.5",
                                  "min_temp": 5, "max_temp": 25}) == {
-            "internal": 20.4, "setpoint": 21.5, "min": 5.0, "max": 25.0, "off": False,
-            "heating": None,
+            "internal": 20.4, "setpoint": 21.5, "min": 5.0, "max": 25.0, "step": None,
+            "off": False, "heating": None,
         }
+
+    @pytest.mark.parametrize("step, read", [
+        (0.5, 0.5), ("0.1", 0.1), (0, None), (-0.5, None), ("x", None), (None, None),
+    ])
+    def test_reads_the_setpoint_step(self, step, read):
+        """target_temp_step: 0.5 on a Tado cloud zone (to_valve_step); a
+        missing, zero or nonsense step is none."""
+        attrs = {"current_temperature": 20.4, "temperature": 21.5}
+        if step is not None:
+            attrs["target_temp_step"] = step
+        assert read_trv("heat", attrs)["step"] == read
 
     @pytest.mark.parametrize("action, heating", [
         ("heating", True), ("idle", False), ("off", False), (None, None),
@@ -912,7 +923,7 @@ class TestTrvSource:
         r = read_trv(state, {"current_temperature": 20.4, "temperature": 21.5,
                              "min_temp": 5, "max_temp": 25})
         assert r == {"internal": None, "setpoint": None, "min": None, "max": None,
-                     "off": False, "heating": None}
+                     "step": None, "off": False, "heating": None}
 
     @pytest.mark.parametrize("bad", ["x", float("nan"), float("inf"), True, None])
     def test_bad_values_are_none(self, bad):
@@ -929,7 +940,7 @@ class TestTrvSource:
         r = read_trv("off", {"current_temperature": 19.0, "min_temp": 7,
                              "max_temp": 35})
         assert r == {"internal": 19.0, "setpoint": None, "min": 7.0, "max": 35.0,
-                     "off": True, "heating": None}
+                     "step": None, "off": True, "heating": None}
 
     def test_primary_wins_when_usable(self):
         p = TrvReading(HOMEKIT, 20.0, 21.0)
@@ -1040,6 +1051,75 @@ class TestTrvDrift:
     def test_off_not_checked_before_the_grace(self):
         assert not trv_setpoint_drifted(20.0, None, 60, 120, 0.3, trv_off=True)
 
+    @pytest.mark.parametrize("sent, held", [
+        (17.7, 17.5), (16.8, 17.0), (18.6, 18.5), (19.2, 19.0), (17.75, 18.0),
+    ])
+    def test_the_valve_s_rounding_is_no_drift(self, sent, held):
+        """13 Nov 2026, living room, minimum change 0.1: a Tado cloud zone
+        (step 0.5) holds 17.7 as 17.5, and each such command was sent again."""
+        assert trv_setpoint_drifted(sent, held, 600, 120, 0.1)
+        assert not trv_setpoint_drifted(sent, held, 600, 120, 0.1, step_c=0.5)
+
+    def test_more_than_the_valve_s_rounding_is_drift(self):
+        assert trv_setpoint_drifted(17.7, 18.5, 600, 120, 0.1, step_c=0.5)
+        assert trv_setpoint_drifted(17.5, 18.0, 600, 120, 0.1, step_c=0.5)
+
+    def test_a_fine_step_changes_nothing(self):
+        assert trv_setpoint_drifted(17.7, 17.5, 600, 120, 0.1, step_c=0.1)
+        assert not trv_setpoint_drifted(20.0, 20.2, 600, 120, 0.3, step_c=0.1)
+
+
+to_valve_step = _ctrl_mod.to_valve_step
+
+
+class TestToValveStep:
+    """Commands on the setpoint step the valve takes (2.25.2)."""
+
+    @staticmethod
+    def step(target, step=0.5, lo=5.0, hi=25.0, held=None):
+        return to_valve_step(target, step, lo, hi, floor_c=5.0, held_c=held)
+
+    @pytest.mark.parametrize("target, sent", [
+        (17.7, 17.5), (16.8, 17.0), (16.7, 16.5), (18.1, 18.0), (19.2, 19.0),
+        (17.5, 17.5), (17.0, 17.0), (17.25, 17.5), (24.8, 25.0), (25.0, 25.0),
+    ])
+    def test_the_nearest_half_degree(self, target, sent):
+        """As a Tado cloud zone holds it (13 Nov 2026, the living room)."""
+        assert self.step(target) == sent
+
+    @pytest.mark.parametrize("step", [None, 0.1, 0.05, 0.0, float("nan")])
+    def test_no_step_or_a_fine_one_changes_nothing(self, step):
+        assert self.step(17.7, step=step) == 17.7
+
+    @pytest.mark.parametrize("held, target, sent", [
+        (17.0, 17.3, 17.0), (17.0, 17.4, 17.5),   # up from 17.4
+        (17.5, 17.2, 17.5), (17.5, 17.1, 17.0),   # back from 17.1
+        (17.0, 17.6, 17.5), (17.0, 17.9, 18.0),   # further: the nearest step
+        (17.5, 17.6, 17.5), (17.5, 17.4, 17.5),
+    ])
+    def test_a_midpoint_does_not_flip_the_valve(self, held, target, sent):
+        """A command hovering at a midpoint stays on the step the valve
+        holds: 0.1 past it before it moves (VALVE_STEP_HYSTERESIS_FRAC)."""
+        assert self.step(target, held=held) == sent
+
+    def test_a_held_value_off_the_step_has_no_hysteresis(self):
+        """A command from before 2.25.2 (17.2 held as is in the record)."""
+        assert self.step(17.3, held=17.2) == 17.5
+
+    def test_kept_inside_the_range(self):
+        assert self.step(24.9, hi=24.8) == 24.5
+        assert self.step(7.1, lo=7.2) == 7.5
+
+    def test_a_heat_command_is_never_rounded_to_the_frost_level(self):
+        """5.0 is an off (sent as hvac mode off): a heat command takes the
+        first step above it."""
+        assert self.step(5.2) == 5.5
+        assert self.step(5.2, held=5.0) == 5.5
+        assert self.step(5.0) == 5.0                # an off stays an off
+
+    def test_a_range_narrower_than_a_step_changes_nothing(self):
+        assert self.step(17.7, lo=17.6, hi=17.8) == 17.7
+
 
 trv_holds_command = _ctrl_mod.trv_holds_command
 resend_grace_s = _ctrl_mod.resend_grace_s
@@ -1067,6 +1147,12 @@ class TestTrvHoldsCommand:
     def test_nothing_known_is_not_holding(self):
         assert not trv_holds_command(None, 20.0, 0.3)
         assert not trv_holds_command(20.0, None, 0.3)
+
+    def test_held_as_the_valve_rounds_it(self):
+        """A Tado cloud zone (step 0.5) shows 17.7 as 17.5: held."""
+        assert not trv_holds_command(17.7, 17.5, 0.1)
+        assert trv_holds_command(17.7, 17.5, 0.1, step_c=0.5)
+        assert not trv_holds_command(17.7, 18.5, 0.1, step_c=0.5)
 
 
 class TestResendGrace:

@@ -23,6 +23,8 @@ Architecture
 - ``trv_on_schedule`` – a TRV back on its own (Tado app) schedule holds no
   command of ours
 - ``is_off_command`` – a shut command goes to the TRV as hvac mode off
+- ``to_valve_step`` – a command on the setpoint step the TRV takes (a Tado
+  cloud zone: half degrees)
 - ``trv_setpoint_drifted`` / ``CommandPacer`` – re-send a command the TRV did
   not take, and keep commands from all rooms apart
 - ``pending_command`` / ``resend_grace_s`` / ``trv_holds_command`` /
@@ -1138,6 +1140,10 @@ class TrvReading:
     # cloud reports it from the zone's heating power, HomeKit from the
     # valve itself).  None when the entity does not say.
     heating: bool | None = None
+    # The setpoint step the entity takes (its ``target_temp_step``): 0.5 on
+    # a Tado cloud zone, which holds 17.7 as 17.5.  None when it does not
+    # say (see to_valve_step).
+    step_c: float | None = None
 
     @property
     def slow(self) -> bool:
@@ -1174,22 +1180,24 @@ def read_trv(
     state: str | None, attributes: Mapping[str, Any] | None
 ) -> dict[str, Any]:
     """Everything Roomstat uses from a TRV climate entity: own reading,
-    setpoint, accepted range, whether it is off, and whether it says it is
-    heating (``hvac_action``; None when the entity has none).  Missing or
-    unavailable gives no values (an unavailable entity may keep stale
-    attributes)."""
+    setpoint, accepted range and setpoint step, whether it is off, and
+    whether it says it is heating (``hvac_action``; None when the entity has
+    none).  Missing or unavailable gives no values (an unavailable entity
+    may keep stale attributes)."""
     if state is None or state in _UNAVAILABLE_STATES:
         return {
             "internal": None, "setpoint": None, "min": None, "max": None,
-            "off": False, "heating": None,
+            "step": None, "off": False, "heating": None,
         }
     attrs = attributes or {}
     action = attrs.get("hvac_action")
+    step = _as_opt_float(attrs.get("target_temp_step"))
     return {
         "internal": plausible_c(attrs.get("current_temperature")),
         "setpoint": _as_opt_float(attrs.get("temperature")),
         "min": _as_opt_float(attrs.get("min_temp")),
         "max": _as_opt_float(attrs.get("max_temp")),
+        "step": step if step is not None and step > 0 else None,
         "off": state == "off",
         "heating": None if action is None else str(action) == "heating",
     }
@@ -1317,6 +1325,94 @@ def is_off_command(target_c: float, floor_c: float) -> bool:
     return target_c <= floor_c + OFF_TOLERANCE_C
 
 
+# Roomstat's commands are in tenths: a valve that takes tenths or finer
+# needs no rounding.
+_TENTH_C = 0.1
+# A command moves to the next step of a coarser valve only once it is this
+# share of a step past the midpoint between the steps (0.1 °C for half
+# degrees), so a command hovering at a midpoint does not flip the valve
+# between the two every rate-limit interval.
+VALVE_STEP_HYSTERESIS_FRAC = 0.2
+
+
+def _on_step(value_c: float, step_c: float) -> bool:
+    return abs(value_c / step_c - round(value_c / step_c)) < 1e-6
+
+
+def to_valve_step(
+    target_c: float,
+    step_c: float | None,
+    lo_c: float,
+    hi_c: float,
+    *,
+    floor_c: float,
+    held_c: float | None = None,
+) -> float:
+    """*target_c* (inside ``lo_c``..``hi_c``) on the setpoint step the TRV
+    takes (its ``target_temp_step``), as the valve would round it: to the
+    nearest step.
+
+    A Tado cloud zone takes half degrees (``target_temp_step`` 0.5 in Home
+    Assistant's Tado integration) and holds 17.7 as 17.5, 16.8 as 17.0.
+    Sent in tenths, every command off the half degree read as not held: on
+    13 Nov 2026 the living room (minimum change 0.1) sent 20 of them again,
+    121 commands in a day against 43-75 before, for a resolution the valve
+    does not have.  Sent as the valve will hold it, a command is compared
+    with what the valve really holds, and one that rounds to what it holds
+    already is not sent at all (2.25.2).
+
+    ``held_c``: the step the valve holds now.  The command moves from it to
+    the next step only once it is ``VALVE_STEP_HYSTERESIS_FRAC`` of a step
+    past their midpoint (17.0 → 17.5 from 17.4, back from 17.1).  A held
+    value off the valve's step (a command from before 2.25.2) has no
+    hysteresis.
+
+    Kept inside ``lo_c``..``hi_c`` (rounded the other way at an end), and a
+    heat command is never rounded down to the frost level: that is an off,
+    which goes to the TRV as hvac mode off (is_off_command), so it takes the
+    first step above it.  No step, one of a tenth or finer, or a range
+    narrower than a step: *target_c* unchanged.
+    """
+    if step_c is None or not math.isfinite(step_c) or step_c <= _TENTH_C + 1e-9:
+        return target_c
+    value = math.floor(target_c / step_c + 0.5 + 1e-9) * step_c
+    if (
+        held_c is not None
+        and _on_step(held_c, step_c)
+        and abs(abs(value - held_c) - step_c) < 1e-6
+        and abs(target_c - held_c) - abs(target_c - value)
+        < 2.0 * VALVE_STEP_HYSTERESIS_FRAC * step_c - 1e-9
+    ):
+        value = held_c
+    if value > hi_c + 1e-9:
+        value = math.floor(hi_c / step_c + 1e-9) * step_c
+    if value < lo_c - 1e-9:
+        value = math.ceil(lo_c / step_c - 1e-9) * step_c
+    if is_off_command(value, floor_c) and not is_off_command(target_c, floor_c):
+        value = (math.floor((floor_c + OFF_TOLERANCE_C) / step_c + 1e-9) + 1) * step_c
+    value = round(value, 2)
+    if not lo_c - 1e-9 <= value <= hi_c + 1e-9:
+        return target_c
+    return value
+
+
+def _setpoint_matches(
+    sent_c: float, held_c: float, threshold_c: float, step_c: float | None
+) -> bool:
+    """The TRV's setpoint *held_c* is our command *sent_c*: within the
+    minimum change, or within half the valve's own setpoint step (a valve
+    on a coarser step rounds a command to it, see to_valve_step)."""
+    diff = abs(held_c - sent_c)
+    if diff < threshold_c:
+        return True
+    return (
+        step_c is not None
+        and math.isfinite(step_c)
+        and step_c > 0
+        and diff <= step_c / 2.0 + 1e-6
+    )
+
+
 def trv_setpoint_drifted(
     last_sent_c: float | None,
     trv_setpoint_c: float | None,
@@ -1327,12 +1423,15 @@ def trv_setpoint_drifted(
     trv_off: bool = False,
     floor_c: float = 5.0,
     trv_scheduled: bool = False,
+    step_c: float | None = None,
 ) -> bool:
     """True when the TRV no longer holds the last command.
 
     Only checked once ``grace_s`` has passed since the command, so the TRV's
     state has had time to report it.  A difference below ``threshold_c`` is
-    not worth a command.
+    not worth a command, and one within half the valve's own setpoint step
+    (``step_c``) is the valve's rounding, not a lost command (2.25.2: a Tado
+    cloud zone holds 17.7 as 17.5).
 
     An off command (``last_sent_c`` at the frost level, see is_off_command)
     is held only while the TRV is ``off``: a valve in heat at any setpoint,
@@ -1353,7 +1452,7 @@ def trv_setpoint_drifted(
         return True
     if trv_setpoint_c is None:
         return False
-    return abs(trv_setpoint_c - last_sent_c) >= threshold_c
+    return not _setpoint_matches(last_sent_c, trv_setpoint_c, threshold_c, step_c)
 
 
 def trv_holds_command(
@@ -1364,17 +1463,19 @@ def trv_holds_command(
     trv_off: bool = False,
     floor_c: float = 5.0,
     trv_scheduled: bool = False,
+    step_c: float | None = None,
 ) -> bool:
     """True when the TRV's state shows the last command it took: off for an
-    off, that setpoint (within ``threshold_c``) in heat for a heat command.
-    Nothing known (no command, no setpoint) is not holding."""
+    off, that setpoint in heat for a heat command (within ``threshold_c``,
+    or within half the valve's own setpoint step ``step_c``).  Nothing known
+    (no command, no setpoint) is not holding."""
     if last_sent_c is None:
         return False
     if is_off_command(last_sent_c, floor_c):
         return trv_off
     if trv_off or trv_scheduled or trv_setpoint_c is None:
         return False
-    return abs(trv_setpoint_c - last_sent_c) < threshold_c
+    return _setpoint_matches(last_sent_c, trv_setpoint_c, threshold_c, step_c)
 
 
 def resend_grace_s(base_s: float, resends: int, cap_s: float) -> float:

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.25.1-blue)
+![Version](https://img.shields.io/badge/version-2.25.2-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -47,6 +47,14 @@ changes.
   its last command, and sends it again only if it doesn't, so you can set
   **Overlay refresh interval** to 0. A valve that keeps not showing a command
   is asked less and less often, down to once every 30 minutes.
+- **Commands on the valve's own step.** A Tado cloud zone takes half
+  degrees: it holds 17.7 °C as 17.5. Roomstat sends each command the way the
+  valve will hold it, so a change that rounds to what the valve already
+  holds isn't sent, and the valve's rounding never counts as a lost command.
+  A command near the middle of two steps stays where it is until it is
+  0.1 °C past the middle, so the valve doesn't flip between them. With this,
+  a **Minimum change threshold** under 0.5 °C costs nothing extra on such a
+  valve.
 - **Quick changes don't reach the valve.** After a change from the
   dashboard, a script or a voice assistant (a preset, a temperature, a
   preset temperature, on/off, resume schedule), more heat waits until
