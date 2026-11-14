@@ -2446,6 +2446,56 @@ def integration_step(now: float, last_ts: float, max_s: float) -> float:
     return min(now - last_ts, max_s)
 
 
+# The hold's integral is taken back after a restart or reload saved at most
+# this long ago (2.25.3).  Every restart and reload (and a preset
+# temperature change reloads the room) is minutes at most; after a longer
+# outage the house and the weather may have moved on, and starting from 0 is
+# the safe default.
+INTEGRAL_KEEP_S = 3600.0
+
+
+def integral_record(integral_c: float, now: float, trv: str | None) -> dict[str, Any]:
+    """The hold's integral for the restore-state store: its value, when it
+    was saved and the TRV it was built on."""
+    return {"c": round(float(integral_c), 4), "ts": now, "trv": trv}
+
+
+def restore_integral(
+    data: Any, now: float, trv: str | None, lo_c: float, hi_c: float
+) -> float | None:
+    """The hold's integral saved with the room, if it may be taken back.
+
+    The integral is the push the hold has learned it needs near the target
+    beyond its proportional term: the valve controller's own bias and the
+    room's heat loss, which change over hours, not minutes.  Until 2.25.3 it
+    started from 0 after every restart and reload; at a low Kp the hold then
+    leaned on a small proportional push alone until it had built up again
+    (13 Nov 2026, living room at Kp 1.5: seven restarts and reloads, 0.2-0.4
+    under for 20-80 min after two of them, the integral climbing back from 0
+    to +0.25-0.39).  So a restart is a gap between cycles, as for the
+    auto-tuner's episode.
+
+    Taken back when it was saved at most ``INTEGRAL_KEEP_S`` ago (a save
+    from the future, a clock that went back, is not), on the same TRV, and
+    kept inside the integral's own limits.  None otherwise.
+    """
+    if not isinstance(data, dict):
+        return None
+    value = data.get("c")
+    ts = data.get("ts")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    if not (math.isfinite(value) and math.isfinite(ts)):
+        return None
+    if not 0.0 <= now - ts <= INTEGRAL_KEEP_S:
+        return None
+    if data.get("trv") != trv:
+        return None
+    return max(lo_c, min(hi_c, float(value)))
+
+
 # ---------------------------------------------------------------------------
 # Configured entities that disappear
 # ---------------------------------------------------------------------------

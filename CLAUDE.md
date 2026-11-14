@@ -196,8 +196,9 @@ Read this before changing `regulation.py` or `parameters.py`.
     a heat-up does, so until the room leaves the hold it coasts on the
     heat-up's exit (error − Td × rise ≤ 0.1, rising only) instead of
     waiting for the stop rule's 0.1 over. A hold entered afresh starts
-    gentle, also after a reload (the flag is not kept, like the integral:
-    a push still at 2.5 °C sets it again). 26 Oct 2026, second bedroom:
+    gentle, also after a reload (the flag is not kept: a push still at
+    2.5 °C sets it again; the integral is kept since 2.25.3, see "The
+    integral across a restart"). 26 Oct 2026, second bedroom:
     0.76 below at 06:00 (just under `heatup_enter_c`), +3.1 over the valve,
     which ran at 100 %; the stop rule shut it at 06:31, the heat-up exit
     says 06:28 (Td 25 min, replayed in `tests/test_control.py`), and the
@@ -804,6 +805,23 @@ is updating.
   a 25 °C in flight resumes as heat, an off as coast), and the timer is not
   renewed needlessly. 2.8.5 forgot it: a reload 10 s after a 25 °C command
   took the stale "off" as done (2.8.6 review).
+- **The integral across a restart (2.25.3, `restore_integral`):** the
+  hold's integral rides along in the restore-state extra data (`integral`:
+  its value, when it was saved, the TRV) and is taken back when the save is
+  at most `INTEGRAL_KEEP_S` (1 h) old, not from the future, and from the
+  same TRV, inside the integral's limits; the start line says so
+  (`Started …; integral +0.28 carried on`). A restart is then a gap between
+  cycles, as for the auto-tuner's episode: the integral is the room's slow
+  balance (the valve controller's bias and the heat loss), and it is kept
+  across a target step at run time too (it decays outside the deadband by
+  itself). Until 2.25.3 it started from 0 after every restart and reload
+  (and a preset temperature change reloads the room): 13 Nov 2026, living
+  room at Kp 1.5, seven restarts and reloads, and after two of them the
+  room sat 0.2–0.4 under for 20–80 min while the integral climbed back from
+  0 to +0.25–0.39 (the release push near the target is only (1 + Kp) ×
+  error). Not kept: the full-push flag (above), and the integral over an
+  hour-long outage or after summer mode (`_exit_summer_mode` starts fresh).
+  Tested in `tests/test_integral_restore.py`.
 - **The room slope across a restart (2.9.1):** the heat-up end and the stop
   predict from the 15-min slope, which needs 7.5 min of readings. The
   samples ride along in the restore-state extra data (`slope`,
@@ -1920,6 +1938,10 @@ ruff check .
   study's 6 Nov 2026 presses replayed).
 - `tests/test_climate_native.py` (2.23.0: the native temperature API, no
   old name anywhere in the thermostat's classes).
+- `tests/test_integral_restore.py` (2.25.3: the rule, and through the
+  entity: saved with the room, carried on by a reload and used by the first
+  hold after it, not after an hour, from another TRV or a save from
+  before).
 - `tests/test_valve_step.py` (2.25.2: a half-degree Tado zone through the
   entity: commands on the step, nothing sent again, fewer commands, a
   minimum change of 0.1 no dearer than 0.3, the activity line, a command

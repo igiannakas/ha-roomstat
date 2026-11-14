@@ -55,10 +55,12 @@ from .climate_controllers import (
     TrvReading,
     WindowAutomationController,
     choose_trv,
+    integral_record,
     is_maximum,
     normalize_restored_preset,
     presence_startup_action,
     resolve_boost_restore,
+    restore_integral,
     window_startup_action,
 )
 from .climate_lookahead import LookaheadMixin
@@ -95,6 +97,7 @@ from .const import (
     CONF_PRESENCE_SENSOR_ID,
     CONF_SCHEDULE_ENTITY_ID,
     CONF_SENSOR_GRACE_S,
+    CONF_SOURCE_ENTITY_ID,
     CONF_SUMMER_MODE_ENTITY_ID,
     CONF_URGENT_DECREASE_THRESHOLD_C,
     CONF_WINDOW_DELAY_S,
@@ -154,9 +157,11 @@ class _AutomationExtraData(ExtraStoredData):
     last change by hand under ``manual_change_ts`` (a preset temperature
     change reloads the room; it still settles before it adds heat),
     preheat's state under ``preheat`` (a heading-home start, an Away held
-    cold, the learned 30-minute recovery, the decision last logged), and
-    the valve look-ahead's learning under ``lookahead``.  Any other key an
-    older version saved is ignored when the data is read back.
+    cold, the learned 30-minute recovery, the decision last logged), the
+    valve look-ahead's learning under ``lookahead``, and the hold's integral
+    under ``integral`` (2.25.3: a restart or reload no longer starts it from
+    0).  Any other key an older version saved is ignored when the data is
+    read back.
     """
 
     def __init__(
@@ -170,6 +175,7 @@ class _AutomationExtraData(ExtraStoredData):
         manual_change_ts: float | None = None,
         preheat: dict[str, Any] | None = None,
         lookahead: dict[str, Any] | None = None,
+        integral: dict[str, Any] | None = None,
     ) -> None:
         self._state = state
         self._autotune = autotune
@@ -180,6 +186,7 @@ class _AutomationExtraData(ExtraStoredData):
         self._manual_change_ts = manual_change_ts
         self._preheat = preheat
         self._lookahead = lookahead
+        self._integral = integral
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict for the restore-state store."""
@@ -200,6 +207,8 @@ class _AutomationExtraData(ExtraStoredData):
             data["preheat"] = self._preheat
         if self._lookahead is not None:
             data["lookahead"] = self._lookahead
+        if self._integral is not None:
+            data["integral"] = self._integral
         return data
 
 
@@ -607,6 +616,7 @@ class RoomstatClimate(
         # A 2.11.0 save's Away held cold (preheat), for its conversion below.
         legacy_held_cold = False
         tuner_notes: list[str] = []
+        integral_note = ""
         extra = await self.async_get_last_extra_data()
         if extra is not None:
             extra_dict = extra.as_dict()
@@ -636,6 +646,19 @@ class RoomstatClimate(
                 self._preheat_restore(extra_dict.get("preheat"), now)
                 # The valve look-ahead learned on this room's TRV.
                 self._lookahead_restore(extra_dict.get("lookahead"), now)
+                # The hold's integral, if saved within the hour on this TRV
+                # (restore_integral): a restart is a gap between cycles.
+                integral = restore_integral(
+                    extra_dict.get("integral"),
+                    now,
+                    self._config_entry.data.get(CONF_SOURCE_ENTITY_ID),
+                    self._config.integral_min_c,
+                    self._config.integral_max_c,
+                )
+                if integral is not None:
+                    self._reg_state.integral_c = integral
+                    if abs(integral) >= 0.005:
+                        integral_note = f"; integral {integral:+.2f} carried on"
                 # The room slope's recent samples, if they still join up
                 # with now: a heat-up keeps its predicted stop.
                 if self._slope.restore(extra_dict.get("slope"), now):
@@ -647,7 +670,7 @@ class RoomstatClimate(
         # A line in the activity log, so a gap in it reads as what it was.
         self._log(_LOGGER).info(
             "started (Home Assistant restart or room reload)%s",
-            "" if extra is not None else "; nothing saved to take back",
+            integral_note if extra is not None else "; nothing saved to take back",
         )
         for note in tuner_notes:
             self._log(_LOGGER).info("auto-tune: %s", note)
@@ -1054,6 +1077,11 @@ class RoomstatClimate(
             self._manual_change_ts,
             self._preheat_as_dict(),
             self._lookahead_state(),
+            integral_record(
+                self._reg_state.integral_c,
+                time.time(),
+                self._config_entry.data.get(CONF_SOURCE_ENTITY_ID),
+            ),
         )
 
     def _automation_snapshot(self) -> PersistedAutomationState:
