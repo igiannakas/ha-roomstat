@@ -2636,6 +2636,44 @@ def migrate_options_v1_to_v2(
 # in const.py had them.
 DOSING_OPTIONS = ("dosed_topups", "dose_zone_above_c", "dose_zone_below_c")
 
+# The preset temperatures (the number entities; const.py's CONF_*_TARGET).
+PRESET_TEMPERATURE_OPTIONS = (
+    "comfort_target",
+    "eco_target",
+    "boost_target",
+    "away_target",
+    "frost_protection_target",
+)
+
+
+def preset_temperature_changes(
+    old_data: Mapping[str, Any],
+    old_options: Mapping[str, Any],
+    new_data: Mapping[str, Any],
+    new_options: Mapping[str, Any],
+) -> dict[str, tuple[Any, Any]] | None:
+    """What a config entry update changed, when that is only preset
+    temperatures: ``{option: (old, new)}``.  None when anything else changed
+    too, or nothing did: the room is then reloaded as before.
+
+    2.26.0: a preset temperature is applied to the running room.  Until then
+    every one reloaded it (owner's rooms, 5-14 Nov 2026: 58 restarts and
+    reloads of the living room in nine days, 30 of them preset temperatures),
+    and a reload costs the room its full-push flag, a cycle, the Tado's
+    refresh and a "Started" line, and before 2.25.3 the hold's integral.
+    """
+    if dict(old_data) != dict(new_data):
+        return None
+    changed = {
+        key: (old_options.get(key), new_options.get(key))
+        for key in set(old_options) | set(new_options)
+        if old_options.get(key) != new_options.get(key)
+    }
+    if not changed or any(key not in PRESET_TEMPERATURE_OPTIONS for key in changed):
+        return None
+    return changed
+
+
 
 def migrate_options_v2_to_v3(options: Mapping[str, Any]) -> dict[str, Any]:
     """Options of a minor version 2 entry, in the current meaning.

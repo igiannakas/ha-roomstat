@@ -78,6 +78,7 @@ from .const import (
     CONF_BOOST_DURATION,
     CONF_BOOST_TARGET,
     CONF_COLD_BAND_MIN,
+    CONF_COMFORT_TARGET,
     CONF_CORRECTION_KI,
     CONF_CORRECTION_KP,
     CONF_DERIVATIVE_TIME_MIN,
@@ -125,6 +126,15 @@ from .parameters import (
 from .regulation import FeedforwardPiRegulator, RegulationState, resume_mode
 
 _LOGGER = logging.getLogger(__name__)
+
+# The presets as the activity log names them, by their temperature option.
+_PRESET_TEMPERATURE_NAMES = {
+    CONF_COMFORT_TARGET: "Comfort",
+    CONF_ECO_TARGET: "Night",
+    CONF_BOOST_TARGET: "Boost",
+    CONF_AWAY_TARGET: "Away",
+    CONF_FROST_PROTECTION_TARGET: "Frost protection",
+}
 
 # While a window's close delay runs: when it closed, the earliest and latest
 # time heating can come back, and the room's own re-warm rate (the card's
@@ -761,11 +771,6 @@ class RoomstatClimate(
         if legacy_note and not summer_on:
             self._log(_LOGGER).info("startup: %s", legacy_note)
 
-        # Config entry update listener (from number entities)
-        self.async_on_remove(
-            self._config_entry.add_update_listener(self._async_config_entry_updated)
-        )
-
         # State change listener on the source TRV and its fallback (summer
         # mode switches a valve turned on from the dial or app off again)
         trv_entities = [
@@ -1151,6 +1156,45 @@ class RoomstatClimate(
         if self._preset_mode == PRESET_COMFORT:
             self._target_temp = self._comfort_target()
         self.async_write_ha_state()
+
+    async def async_preset_temperatures_changed(
+        self, changed: dict[str, tuple[Any, Any]]
+    ) -> None:
+        """Preset temperatures changed (the number entities, the options
+        flow): take them as they are, without a reload (2.26.0; called by
+        ``__init__._async_options_updated`` when nothing else changed).
+
+        Under the regulation lock, so a cycle in progress finishes on the
+        temperatures it started with.  A cycle follows at once when the
+        room's setpoint moved; otherwise preheat decides again (what coming
+        home restores may have moved) and runs one only if its target did.
+        Never raises: a failure here must leave the room regulating, and
+        the next cycle reads the options anyway.
+        """
+        try:
+            async with self._regulation_lock:
+                before = self._effective_setpoint()
+                await self._async_config_entry_updated(self.hass, self._config_entry)
+                after = self._effective_setpoint()
+            for key in sorted(changed):
+                old, new = (safe_float(v) for v in changed[key])
+                name = _PRESET_TEMPERATURE_NAMES.get(key, key)
+                if new is None:
+                    self._log(_LOGGER).info("%s temperature back to its default", name)
+                elif old is None:
+                    self._log(_LOGGER).info("%s temperature set to %.1f °C", name, new)
+                else:
+                    self._log(_LOGGER).info(
+                        "%s temperature %.1f → %.1f °C", name, old, new
+                    )
+            if before != after:
+                await self._async_regulation_cycle(trigger="preset_temperature")
+            else:
+                self._preheat_refresh("preset_temperature")
+        except Exception:  # noqa: BLE001 - the room must keep regulating
+            self._log(_LOGGER).exception(
+                "applying the new preset temperatures failed; the next cycle uses them"
+            )
 
     # ------------------------------------------------------------------
     # Source TRV changes

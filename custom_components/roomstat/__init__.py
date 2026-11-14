@@ -21,6 +21,7 @@ from .climate_controllers import (
     migrate_options_v1_to_v2,
     migrate_options_v2_to_v3,
     plausible_c,
+    preset_temperature_changes,
     read_trv,
     trv_on_schedule,
 )
@@ -257,6 +258,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 5. Perform initial refresh
     await coordinator.async_config_entry_first_refresh()
 
+    # What the running room was set up with: a later update that changes
+    # only preset temperatures is applied in place (_async_options_updated).
+    coordinator.applied_entry = (dict(entry.data), dict(entry.options))
+
     # 6. Store coordinator
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
@@ -272,7 +277,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the integration when options are changed."""
+    """The entry changed: reload the room, unless only preset temperatures
+    did (2.26.0), which the running thermostat takes as they are."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    applied = getattr(coordinator, "applied_entry", None)
+    climate = getattr(coordinator, "climate_entity", None)
+    if applied is not None and climate is not None:
+        changed = preset_temperature_changes(
+            applied[0], applied[1], entry.data, entry.options
+        )
+        if changed is not None:
+            coordinator.applied_entry = (dict(entry.data), dict(entry.options))
+            await climate.async_preset_temperatures_changed(changed)
+            return
     await hass.config_entries.async_reload(entry.entry_id)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.25.3-blue)
+![Version](https://img.shields.io/badge/version-2.26.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -163,6 +163,10 @@ changes.
   reading and what the valve has been told. It also notes events (modes,
   schedule, windows, presence, failed commands) and what auto-tune changed
   or why it changed nothing. See [Activity log](#activity-log).
+- **A preset temperature takes effect without a reload.** Changing a
+  preset's temperature (the number entities) is applied to the running
+  room at once; upstream reloads the room for it. Any other setting still
+  reloads the room.
 
 **Modes**
 - **Schedule.** The room follows a helper that your scheduler sets. Manual

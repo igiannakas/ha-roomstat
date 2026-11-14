@@ -340,7 +340,7 @@ class RegulationMixin:
     def note_change_by_hand(self) -> None:
         """A preset, temperature, preset temperature, HVAC mode or resume
         picked by the user (or any service call: the wait is by time).
-        Kept across the reload a preset temperature change causes."""
+        Kept across a reload (an options change)."""
         self._manual_change_ts = time.time()
 
     def _restore_change_by_hand(self, ts: Any, now: float) -> None:

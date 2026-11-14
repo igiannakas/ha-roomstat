@@ -595,7 +595,7 @@ be read.
   HH:MM" for a rate-limited change), so a heat-up judged and the next one
   started in the same sample are both logged.
 - The lines ride along in the restore-state extra data (`activity`), so a
-  reload (every preset temperature change) keeps them; local times use HA's
+  reload (an options change) keeps them; local times use HA's
   time zone (`dt_util.get_default_time_zone`).
 
 ## Failure handling
@@ -704,7 +704,7 @@ is updating.
   same way (`PREHEAT_SETTLE_S`, see "Preheat on the way home"). A clock
   that went back ends it, and the time
   rides along in the restore-state extra data (`manual_change_ts`, taken
-  back only within the 15 s), since a preset temperature change reloads
+  back only within the 15 s), since an options change reloads
   the room (it matters only when an event runs a cycle within those 15 s:
   the first timed cycle after a reload comes after the 60-s interval).
   More heat is committed only after its turn at the bridge
@@ -805,6 +805,28 @@ is updating.
   a 25 °C in flight resumes as heat, an off as coast), and the timer is not
   renewed needlessly. 2.8.5 forgot it: a reload 10 s after a 25 °C command
   took the stale "off" as done (2.8.6 review).
+- **A preset temperature needs no reload (2.26.0,
+  `preset_temperature_changes`, `async_preset_temperatures_changed`):**
+  `__init__._async_options_updated` keeps what the room was set up with
+  (`coordinator.applied_entry`, data and options) and reloads the room
+  unless the update changed only preset temperatures
+  (`PRESET_TEMPERATURE_OPTIONS`: Comfort, Night, Boost, Away, Frost
+  protection; the Boost duration is not one). Those go to the running
+  thermostat: under the regulation lock it rebuilds its config from the
+  options (`_async_config_entry_updated`, the tuner's gains put back by
+  `_apply_active_tuning`), writes an event line per temperature (`Comfort
+  temperature 21.0 → 21.2 °C`), and runs a cycle at once (trigger
+  `preset_temperature`) when the room's setpoint moved; otherwise preheat
+  decides again. It never raises. The thermostat no longer has an update
+  listener of its own. Everything else (any other option, the TRV, an
+  update that changed nothing, no thermostat yet) reloads as before, so
+  **where this file says a preset temperature change reloads the room,
+  read "an options change"**: the restore-state extras are still what a
+  reload takes back. Owner, 14 Nov 2026 ("Implement 3" of the regulation
+  review, project doc `claude/heating-review-2026-11-14-regulation.md`):
+  the living room restarted or reloaded 58 times in 5–14 Nov, 30 of them
+  preset temperatures; a reload costs the full-push flag, a cycle and a
+  "Started" line. Tested in `tests/test_preset_temperature_in_place.py`.
 - **The integral across a restart (2.25.3, `restore_integral`):** the
   hold's integral rides along in the restore-state extra data (`integral`:
   its value, when it was saved, the TRV) and is taken back when the save is
@@ -815,7 +837,7 @@ is updating.
   balance (the valve controller's bias and the heat loss), and it is kept
   across a target step at run time too (it decays outside the deadband by
   itself). Until 2.25.3 it started from 0 after every restart and reload
-  (and a preset temperature change reloads the room): 13 Nov 2026, living
+  (and until 2.26.0 a preset temperature change reloaded the room): 13 Nov 2026, living
   room at Kp 1.5, seven restarts and reloads, and after two of them the
   room sat 0.2–0.4 under for 20–80 min while the integral climbed back from
   0 to +0.25–0.39 (the release push near the target is only (1 + Kp) ×
@@ -1938,6 +1960,10 @@ ruff check .
   study's 6 Nov 2026 presses replayed).
 - `tests/test_climate_native.py` (2.23.0: the native temperature API, no
   old name anywhere in the thermostat's classes).
+- `tests/test_preset_temperature_in_place.py` (2.26.0: the rule, through
+  the entity: the target moves at once on the same room, learning and
+  slope stay, the learned gains stay in use, more heat still settles, a
+  failure leaves the room regulating; the listener: in place or a reload).
 - `tests/test_integral_restore.py` (2.25.3: the rule, and through the
   entity: saved with the room, carried on by a reload and used by the first
   hold after it, not after an hour, from another TRV or a save from

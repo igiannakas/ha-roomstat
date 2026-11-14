@@ -127,8 +127,9 @@ class PresetTemperatureNumber(CoordinatorEntity, NumberEntity):
         # and keep tenths, the step (a float like 20.600000000000001 from a
         # slider or an automation is stored as 20.6).
         value = round(max(self._attr_native_min_value, min(self._attr_native_max_value, value)), 1)
-        # A change by hand: more heat from it settles first (it reloads the
-        # room; the thermostat keeps the time in its restore data).
+        # A change by hand: more heat from it settles first.  The thermostat
+        # takes the new temperature as it is, without a reload (2.26.0,
+        # __init__._async_options_updated).
         climate = getattr(self.coordinator, "climate_entity", None)
         if climate is not None:
             climate.note_change_by_hand()
