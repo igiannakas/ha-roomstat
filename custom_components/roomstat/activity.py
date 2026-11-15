@@ -267,6 +267,12 @@ class CycleFacts:
     # and how fast the valve's reading was falling.
     lookahead_c: float = 0.0
     trv_fall_c_per_h: float | None = None
+    # The hold's integral at a frost-level target (regulation.frost_level,
+    # 2.27.0): its value, and whether it is still kept (False: the limit,
+    # integral_hold_frost_max_s, is up and it decays).  None: not at the
+    # frost level, or the rule off.
+    frost_integral_c: float | None = None
+    frost_integral_kept: bool = True
 
 
 def _signed(value: float, digits: int) -> str:
@@ -316,6 +322,28 @@ def _trend(slope_c_per_h: float | None, cfg: RegulationConfig) -> str:
 
 def _minutes(seconds: float) -> str:
     return f"{seconds / 60:.0f} min"
+
+
+def _hours(seconds: float) -> str:
+    """'3 h', '1.5 h', '45 min'."""
+    if seconds < 3600.0:
+        return _minutes(seconds)
+    return f"{seconds / 3600.0:.1f}".rstrip("0").rstrip(".") + " h"
+
+
+# A kept integral smaller than this is not worth a word.
+_FROST_INTEGRAL_SHOWN_C = 0.05
+
+
+def _frost_integral_note(f: CycleFacts, cfg: RegulationConfig) -> str:
+    """'; integral +0.42 kept' at a frost-level target, and once its limit
+    is up '; integral +0.30 decays after 3 h' (2.27.0)."""
+    value = f.frost_integral_c
+    if value is None or not math.isfinite(value) or abs(value) < _FROST_INTEGRAL_SHOWN_C:
+        return ""
+    if f.frost_integral_kept:
+        return f"; integral {_signed(value, 2)} kept"
+    return f"; integral {_signed(value, 2)} decays after {_hours(cfg.integral_hold_frost_max_s)}"
 
 
 def _rewarm_phrase(f: CycleFacts) -> str:
@@ -490,13 +518,15 @@ def decision_key(f: CycleFacts, cfg: RegulationConfig) -> str:
     note = _tado_note(f, cfg)
     note_kind = ("failed" if "failed" in note else "waits" if "waits" in note else "")
     missing = ("room" if f.room_c is None else "valve") if f.path == PATH_WAITING else ""
+    frost = _frost_integral_note(f, cfg)
+    frost_kind = "" if not frost else ("ikept" if f.frost_integral_kept else "idecays")
     # An open window or its re-warm wait reads the same whatever the mode.
     mode = "" if f.window in (WINDOW_OPEN, WINDOW_REWARM) else (
         (f.mode or "") + ("+push" if f.full_push else ""))
     return "|".join((
         f.path, missing, mode, f.window or "", _num(f.setpoint_c), f.target_label,
         f.tado, note_kind, "held" if f.room_held else "", "gap" if f.room_bridged else "",
-        "off" if f.trv_off else "auto" if f.trv_scheduled else "",
+        "off" if f.trv_off else "auto" if f.trv_scheduled else "", frost_kind,
     ))
 
 
@@ -545,8 +575,9 @@ def describe_cycle(f: CycleFacts, cfg: RegulationConfig) -> str:
     tado = f"Tado {f.tado}{_tado_note(f, cfg)}"
     tail = f" | {room} | {trv} | {tado}"
     # The numbers at the end are what a line is read for: a long phrase is
-    # shortened, never the tail.
-    return clip(phrase, max(40, STATE_MAX_LEN - len(tail))) + tail
+    # shortened, never the tail, nor the kept integral's short note.
+    note = _frost_integral_note(f, cfg) if f.path in (PATH_REGULATED, PATH_OFF) else ""
+    return clip(phrase, max(40, STATE_MAX_LEN - len(tail) - len(note))) + note + tail
 
 
 def _trv_state(f: CycleFacts) -> str:

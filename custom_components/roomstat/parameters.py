@@ -467,6 +467,24 @@ class RegulationConfig:
     # 0.95 means ~5% reduction per 60s cycle → drains in ~15 min.
     integral_decay: float = 0.95
 
+    # The integral is kept while the room's target is at the frost level
+    # (2.27.0): neither decayed nor grown while the setpoint is at most
+    # min_target_c + integral_hold_frost_margin_c, 7.0 °C (Frost protection
+    # picked by hand, its stock 7.0 included, an open window's frost
+    # protection, Roomstat switched off), for at most integral_hold_frost_max_s of frost-level time without a
+    # break (counted from the cycles' own time steps); after that it decays
+    # as above, so an Off that lasts all day carries no stale integral.
+    # 0 = off (the integral decays at the frost level as at any target far
+    # below the room).  The integral is the room's slow balance, the push
+    # the hold has learned it needs; decaying it at -16 °C error emptied it
+    # within the hour, and the next hold ran short (14 Nov 2026, living
+    # room: Frost protection by hand 22:20-23:00 took it +0.42 -> +0.05, the
+    # room 0.27 under at 23:00, rebuilt to +0.64 only by morning).  An
+    # ordinary setback (Night, Away), a heat-up, a Boost and an overshoot
+    # still decay it (regulation.py, "Integral").
+    integral_hold_frost_margin_c: float = 2.0
+    integral_hold_frost_max_s: float = 10800.0
+
     # Rate limiting: minimum seconds between commands to Tado (battery saving)
     min_command_interval_s: float = 180.0
 

@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.26.0-blue)
+![Version](https://img.shields.io/badge/version-2.27.0-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -208,7 +208,9 @@ changes.
     the room's recent readings it predicts from;
   - what the controller has learned a room needs near its target (its
     integral) carries on after a restart or a settings change, unless the
-    room was down for more than an hour;
+    room was down for more than an hour. It is also kept while the room is
+    on Frost protection, its window is open or it is switched off, for up to
+    3 hours, so the room does not run short when it heats again;
   - a Boost saved by the window or presence logic comes back as Comfort.
 
 **Dashboard**

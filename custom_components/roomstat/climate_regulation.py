@@ -472,6 +472,12 @@ class RegulationMixin:
         # run by switching Roomstat off sends the off at once.
         if self._hvac_mode == HVACMode.OFF:
             self._note_cycle_completed(now)
+            # The hold's integral waits as at a frost-level target: kept for
+            # integral_hold_frost_max_s, then decaying (2.27.0; until then
+            # it waited however long the room was off).
+            dt = integration_step(now, self._last_regulation_ts, MAX_INTEGRATION_STEP_S)
+            self._last_regulation_ts = now
+            self._reg_state, _kept = self._regulator.switched_off(self._reg_state, dt)
             await self._async_keep_trv_off(now, user=trigger == "hvac_mode_change")
             self._activity_cycle(now, PATH_OFF)
             return
@@ -678,7 +684,7 @@ class RegulationMixin:
             )
             _LOGGER.debug(
                 "%s: %s | sp %.1f room %.2f%s %s | trv %.1f%s%s%s | cmd %s"
-                " P %+.2f I %+.2f | %s",
+                " P %+.2f I %+.2f%s | %s",
                 self._config_entry.title,
                 f"{result.mode} (full push)" if result.full_push else result.mode,
                 setpoint, room_temp,
@@ -690,7 +696,8 @@ class RegulationMixin:
                 "" if trv_slope is None else f" {trv_slope * 3600:+.1f} °C/h",
                 "off" if is_off_command(cmd, self._config.min_target_c)
                 else f"{cmd:.1f} ({cmd - tado_internal:+.1f} vs trv{lookahead})",
-                result.p_correction_c, result.i_correction_c, self._last_reason,
+                result.p_correction_c, result.i_correction_c,
+                " kept" if result.integral_kept else "", self._last_reason,
             )
 
         self._activity_cycle(

@@ -2454,10 +2454,18 @@ def integration_step(now: float, last_ts: float, max_s: float) -> float:
 INTEGRAL_KEEP_S = 3600.0
 
 
-def integral_record(integral_c: float, now: float, trv: str | None) -> dict[str, Any]:
+def integral_record(
+    integral_c: float, now: float, trv: str | None, held_s: float = 0.0
+) -> dict[str, Any]:
     """The hold's integral for the restore-state store: its value, when it
-    was saved and the TRV it was built on."""
-    return {"c": round(float(integral_c), 4), "ts": now, "trv": trv}
+    was saved and the TRV it was built on; and, while the target is at the
+    frost level, how long it has been kept there (``held_s``, 2.27.0;
+    regulation.frost_hold_step), so a reload in a Frost spell does not
+    start its limit again.  0 is left out (a save from before reads as 0)."""
+    record: dict[str, Any] = {"c": round(float(integral_c), 4), "ts": now, "trv": trv}
+    if isinstance(held_s, (int, float)) and math.isfinite(held_s) and held_s > 0:
+        record["held_s"] = round(float(held_s), 1)
+    return record
 
 
 def restore_integral(
@@ -2494,6 +2502,19 @@ def restore_integral(
     if data.get("trv") != trv:
         return None
     return max(lo_c, min(hi_c, float(value)))
+
+
+def restore_integral_held_s(data: Any) -> float:
+    """How long the integral taken back (restore_integral) had been kept at
+    a frost-level target (``held_s``, 2.27.0): 0 when the save has none (a
+    save from before) or it is not a finite number of seconds.  Only read
+    when restore_integral took the integral back."""
+    value = data.get("held_s") if isinstance(data, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return float(value)
 
 
 # ---------------------------------------------------------------------------

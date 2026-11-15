@@ -23,6 +23,7 @@ from typing import Any
 from homeassistant.util import dt as dt_util
 
 from .activity import (
+    PATH_OFF,
     PATH_REGULATED,
     PATH_SENSOR_LOST,
     WINDOW_IGNORED,
@@ -41,6 +42,7 @@ from .activity import (
 )
 from .climate_controllers import is_off_command
 from .preheat import PREHEAT_LABELS
+from .regulation import frost_level
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -199,7 +201,29 @@ class ActivityMixin:
                 facts.trv_fall_c_per_h = (
                     -trv_slope * 3600.0 if trv_slope is not None else None
                 )
+        self._activity_frost_integral(path, facts)
         return facts
+
+    def _activity_frost_integral(self, path: str, facts: CycleFacts) -> None:
+        """The hold's integral kept at a frost-level target (2.27.0): this
+        cycle's regulated decision, or Roomstat switched off (the off path
+        ran regulation's ``switched_off`` just before)."""
+        cfg = self._config
+        limit = cfg.integral_hold_frost_max_s
+        if limit <= 0:
+            return
+        if path == PATH_REGULATED:
+            result = self._last_result
+            if (result is None or facts.setpoint_c is None
+                    or not frost_level(facts.setpoint_c, cfg)):
+                return
+            kept = bool(result.integral_kept)
+        elif path == PATH_OFF:
+            kept = self._reg_state.integral_held_s <= limit
+        else:
+            return
+        facts.frost_integral_c = self._reg_state.integral_c
+        facts.frost_integral_kept = kept
 
     def _activity_tado(self, trv: Any, floor: float) -> tuple[str, float | None]:
         """What the valve has been told: our last command it took, else what

@@ -61,6 +61,7 @@ from .climate_controllers import (
     presence_startup_action,
     resolve_boost_restore,
     restore_integral,
+    restore_integral_held_s,
     window_startup_action,
 )
 from .climate_lookahead import LookaheadMixin
@@ -667,6 +668,10 @@ class RoomstatClimate(
                 )
                 if integral is not None:
                     self._reg_state.integral_c = integral
+                    # Kept at a frost-level target: its limit carries on.
+                    self._reg_state.integral_held_s = restore_integral_held_s(
+                        extra_dict.get("integral")
+                    )
                     if abs(integral) >= 0.005:
                         integral_note = f"; integral {integral:+.2f} carried on"
                 # The room slope's recent samples, if they still join up
@@ -1086,6 +1091,7 @@ class RoomstatClimate(
                 self._reg_state.integral_c,
                 time.time(),
                 self._config_entry.data.get(CONF_SOURCE_ENTITY_ID),
+                self._reg_state.integral_held_s,
             ),
         )
 

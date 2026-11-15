@@ -31,6 +31,14 @@ English everywhere: talking to the user, code, comments, commits and docs.
   Home Assistant, and check that the rooms come back loaded on the new
   version. The repo has no releases, so HACS installs from the default
   branch.
+- **Agents do the work, the main session reviews it** (owner, 15 Nov 2026:
+  "Always spin up agents with appropriate intelligence to do the work then
+  you review the outputs and ask appropriate agents to deploy and restart
+  HA."): the analysis, simulation, implementation and deployment are
+  delegated to agents on a model suited to each task; the main session
+  reviews their output before anything is released; the release steps
+  above (commit as the owner, push, the HACS update, the Home Assistant
+  restart, the checks) are then carried out by an agent too.
 - Commit titles: `feat: …`, `fix: …`, `docs: …` or `refactor: …`, with `!`
   for breaking changes (`feat!: …`).
 
@@ -399,6 +407,48 @@ Read this before changing `regulation.py` or `parameters.py`.
 - **Anti-windup:** no integration outside hold or while the command is
   saturated, plus the deadband decay above. The integral is clamped to
   ±2 °C.
+- **The integral is kept at a frost-level target** (2.27.0,
+  `regulation.frost_level`, `frost_hold_step`;
+  `RegulationConfig.integral_hold_frost_margin_c` 2.0,
+  `integral_hold_frost_max_s` 10800 = 3 h, 0 = off; not an option per
+  room, no migration): while the setpoint is at most `min_target_c` + 2.0,
+  7.0 °C (Frost protection picked by hand, an open window's frost
+  protection, Roomstat switched off), the integral is neither decayed nor grown, for
+  at most 3 h of frost-level time without a break
+  (`RegulationState.integral_held_s`, summed from each cycle's
+  `time_delta_s`: 0 on a first cycle, at most two cycles after a pause;
+  back to 0 on any cycle whose target is not at the frost level). Then it
+  decays as before: an Off that lasts all day carries no stale integral.
+  `RegulationResult.integral_kept` says when it held. Why: the decay runs
+  every cycle the room is 0.3 or more from the target, in any mode, so at
+  an error of about −16 the integral, the room's slow balance, was gone
+  within the hour and the next hold ran short. 14 Nov 2026, living room
+  (Kp 2.0, Ki 0.00036): Frost protection by hand 22:20–23:00 took it
+  +0.42 → +0.05 (0.42 × 0.95⁴⁰), the room was 0.27 under at 23:00 with the
+  valve at 59 %, and it took the night to rebuild to +0.64. Simulated (a
+  replay of that day and synthetic days with windows and Frost presses;
+  project docs `claude/roomstat-integral-hold-simulation-2026-11-15.md`
+  and `claude/heating-review-2026-11-15.md`, variant "Gf"): 15–25 % fewer
+  degree-minutes under the target after such an event, for 3–6 % more
+  valve-open time and night peaks up to 0.07 °C higher; commands and valve
+  on-periods within ±1 %; no effect at all on days without such an event
+  (`tests/test_integral_frost_hold.py` checks the simulator's traces
+  identical with the rule on and off on an ordinary schedule). Rejected
+  in the same run: holding it whenever the room is far over the target
+  (it also fires on bedroom Night setbacks: the study used 15 % more
+  valve-open time), from 0.5 over (it carries a stale integral into the
+  evening after a sunny day), through any heat-up (peaks +0.04, +11 %
+  valve-open time), and keeping a positive integral while under in hold
+  (valve on-periods +17–30 % in cool weather). Not covered, deliberately:
+  a Boost, and time 0.3–0.5 over the target (after a Boost, in the sun),
+  where it still drains by design; that, not the window, emptied it
+  before the 14 Nov evening sag. The margin is 2.0 (the simulation ran
+  1.0) so that the stock Frost protection preset (`PresetConfig`, 7.0 °C;
+  the owner's rooms sit at 5.0) counts too: at 7.0 the command is a real
+  setpoint, not an off, and the integral is still kept; a test keeps the
+  two defaults together. Night, Away, Comfort and a temperature set by
+  hand can go down to 5.0 (the number entities' and the thermostat's
+  minimum), so one set at 7.0 or lower is a frost-level target too.
 - **Command clamp 5–25 °C.** Tado V3+ rejects anything above 25 (upstream
   sent up to 30, so V3+ rooms never heated). Clamp in the regulator, not at
   send time, so anti-windup stays honest.
@@ -844,6 +894,29 @@ is updating.
   error). Not kept: the full-push flag (above), and the integral over an
   hour-long outage or after summer mode (`_exit_summer_mode` starts fresh).
   Tested in `tests/test_integral_restore.py`.
+- **The integral at the frost level on the entity (2.27.0;** the rule is
+  under "Regulation concepts"): Frost protection and an open window's
+  frost protection call the regulator with the frost setpoint, so the rule
+  covers them as it is. Switched off, no regulator cycle runs
+  (`_async_keep_trv_off`), and until 2.27.0 the integral simply waited,
+  however long the room was off (nothing reset it on off or on Off → Heat,
+  which only sets `_last_regulation_ts` to 0 so the first cycle's step is
+  0; and a restart while off took it back, the save being fresh). Now the
+  off path runs `FeedforwardPiRegulator.switched_off` each cycle, with the
+  step from `integration_step` (`_last_regulation_ts` now moves while
+  off): the same 3 h, the time carried on from a Frost spell before it,
+  then the decay once per cycle as in a regulated cycle; with the limit at
+  0 it waits as before. The held time rides along with the integral
+  (`integral` → `held_s`, `integral_record` leaves 0 out,
+  `restore_integral_held_s`; taken back only with the integral, under
+  `restore_integral`'s rules; a save from before reads as 0), so a reload
+  in a Frost spell does not start the 3 h again; the restart's own gap is
+  not counted (its first cycle's step is 0). The decision line names it
+  when it is at least ±0.05 (`CycleFacts.frost_integral_c`, regulated and
+  off paths): `…; integral +0.42 kept`, and once the 3 h are up `…;
+  integral +0.30 decays after 3 h` (a new line at once, `decision_key`);
+  the note is never cut by the phrase's shortening. The debug line marks
+  `I +0.42 kept`. Tested in `tests/test_integral_frost_hold.py`.
 - **The room slope across a restart (2.9.1):** the heat-up end and the stop
   predict from the 15-min slope, which needs 7.5 min of readings. The
   samples ride along in the restore-state extra data (`slope`,
@@ -1968,6 +2041,14 @@ ruff check .
   entity: saved with the room, carried on by a reload and used by the first
   hold after it, not after an hour, from another TRV or a save from
   before).
+- `tests/test_integral_frost_hold.py` (2.27.0: the rule on the regulator,
+  kept at the frost level and still decaying elsewhere, the margin, the
+  3-h limit and its counter, the limit at 0 as before, `switched_off`; the
+  activity line and the record; the simulator's traces identical on an
+  ordinary schedule; through the entity: Frost protection by hand and
+  back, compared with the rule off, an open window, more than 3 h, a
+  reload in a Frost spell, a save from before, switched off; the living
+  room's 14 Nov 2026 evening replayed, +0.42 kept against +0.05).
 - `tests/test_valve_step.py` (2.25.2: a half-degree Tado zone through the
   entity: commands on the step, nothing sent again, fewer commands, a
   minimum change of 0.1 no dearer than 0.3, the activity line, a command

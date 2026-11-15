@@ -84,12 +84,24 @@ The integral only moves in hold, and only near the target:
    the same direction as the error, and in every other mode.
 2. It only accumulates when |error| < deadband.  Outside, it *decays*
    toward zero, so a heat-up never winds it up.
+3. It is kept while the target is at the frost level (2.27.0, see
+   :func:`frost_level`): Frost protection, an open window's frost
+   protection, and Roomstat switched off (``switched_off``, run by the
+   entity in place of a cycle).  Neither decayed nor grown there, for at
+   most ``integral_hold_frost_max_s`` (3 h) of frost-level time without a break
+   (``RegulationState.integral_held_s``, counted from the cycles' own time
+   steps); then it decays as in 2.  The integral is the room's slow
+   balance, the push the hold has learned it needs: decaying it at a 16 °C
+   error emptied it within the hour, and the next hold ran short (14 Nov
+   2026, living room: 40 min of Frost protection took it +0.42 -> +0.05,
+   the room was 0.27 under after).  An ordinary setback (Night, Away), a
+   heat-up, a Boost and an overshoot still decay it.
 """
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .parameters import RegulationConfig
 
@@ -119,6 +131,9 @@ class RegulationState:
     mode: str = MODE_HOLD
     last_room_c: float | None = None   # the previous cycle's raw reading
     full_push: bool = False            # this hold's push reached hold_push_c
+    # Seconds the target has been at the frost level without a break (the
+    # integral is kept for integral_hold_frost_max_s of it); 0 otherwise.
+    integral_held_s: float = 0.0
 
 
 @dataclass
@@ -136,6 +151,7 @@ class RegulationResult:
     room_held: bool = False        # the reading fell fast: the previous one was used
     full_push: bool = False        # a hold that ends like a heat-up (hold_push_c)
     lookahead_c: float = 0.0       # taken off the hold command for the valve's look-ahead
+    integral_kept: bool = False    # kept at a frost-level target (frost_level)
 
 
 def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
@@ -159,6 +175,40 @@ def resume_mode(trv_setpoint_c: float | None, config: RegulationConfig) -> str:
     if trv_setpoint_c <= config.min_target_c + 0.05:
         return MODE_COAST
     return MODE_HOLD
+
+
+def frost_level(setpoint_c: float, config: RegulationConfig) -> bool:
+    """Whether a target is at the frost level for the integral (point 3 of
+    the module docstring): at most ``integral_hold_frost_margin_c`` over the
+    lowest command, 7.0 °C by default, so the stock Frost protection preset
+    counts (at 7.0 the command is a real setpoint, not an off).  Frost
+    protection, an open window's frost protection and Roomstat switched
+    off; not an ordinary setback."""
+    return (
+        math.isfinite(setpoint_c)
+        and setpoint_c <= config.min_target_c + config.integral_hold_frost_margin_c
+    )
+
+
+def frost_hold_step(
+    at_frost_level: bool, held_s: float, time_delta_s: float, config: RegulationConfig
+) -> tuple[bool, float]:
+    """Whether the integral is kept this cycle, and the frost-level time
+    counted so far (``RegulationState.integral_held_s``).
+
+    The time is the cycles' own time steps (``time_delta_s``: 0 on the first
+    cycle, at most two cycles after a pause), and starts again at 0 on any
+    cycle whose target is not at the frost level.  Kept while that time is
+    at most ``integral_hold_frost_max_s``; never with the limit at 0 (the
+    rule off)."""
+    if not at_frost_level:
+        return False, 0.0
+    if not math.isfinite(held_s) or held_s < 0:
+        held_s = 0.0
+    if math.isfinite(time_delta_s) and time_delta_s > 0:
+        held_s += time_delta_s
+    limit = config.integral_hold_frost_max_s
+    return limit > 0 and held_s <= limit, held_s
 
 
 def lookahead_correction_c(
@@ -283,6 +333,23 @@ class FeedforwardPiRegulator:
             return MODE_COAST, False
         return MODE_HOLD, full_push
 
+    def switched_off(
+        self, state: RegulationState, time_delta_s: float
+    ) -> tuple[RegulationState, bool]:
+        """One cycle with Roomstat switched off (no regulation; the target is
+        the frost level): the integral as at a frost-level target, kept for
+        ``integral_hold_frost_max_s``, then decaying once per cycle as
+        :meth:`compute` decays it.  Returns the new state and whether it was
+        kept.  With the limit at 0 (the rule off) nothing changes: the
+        integral waits, as before 2.27.0."""
+        if self.cfg.integral_hold_frost_max_s <= 0:
+            return state, False
+        kept, held_s = frost_hold_step(True, state.integral_held_s, time_delta_s, self.cfg)
+        integral = state.integral_c
+        if not kept and math.isfinite(time_delta_s) and time_delta_s > 0:
+            integral *= self.cfg.integral_decay
+        return replace(state, integral_c=integral, integral_held_s=held_s), kept
+
     def compute(
         self,
         setpoint_c: float,
@@ -398,9 +465,14 @@ class FeedforwardPiRegulator:
         )
         is_saturated = abs(final_command - (raw_command - lookahead)) > _SATURATION_TOLERANCE_C
 
-        # 6. Integral (see the module docstring)
+        # 6. Integral (see the module docstring).  At a frost-level target it
+        # is kept, neither decayed nor grown, for integral_hold_frost_max_s.
         new_integral = state.integral_c
-        if time_delta_s > 0:
+        integral_kept, integral_held_s = frost_hold_step(
+            frost_level(setpoint_c, self.cfg), state.integral_held_s,
+            time_delta_s, self.cfg,
+        )
+        if time_delta_s > 0 and not integral_kept:
             commanded = raw_command - lookahead
             saturated_high = commanded > self.cfg.max_target_c
             saturated_low = commanded < self.cfg.min_target_c
@@ -424,7 +496,7 @@ class FeedforwardPiRegulator:
 
         new_state = RegulationState(
             integral_c=new_integral, mode=mode, last_room_c=room_temp_c,
-            full_push=full_push,
+            full_push=full_push, integral_held_s=integral_held_s,
         )
 
         return RegulationResult(
@@ -439,4 +511,5 @@ class FeedforwardPiRegulator:
             room_held=room_held,
             full_push=full_push,
             lookahead_c=round(lookahead, 2),
+            integral_kept=integral_kept,
         )
