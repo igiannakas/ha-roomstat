@@ -196,14 +196,21 @@ class TestOlderSaves:
 
     def test_the_study_drops_its_7_nov_heatup_and_keeps_its_braking(self):
         """Its other heat-ups give 19.6 × 0.83 = 16.2 min, within the 2-min
-        dead-band of the 17.8 it has: the braking time stays."""
+        dead-band of the 17.8 it has: the braking time stays.  2.27.1 also
+        drops its 7 Nov 05:30 heat-up, which the hold ran (0.58 under, peak
+        demand 2.0): the coast left is 20.6 min (× 0.83 = 17.1), and the
+        braking time stays all the same."""
         t = _tuner("study")
         assert t._heatups[-1].coast_not_radiator
         assert t.active_tuning().td_s == pytest.approx(1070.4)
         notes = t.take_load_notes(_when)
-        assert len(notes) == 3 and notes[0].startswith("the heat-up of 07 Nov 15:17 rose +0.80 °C")
+        assert len(notes) == 4 and notes[0].startswith("the heat-up of 07 Nov 15:17 rose +0.80 °C")
+        assert notes[3] == (
+            "the heat-up of 07 Nov 05:30 started 0.58 below and the hold ran it, never at "
+            "full power (overshoot +0.25 °C, coast 20 min): not the radiator's, no longer "
+            "counted")
         # 2.24.2: and its dead time and rate, from the room's own creep.
-        assert notes[1:] == [
+        assert notes[1:3] == [
             "the heat-up of 07 Nov 15:17: its dead time (28.6 min) and heating rate "
             "(1.08 °C/h) may come from the room's own rise after the valve shut: no "
             "longer counted",
@@ -222,7 +229,7 @@ class TestOlderSaves:
     def test_a_new_save_is_not_checked_again(self):
         t = _tuner("second")
         saved = t.as_dict()
-        assert saved["coast_rules"] == 3
+        assert saved["coast_rules"] == 4                    # 2.27.1: the hold-run re-check
         again = _tuner("second", state=copy.deepcopy(saved))
         assert again.take_load_notes(_when) == []
         # Saved to a tenth of a second, as every save is.

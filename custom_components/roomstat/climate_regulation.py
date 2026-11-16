@@ -317,6 +317,10 @@ class RegulationMixin:
                     room_temp_ts=self.coordinator.data.get("room_temp_ts"),
                     window=self._window_open(),
                     lookahead_c=held_lookahead,
+                    # Full power: a heat-up, or a hold's full push (2.27.1).
+                    # A heat-up episode that never ran so is the hold's, and
+                    # the tuner counts nothing of it.
+                    full_power=result.mode == MODE_HEAT or bool(result.full_push),
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop

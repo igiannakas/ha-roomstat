@@ -181,7 +181,10 @@ class TestTheStudysDeadTime:
         assert before.heatup_model() == (pytest.approx(1.4186, abs=1e-3),
                                          pytest.approx(1111.2, abs=0.5))
         t = _tuner(copy.deepcopy(STUDY_12_NOV))
-        m = t._heatups[3]
+        # 2.27.1 also drops the two the hold ran (7 Nov 05:30 and the 10 Nov
+        # tap): neither had a dead time or heating rate.
+        m = t._heatups[2]
+        assert m.start_ts == pytest.approx(1794064634.186143)
         assert m.coast_not_radiator and m.theta_s is None and m.rate_c_per_h is None
         assert t.heatup_model() == (pytest.approx(1.757, abs=1e-3), None)
         assert t._simc_ki() is None
@@ -194,9 +197,15 @@ class TestTheStudysDeadTime:
             "longer counted",
             "dead time 18.5 min→not known until 2 heat-ups give one; "
             "heating rate 1.42→1.76 °C/h",
+            "the heat-up of 07 Nov 05:30 started 0.58 below and the hold ran it, never at "
+            "full power (overshoot +0.25 °C, coast 20 min): not the radiator's, no longer "
+            "counted",
+            "the heat-up of 10 Nov 15:01 started 0.47 below and the hold ran it, never at "
+            "full power (overshoot +0.14 °C, coast 21 min): not the radiator's, no longer "
+            "counted",
         ]
         assert t.take_load_notes(_when) == []
-        assert t.as_dict()["coast_rules"] == 3
+        assert t.as_dict()["coast_rules"] == 4
         assert _tuner(t.as_dict()).take_load_notes(_when) == []
 
     def test_ki_heads_back_to_the_configured_value(self):
@@ -209,10 +218,13 @@ class TestTheStudysDeadTime:
         assert tgt.ki > t.active_tuning().ki
 
     def test_two_more_heat_ups_give_it_a_dead_time_again(self):
-        """The next one pushes 6 Nov's (8.5 min) out of the five kept, so a
-        dead time needs two: until then preheat uses its own start-up delay
-        (20 min by default) and Ki its configured value."""
+        """Until 2.27.1 the next one pushed 6 Nov's (8.5 min) out of the five
+        kept, so a dead time needed two.  2.27.1 drops the two heat-ups the
+        hold ran, so three are kept and 6 Nov's stays: the next one gives a
+        dead time again with it (until then preheat uses its own start-up
+        delay, 20 min by default, and Ki its configured value)."""
         t = _tuner(copy.deepcopy(STUDY_12_NOV))
+        assert len(t._heatups) == 3 and t.heatup_model()[1] is None
         for k, theta in enumerate((540.0, 600.0)):
             m = A.HeatupMetrics.from_dict(copy.deepcopy(STUDY_12_NOV["heatups"][0]))
             m.start_ts = 1794552000.0 + k * 86400.0
@@ -220,8 +232,8 @@ class TestTheStudysDeadTime:
             m.theta_s = theta
             t._on_heatup(m, m.ts)
             if k == 0:
-                assert t.heatup_model()[1] is None
-        assert t.heatup_model()[1] == pytest.approx(570.0)
+                assert t.heatup_model()[1] == pytest.approx((509.029494 + 540.0) / 2)
+        assert t.heatup_model()[1] == pytest.approx(540.0)
 
 
 @e2e

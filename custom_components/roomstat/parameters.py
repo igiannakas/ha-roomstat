@@ -287,6 +287,24 @@ class AutotuneConfig:
     # keeps the first kind and the braking time learned from them, and
     # drops the second (Autotuner._restart_gains, 2.19.1).
     full_power_step_c: float = 0.8
+    # A heat-up the hold ran, never at full power (2.27.1): no cycle of it
+    # was in mode heat or a hold's full push (AutotuneSample.full_power).
+    # Its coast and overshoot are the hold's and the stop's, not a full
+    # radiator's after full power, which is what the braking time is, and its
+    # rise is not the heating rate preheat plans with: it is judged and
+    # logged, and nothing of it is counted or kept (Autotuner._on_heatup).
+    # 15 Nov 2026, living room: Frost protection by hand 17:42-18:26, then
+    # back 0.43 under; the hold pushed +1.4 over the valve's reading, the
+    # stop came 18 min in on a rise still speeding up, and the room peaked
+    # +0.45 (people in, CO2 ~1000 ppm all evening): booked as a heat-up, its
+    # 16-min coast and +0.45 took the braking time 16.4 -> 21.3 min.  A save
+    # from before has no record of how an episode ran: one that started
+    # under full_power_step_c with its peak demand in the first 15 min
+    # (demand0_c) under full_power_demand_c is taken as hold-run and dropped
+    # once on load (Autotuner._recheck_hold_run).  RegulationConfig's
+    # hold_push_c (a hold's push from which it is a full push; a test keeps
+    # them equal): a heat command is 25 °C, 5-12 °C over the valve's reading.
+    full_power_demand_c: float = 2.5
     heatup_max_s: float = 5 * 3600.0   # give up if the target is not reached
     heatup_settle_s: float = 45 * 60.0 # flat/falling this long after the peak
     # A TRV demand this high after the demand went <= 0 means heating

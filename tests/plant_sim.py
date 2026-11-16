@@ -358,6 +358,8 @@ class RoomSim:
                 eligible=extra.get("eligible", True),
                 command_saturated=res.is_saturated,
                 room_temp_ts=self.sensor_ts,
+                # As climate_regulation.py tells it (2.27.1).
+                full_power=res.mode == self.reg_mod.MODE_HEAT or bool(res.full_push),
             ))
 
         tr = self.trace

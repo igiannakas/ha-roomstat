@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.27.0-blue)
+![Version](https://img.shields.io/badge/version-2.27.1-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -259,9 +259,15 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   leftover heat (more than 45 minutes' worth) is not counted at all: it
   came from something else. That heat-up's dead time and heat-up rate are
   then measured only up to the moment the valve shut.
+- It learns only from heat-ups that ran at full power. Below 0.8 °C short
+  of the target the hold runs the climb instead of a full heat-up, unless
+  its push gets strong enough to count as one. How such a climb ends, and
+  how far it overshoots, says nothing about the radiator's leftover heat
+  that the braking time stands for. Such a heat-up is shown in the activity
+  log with what it measured, and nothing of it is counted (since 2.27.1).
 - Saved heat-ups are checked once against those rules when the room starts
-  (since 2.23.2 and 2.24.2). A braking time that such a heat-up had pulled
-  up goes back to what the room's other heat-ups give. A dead time or
+  (since 2.23.2, 2.24.2 and 2.27.1). A braking time that such a heat-up had
+  pulled up goes back to what the room's other heat-ups give. A dead time or
   heat-up rate it may have taken from the room's own rise is dropped. The
   activity log says what changed.
 - The first values appear after the first heat-up, and they settle in about a
@@ -285,8 +291,8 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
 - Changing Kp or Ki yourself keeps what full-power heat-ups taught (dead
   time, heating rate, coast, the learned braking time, and so preheat's
   heat-up time): Kp and Ki play no part in them. It restarts only what the
-  gains shaped: their own adjustments, the hold windows, and heat-ups that
-  started less than 0.8 °C below the target (the hold ran those).
+  gains shaped: their own adjustments and the hold windows (heat-ups the
+  hold ran are not kept at all).
 
 You can set the braking time by hand instead, under **Configure →
 Controller → Heat-up braking time**, with **Learn heat-up braking** off.

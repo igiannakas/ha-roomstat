@@ -29,6 +29,8 @@ injected test signals:
   heating that resumes after a window: the room then re-warms on its own
   (walls, furniture and radiator kept their heat) and its rise, coast and
   peak say nothing about the radiator (``AutotuneConfig.window_settle_s``).
+  Nor one the hold ran, never at full power: its coast and overshoot are
+  the hold's and its stop's (``AutotuneConfig.full_power_demand_c``).
 * **Holds** (steady setpoint after a heat-up) give the mean offset and
   any oscillation.
 
@@ -291,6 +293,13 @@ class AutotuneSample:
     # What the valve look-ahead (lookahead.py) took off the command the TRV
     # holds: the valve answers it as Roomstat's push, so it counts back in.
     lookahead_c: float = 0.0
+    # This cycle's command was full power: the regulator's mode heat, or a
+    # hold's full push (regulation.py, hold_push_c).  False: the hold (or a
+    # coast or stop) decided it.  None: not told (a caller that does not
+    # know), taken as full power, as before 2.27.1.  A heat-up none of whose
+    # cycles was at full power is the hold's, not the radiator's
+    # (AutotuneConfig.full_power_demand_c).
+    full_power: bool | None = None
 
     @property
     def demand_c(self) -> float | None:
@@ -332,6 +341,12 @@ class HeatupMetrics:
     # coast and overshoot are not counted (2.23.2, :func:`analyse_heatup`).
     # ``coast_rise_c`` still says how far the room went.
     coast_not_radiator: bool = False
+    # Whether any cycle of it was at full power (mode heat or a hold's full
+    # push, AutotuneSample.full_power), 2.27.1.  False: the hold ran it, and
+    # nothing of it is counted (Autotuner._on_heatup), so a stored one is
+    # True, or None when not known (a save from before, or a caller that
+    # does not say).
+    full_power: bool | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {k: (round(v, 6) if isinstance(v, float) else v)
@@ -362,6 +377,8 @@ class HeatupMetrics:
             return None
         m.truncated, m.crossed = bool(m.truncated), bool(m.crossed)
         m.coast_not_radiator = m.coast_not_radiator is True
+        if not isinstance(m.full_power, bool):
+            m.full_power = None
         return m
 
 
@@ -421,9 +438,10 @@ _COAST_WINDOW_S = 600.0
 # The coast rules a save was measured under: 2 since 2.23.2 (a coast that
 # speeds up again ends, and one longer than any radiator's is not counted),
 # 3 since 2.24.2 (after such a coast, the dead time and heating rate are
-# measured only up to the stop).  An older save is checked once when taken
-# back (:meth:`Autotuner._recheck_coasts`).
-_COAST_RULES = 3
+# measured only up to the stop), 4 since 2.27.1 (a heat-up the hold ran,
+# never at full power, is not kept).  An older save is checked once when
+# taken back (:meth:`Autotuner._recheck_coasts`).
+_COAST_RULES = 4
 
 
 def _coast_end(ts: list[float], ys: list[float], cross_index: int,
@@ -496,8 +514,12 @@ def analyse_heatup(
     cross_ts: float | None,
     tuning: Tuning,
     truncated: bool = False,
+    full_power: bool | None = None,
 ) -> HeatupMetrics | None:
     """Extract dead time, heating rate, coast and overshoot from a heat-up.
+
+    ``full_power`` is recorded as it is given (whether any cycle ran at full
+    power, :class:`HeatupMetrics`); the measurement does not depend on it.
 
     ``samples`` are (ts, room_temp, demand), one per regulation cycle, with
     wild reports already removed by the tuner's :class:`SpikeFilter`.
@@ -630,7 +652,29 @@ def analyse_heatup(
         crossed=cross_ts is not None,
         later_rise_c=later_rise if later_rise > 0 else None,
         coast_not_radiator=not_radiator,
+        full_power=full_power,
     )
+
+
+def inferred_full_power(step_c: float, demand0_c: float | None,
+                        cfg: AutotuneConfig) -> bool | None:
+    """How a heat-up ran, for one whose cycles did not say (a save from
+    before 2.27.1): at full power when it started ``full_power_step_c`` or
+    more below the target (the regulator heats from there) or its peak TRV
+    demand in the first 15 min reached ``full_power_demand_c`` (a heat
+    command or a hold's full push); the hold's when neither; None when it
+    started closer and its demand is not known.
+
+    A hold that became a full push only after its first 15 min reads as the
+    hold's here: the one case this cannot tell, and the side that loses an
+    episode rather than counts a wrong one."""
+    if not _finite(step_c):
+        return None
+    if step_c >= cfg.full_power_step_c:
+        return True
+    if demand0_c is None or not _finite(demand0_c):
+        return None
+    return demand0_c >= cfg.full_power_demand_c
 
 
 def analyse_hold(
@@ -717,6 +761,24 @@ class _HeatupTracker:
         self.peak_ts = start_ts
         self.abort_reason = ""
         self._last_cycle_ts = start_ts
+        # How it ran (AutotuneSample.full_power): a cycle at full power, a
+        # cycle the hold decided.  ``told_from_start`` is False for one
+        # taken back from a save from before 2.27.1, which did not keep it.
+        self.ran_full = False
+        self.ran_held = False
+        self.told_from_start = True
+
+    def full_power(self, step_c: float, demand0_c: float | None) -> bool | None:
+        """Whether it ran at full power (HeatupMetrics.full_power): True once
+        any cycle did; False when its cycles said so from the start and none
+        did; None when none said (a caller that does not know).  One taken
+        back from an older save is judged by :func:`inferred_full_power`
+        unless a cycle since showed full power."""
+        if self.ran_full:
+            return True
+        if not self.told_from_start:
+            return inferred_full_power(step_c, demand0_c, self.cfg)
+        return False if self.ran_held else None
 
     def _stop(self, reason: str, ts: float) -> str:
         """End early.  Keep what is valid: the rising phase (dead time, rate)
@@ -749,6 +811,9 @@ class _HeatupTracker:
             "peak_c": self.peak_c if _finite(self.peak_c) else None,
             "peak_ts": self.peak_ts,
             "last_cycle_ts": self._last_cycle_ts,
+            "ran_full": self.ran_full,
+            "ran_held": self.ran_held,
+            "told_from_start": self.told_from_start,
         }
 
     @classmethod
@@ -785,6 +850,11 @@ class _HeatupTracker:
         if _finite(peak, peak_ts):
             tr.peak_c, tr.peak_ts = float(peak), float(peak_ts)
         tr._last_cycle_ts = float(last)
+        # Before 2.27.1 how it ran was not kept: judged at its end from its
+        # step and demand, unless a cycle after the restart shows full power.
+        tr.ran_full = d.get("ran_full") is True
+        tr.ran_held = d.get("ran_held") is True
+        tr.told_from_start = d.get("told_from_start") is True
         return tr
 
     def add(self, s: AutotuneSample) -> str:
@@ -804,6 +874,12 @@ class _HeatupTracker:
                 # once the room fell back.  The coast ends here; counting
                 # the new heat as coast would inflate the braking time.
                 return _DONE
+        # How this cycle ran (not the new heat that ends it, above).
+        if s.full_power is True:
+            self.ran_full = True
+        elif s.full_power is False:
+            self.ran_held = True
+        if d is not None:
             if d > 0.2:
                 self.demand_was_positive = True
             elif d <= 0 and self.demand_was_positive and self.cross_ts is None:
@@ -1060,10 +1136,14 @@ class Autotuner:
         full power, then coasted on the braking time: its dead time, heating
         rate, coast and overshoot are the radiator's and the braking time's,
         and they stay, with the braking time learned from them (preheat's
-        heat-up time and the SIMC Ki come from them too).  Restarted: the
-        gains' own trims and votes, the hold windows (the gains made them),
-        heat-up episodes that started closer (a hold ran them), and a gain
-        change still on trial.  A braking-time change on trial stays on
+        heat-up time and the SIMC Ki come from them too); since 2.27.1 so
+        does one a hold's full push ran (``HeatupMetrics.full_power``), the
+        radiator full all the same.  Restarted: the gains' own trims and
+        votes, the hold windows (the gains made them), heat-up episodes that
+        started closer and are not known to have run at full power (a save
+        from before 2.27.1; one a hold ran is no longer kept at all) and
+        one in progress like them, and a gain change still on trial.  A
+        braking-time change on trial stays on
         trial, falling back to the new gains, and is not rolled back for an
         ordinary oscillation (the new gains are the likelier cause; a large
         swing's emergency detune still rolls it back).  Until 2.19.0 a
@@ -1079,11 +1159,14 @@ class Autotuner:
             else:
                 p["prev"] = _tuning_dict(Tuning(b.kp, b.ki, prev.td_s))
                 p["ref_osc"] = True
-        kept = [m for m in self._heatups if m.step_c >= c.full_power_step_c]
+        # Since 2.27.1 a hold-run heat-up is never kept, and one that ran at
+        # full power says so; one from before is judged by its step and
+        # demand (a full push from closer stays; unknown goes, as until then).
+        kept = [m for m in self._heatups if self._ran_full_power(m) is True]
         dropped = len(self._heatups) - len(kept)
         self._heatups = kept
         tracker = self._heatup
-        if tracker is not None and tracker.samples and (
+        if tracker is not None and tracker.samples and not tracker.ran_full and (
             # The step as the finished episode will measure it.
             tracker.setpoint_c - _median([r for _, r, _ in tracker.samples[:4]])
             < c.full_power_step_c
@@ -1268,7 +1351,8 @@ class Autotuner:
         s = AutotuneSample(s.ts, sp, room, s.tado_internal_c, s.tado_setpoint_c,
                            s.eligible and sp is not None, s.command_saturated,
                            s.room_temp_ts if _finite(s.room_temp_ts) else None,
-                           window=bool(s.window), lookahead_c=s.lookahead_c)
+                           window=bool(s.window), lookahead_c=s.lookahead_c,
+                           full_power=s.full_power if isinstance(s.full_power, bool) else None)
         resumed = (
             self._prev_ts is not None
             and (not self._prev_eligible or s.ts - self._prev_ts > self.cfg.max_gap_s)
@@ -1286,11 +1370,14 @@ class Autotuner:
                 hu = self._heatup
                 self._heatup = None
                 self._last_heatup_end_ts = s.ts
-                event = self._on_heatup(analyse_heatup(
+                m = analyse_heatup(
                     hu.samples, start_ts=hu.start_ts, setpoint_c=hu.setpoint_c,
                     cfg=self.cfg, cross_ts=hu.cross_ts, tuning=self.active_tuning(),
                     truncated=st == _TRUNCATED,
-                ), s.ts)
+                )
+                if m is not None:
+                    m.full_power = hu.full_power(m.step_c, m.demand0_c)
+                event = self._on_heatup(m, s.ts)
             elif st == _ABORT:
                 self.last_event = f"heat-up discarded ({self._heatup.abort_reason})"
                 self._heatup = None
@@ -1431,6 +1518,8 @@ class Autotuner:
             self.last_event = "heat-up too short to analyse"
             self._set_verdict(["nothing learned"])
             return None
+        if m.full_power is False:
+            return self._on_hold_run_heatup(m, now)
         c = self.cfg
         self._heatups.append(m)
         del self._heatups[:-c.history_len]
@@ -1541,6 +1630,36 @@ class Autotuner:
                 notes.append("the last change passed its trial")
         reason = self._maybe_update(now, "heat-up")
         self._set_verdict(notes)
+        return reason
+
+    def _on_hold_run_heatup(self, m: HeatupMetrics, now: float) -> str | None:
+        """A heat-up the hold ran, never at full power (2.27.1,
+        ``AutotuneConfig.full_power_demand_c``): logged with what it
+        measured, and nothing of it counted.
+
+        The braking time is a full radiator's coast after full power: a
+        heat-up ends on it, then the radiator's heat carries the room.  A
+        hold modulates the valve and ends on the stop's forecast, often
+        while the rise is still speeding up (the stop came 18 min into the
+        living room's 15 Nov one, with the radiator's heat still arriving),
+        so its coast and overshoot measure the hold and the stop, and its
+        small rise at part output is not the heating rate or dead time
+        preheat plans a heat-up with.  So it is not kept: it votes on no
+        trim, takes no place among the ``history_len`` heat-ups the model
+        is made of, and does not count in a change's trial.  The hold's
+        own gains are judged on hold windows, as before."""
+        self._counters["heatups"] += 1
+        os_txt = f"{m.overshoot_c:+.2f} °C" if m.overshoot_c is not None else "unknown"
+        self.last_event = (
+            f"heat-up{' (cut short)' if m.truncated else ''} from {m.step_c:.2f} below, "
+            f"run by the hold: overshoot {os_txt}"
+            + (f", coast {m.coast_s / 60:.0f} min" if m.coast_s is not None else "")
+        )
+        reason = self._maybe_update(now, "heat-up")
+        self._set_verdict([
+            "never at full power, so not the radiator's coast, overshoot or heating "
+            "rate: nothing counted"
+        ])
         return reason
 
     def _on_hold(self, m: HoldMetrics | None, now: float) -> str | None:
@@ -1992,6 +2111,77 @@ class Autotuner:
             self._recheck_radiator_bound()
         if rules < 3:
             self._recheck_rise_after_coast()
+        if rules < 4:
+            self._recheck_hold_run()
+
+    def _ran_full_power(self, m: HeatupMetrics) -> bool | None:
+        """Whether a kept heat-up ran at full power: as it recorded, or for
+        one from before 2.27.1 as :func:`inferred_full_power` judges it."""
+        if isinstance(m.full_power, bool):
+            return m.full_power
+        return inferred_full_power(m.step_c, m.demand0_c, self.cfg)
+
+    def _recheck_hold_run(self) -> None:
+        """Since 2.27.1 a heat-up the hold ran, never at full power, is not
+        kept (:meth:`_on_hold_run_heatup`).  A save from before has no
+        record of how its heat-ups ran: each one is judged by
+        :func:`inferred_full_power` from its step and its peak demand in the
+        first 15 min.  One taken as the hold's is dropped, with its coast,
+        overshoot, dead time and heating rate, and the "more braking" trim
+        step its overshoot voted for is taken back (÷ 1.15, never under 1.0,
+        as :meth:`_recheck_radiator_bound`); a braking time it had pulled up
+        goes down to what the others give (:meth:`_lower_braking_to_model`).
+        The others stay as saved (judged the same way wherever how they
+        ran matters, :meth:`_ran_full_power`); one that started closer with
+        no demand saved stays unknown.
+
+        Not repaired: a "less braking" step a hold-run landing voted for (a
+        step needs ``confirm_up`` votes and which episodes cast them is not
+        saved; it stays, a step towards a later stop that the next
+        full-power landings vote on), a vote still counted, and the gains'
+        own changes, which follow the model at the tuner's usual pace.  15 Nov 2026, living room: the 18:26
+        recovery from Frost protection (0.43 under, peak demand 1.6, +0.45,
+        a 16-min coast) had taken the trim 1.15 -> 1.32 and the braking time
+        16.4 -> 21.3 min; without it, 16.4.
+        """
+        c = self.cfg
+        dropped = [m for m in self._heatups if self._ran_full_power(m) is False]
+        if not dropped:
+            return
+        before = self._model()
+        target_before = self._braking_target()
+        self._heatups = [m for m in self._heatups if all(m is not d for d in dropped)]
+        for m in dropped:
+            voted_more = m.overshoot_c is not None and m.overshoot_c > c.overshoot_target_c + 0.1
+            took_back = voted_more and self._trim["td_s"] > 1.0
+            if took_back:
+                self._trim["td_s"] = max(1.0, self._trim["td_s"] / 1.15)
+            measured = [f"overshoot {m.overshoot_c:+.2f} °C" if m.overshoot_c is not None else "",
+                        f"coast {m.coast_s / 60:.0f} min" if m.coast_s is not None else ""]
+            measured_txt = ", ".join(x for x in measured if x)
+            self._load_notes.append((
+                m.start_ts,
+                f"the heat-up of {{when}} started {m.step_c:.2f} below and the hold ran it, "
+                "never at full power"
+                + (f" ({measured_txt})" if measured_txt else "")
+                + ": not the radiator's, no longer counted"
+                + ("; the more braking it voted for (×1.15) is taken back" if took_back else "")))
+        self._note_model_change(before)
+        # Only what they had pulled up comes down: a braking time above its
+        # target for other reasons (a smoothed step towards less braking,
+        # on trial) carries on at the tuner's pace.
+        target_after = self._braking_target()
+        if target_before is not None and target_after is not None:
+            if target_after < target_before:
+                self._lower_braking_to_model(max_drop_s=target_before - target_after)
+
+    def _braking_target(self) -> float | None:
+        """What the model gives the braking time (the coast × its trim), or
+        None with no coast learned."""
+        coast = self._model()["coast_s"]
+        if coast is None:
+            return None
+        return _clamp(coast * self._trim["td_s"], 0.0, self.cfg.td_max_s)
 
     def _recheck_rise_after_coast(self) -> None:
         """Since 2.24.2 a heat-up whose coast was not the radiator's has its
@@ -2021,6 +2211,11 @@ class Autotuner:
                 "room's own rise after the valve shut: no longer counted"))
             m.theta_s = None
             m.rate_c_per_h = None
+        self._note_model_change(before)
+
+    def _note_model_change(self, before: dict[str, float | None]) -> None:
+        """A load note for how the dead time and heating rate (what preheat
+        plans a heat-up with) moved since *before*, if they did."""
         after = self._model()
         changes = []
         th0, th1 = before["theta_s"], after["theta_s"]
@@ -2073,16 +2268,29 @@ class Autotuner:
             m.coast_s = None
             m.overshoot_c = None
             m.coast_not_radiator = True
+        self._lower_braking_to_model()
+
+    def _lower_braking_to_model(self, max_drop_s: float | None = None) -> None:
+        """After a re-check took stored coasts or trim steps away: a braking
+        time more than ``td_deadband_s`` above what the room's other heat-ups
+        give (the model's coast × the trim) goes down to it at once, not on
+        trial (less braking it is not: those heat-ups had pulled it up), and
+        so does one in the values a rollback would restore; by at most
+        *max_drop_s* when given (how far the target itself fell).  One that
+        is not above it stays as it is, and with no coast left nothing
+        moves."""
+        c = self.cfg
         coast = self._model()["coast_s"]
         cur = self._params
-        if not self.derivative_allowed or coast is None:
+        target = self._braking_target()
+        if not self.derivative_allowed or coast is None or target is None:
             return
-        target = _clamp(coast * self._trim["td_s"], 0.0, c.td_max_s)
 
         def lowered(t: Tuning) -> Tuning:
-            if t.td_s <= target + c.td_deadband_s:
+            to = target if max_drop_s is None else max(target, t.td_s - max_drop_s)
+            if t.td_s <= to + c.td_deadband_s:
                 return t
-            return self._bounded(Tuning(t.kp, t.ki, target))
+            return self._bounded(Tuning(t.kp, t.ki, to))
 
         # The values a rollback would go back to may carry the same coast:
         # they come down with it, so a rollback can't bring it back.

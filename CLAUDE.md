@@ -1850,6 +1850,105 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   undoes the second bedroom's 133-min coast. This is the 2.13.0 oracle's
   trade-off in part (see `_td_step` below: ignoring heat-ups with people
   left nothing braking for them).
+- **A heat-up the hold ran, never at full power, teaches nothing**
+  (2.27.1, `AutotuneSample.full_power`, `_HeatupTracker.ran_full` /
+  `ran_held`, `HeatupMetrics.full_power`, `_on_hold_run_heatup`). Each
+  regulated cycle tells the tuner whether its command was full power: mode
+  heat, or a hold's full push (`result.mode == MODE_HEAT or
+  result.full_push`, `climate_regulation._feed_autotune`; `plant_sim`
+  likewise). An episode none of whose cycles was (the cycle a re-heat ends
+  it on is not its own) is logged with what it measured and nothing of it
+  is kept: no trim vote, no place among the `history_len` heat-ups (it
+  pushed full-power ones out), no dead time or heating rate for SIMC or
+  preheat, not counted in a change's trial. The activity line reads
+  `Auto-tune: heat-up from 0.43 below, run by the hold: overshoot +0.45
+  °C, coast 16 min → never at full power, so not the radiator's coast,
+  overshoot or heating rate: nothing counted; no change: …`. Why: the
+  braking time is a full radiator's coast after full power (the heat-up
+  exit and the full push's exit end on it); a hold modulates the valve
+  and ends on the stop's forecast, often while the rise is still speeding
+  up, so its coast (rise after the stop ÷ the rise at it) and overshoot
+  measure the hold, the stop and the room, and its small rise at part
+  output is not the heating rate or dead time preheat plans a full
+  heat-up with. A full push (push ≥ `hold_push_c`) fills the radiator and
+  ends on the heat-up exit: it counts, from any deficit (and stays on a
+  gain change, `_restart_gains`). A caller that says nothing
+  (`full_power` None, the tests' old samples) is taken as full power, as
+  before. Evidence: 15 Nov 2026, living room (Kp 2.0, Ki 0.00036): Frost
+  protection by hand 17:42–18:26, back to 20.9 with the room 0.43 under;
+  the hold pushed +1.4 over the valve's reading (17.0 on the half-degree
+  zone; 100 % for 14 min, then 77, 47, 34, 11 %), the stop came at 18:44
+  rising 1.3 °C/h (the decision's 15-min slope) while the rise was still
+  speeding up (1.8, 2.4, 2.5 °C/h after), and the room went to 21.36 at
+  19:18 with people in all evening (CO2 960–1040 ppm, steady, as before
+  the Frost spell): booked as +0.45 and a 16-min coast, a ×1.15 vote, the
+  braking time 16.4 → 21.3 min (coast 16.1 × 1.32), the heat-up pushing
+  out a full-power one. Classified (`tests/fixtures/heatups_2026_11.json`,
+  1–9 Nov, and the four rooms' activity logs, 9–16 Nov): 12 of 46 judged
+  heat-ups were the hold's, all from 0.43–0.75 under with a peak demand
+  of 1.3–2.4 °C (full power: 8.1–13.6). Overshoot median +0.14 (n 8)
+  against −0.07 (n 15) at full power; coast against the same room's
+  full-power median: living room 19.5 and 16 min against 7.3, study 18.7
+  and 21 against 12.4, but second bedroom 11–23 (median 18) against 26,
+  master 4 and 7 against 8, so noise both ways rather than one bias; dead
+  times 15.7 (living, its full-power ones 6.4–10.7) and 16.8 (second);
+  heating rates 0.8 (living, against 1.8–3.0) and 3.2 °C/h (second,
+  against 0.9–1.4). What they did: the living room's 15 Nov ×1.15 and
+  16.4 → 21.3 min; ×0.9 "less braking" trims from −0.15 landings in the
+  master bedroom (13 Nov) and the second bedroom (9 Nov); the second
+  bedroom's 15 Nov one (9.6 min, 1.75 °C/h) in its dead time and rate.
+  Rejected: (a) excluding every episode that started under 0.8 (the old
+  `_restart_gains` test): a full push from 0.6 is a radiator episode, and
+  one from 0.8 or more the regulator held (rising fast enough that the
+  heat-up exit was already met) is not; the tuner is told how each cycle
+  ran instead of guessing from the start; (b) excluding only episodes
+  after Frost or Off: the master's and second bedroom's came from ordinary
+  0.5–0.75 schedule steps; (c) weighting them: they measure a different
+  quantity, no weight makes them a radiator's coast; (d) keeping their
+  overshoot as a "more braking" vote only (the stop does use max(10 min,
+  Td)): a longer braking time stops every full-power heat-up early for a
+  stop whose overshoot here came from a short push still accelerating
+  and from people, and a ×0.9 from their short landings is as wrong the
+  other way. The hold's own gains are judged on hold windows, unchanged.
+  **`coast_rules` 4** (`_recheck_hold_run`): a save from before has no
+  record of how its heat-ups ran; one that started under
+  `full_power_step_c` with its peak demand in the first 15 min
+  (`demand0_c`) under `full_power_demand_c` (2.5, = `hold_push_c`, a test
+  keeps them equal; `inferred_full_power`) is dropped once, with an
+  activity line, and the ×1.15 its overshoot voted for (> target + 0.1) is
+  taken back (÷ 1.15, never under 1.0, as `_recheck_radiator_bound`); the
+  braking time comes down by at most what the target itself fell
+  (`_lower_braking_to_model(max_drop_s=…)`, also the trial's fallback and
+  the last good values), so one above its target for another reason (a
+  smoothed step towards less braking, on trial) carries on at the tuner's
+  pace. A heat-up in progress saved before (no `ran_full` / `ran_held` /
+  `told_from_start`) is judged the same way at its end unless a cycle
+  since shows full power. Not repaired: a ×0.9 a hold-run landing voted for
+  (it needs two votes and which cast them is not saved; it leans towards
+  a later stop, which the next full-power landings vote on), a
+  vote still counted, a full push that began after its first 15 min (read
+  as the hold's). The live saves of 16 Nov 2026: living room 21.3 → 16.4
+  min (trim 1.32 → 1.15, coast 16.1 → 14.2 min: 7 Nov's cut-short 22.9-min
+  lower bound and 7 Nov's 5.5, the rest of the living room's long braking
+  time, is not this rule's); master bedroom drops 14 Nov 08:06 (coast 7,
+  cut short), braking 14.2 unchanged (its smoothed way to 10.9 goes on);
+  second bedroom drops 15 Nov 17:38, dead time 8.5 → 7.8 min, heating rate
+  1.75 → 1.50 °C/h, braking 35.0 unchanged; study: none stored. The
+  master's heat-up in progress then (16 Nov 08:20, 0.74 under, demand
+  2.0–2.2) ends as the hold's. Of the 9 Nov saves only the study's holds
+  one (7 Nov 05:30, +0.25, no vote: its coast model 19.6 → 20.6 min, the
+  braking 17.8 min stays); its 12 Nov save drops that and the 10 Nov tap
+  (then three heat-ups are kept, and the next one gives a dead time with 6
+  Nov's 8.5 min). Simulated (`plant_sim`, the four rooms, 20 days, 5 and
+  11 °C, three seeds, with and without people (+0.8 °C/h for 90 min after
+  half the heat-ups), from day 7; scratch `sim/`): the daily schedule
+  (18 → 20 at 06:00) has no hold-run heat-up, every run identical; with a
+  45-min Frost spell at noon and an evening 19.4 → 20.0 step, 24 of 48
+  runs move: mean braking −0.5…+0.6 min, the fitted second bedroom with
+  people 5.2 → 6.5 (its hold-run landings had voted for less braking),
+  morning, noon and evening peaks within ±0.01, commands ±0.7 a day, hold
+  RMS ±0.01. The simulator's hold recoveries are gentler than the living
+  room's (no +0.45), so the live records are the evidence.
 - **SIMC is used only for Ti** (= 4(τc + θ), τc = 1.5 θ), as a basis for Ki,
   and as the justification for Td ≈ coast. **SIMC's Kc is not used:** the only
   gain estimate (rate / demand) is self-referential, because the demand is
@@ -1916,10 +2015,13 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   full power and coasted on the braking time, Kp and Ki unused: it stays,
   with its dead time, heating rate, coast and overshoot, and the braking
   time learned from them (its trim and votes, the rate-limit clock, the
-  counters). Restarted: the Kp and Ki trims and votes, the hold windows,
-  heat-ups that started closer (a hold ran them; one in progress too, by
-  the step the finished episode would measure), and a gain change on
-  trial. A braking-time change on trial stays on trial, its fallback the
+  counters); since 2.27.1 so does one a full push ran
+  (`HeatupMetrics.full_power`, `_ran_full_power`). Restarted: the Kp and
+  Ki trims and votes, the hold windows, heat-ups not known to have run at
+  full power (one the hold ran is no longer kept at all; one from an older
+  save that started closer with no full-push demand; one in progress that
+  started closer and has not reached full power, by the step the finished
+  episode would measure), and a gain change on trial. A braking-time change on trial stays on trial, its fallback the
   new gains, and an ordinary oscillation does not roll it back (the new
   gains are the likelier cause; an emergency still does). Kp and Ki in use
   are the new configured values; the SIMC Ki then comes from the kept dead
@@ -2062,6 +2164,15 @@ ruff check .
   target that stood, the study's 10 Nov tap through the tuner and the
   entity, Off, preheat's arrival, a reload, an older save, the clock; the
   study's 12 Nov save re-checked, `tests/fixtures/autotune_study_2026_11_12.json`).
+- `tests/test_hold_run_heatups.py` (2.27.1: a heat-up the hold ran is
+  logged and not counted, at full power and a full push as before, the
+  re-heat that ends it, a trial, the kept five, a reload mid-episode and
+  one saved before, a gain change; the living room's 15 Nov 2026 evening
+  replayed from `tests/fixtures/living_room_2026_11_15.json`, as booked
+  and as now; its 16 Nov save re-checked (21.3 → 16.4 min, once, only what
+  it pulled up, the trial's fallback); the 29 recorded heat-ups (four the
+  hold's) and the 9 Nov saves; through the entity: each cycle's flag, and
+  the re-check's activity lines).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).
