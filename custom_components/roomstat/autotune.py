@@ -1065,7 +1065,9 @@ class Autotuner:
       the ones before it, and the change is rolled back if things got
       worse.  The tuner may try again later, but only on fresh evidence
       (the trims are re-anchored to the restored values) and only after
-      the normal rate limit;
+      the normal rate limit.  The trial ends early, the change kept, on a
+      judged heat-up that lands ``undershoot_sag_c`` short, and after
+      ``pending_timeout_s`` (3 days) whatever was judged;
     * a large oscillation detunes immediately;
     * the braking time only moves the heat-up's end and only uses a rising
       room (regulation.py).
@@ -1225,11 +1227,13 @@ class Autotuner:
         heating rate and start-up delay for days."""
         b, c, cur = self._baseline, self.cfg, self._params
         p = self._pending
+        superseded = False
         if p is not None:
             prev = _tuning_from(p.get("prev"))
             if (prev is None or not math.isclose(prev.kp, cur.kp, rel_tol=1e-4)
                     or not math.isclose(prev.ki, cur.ki, rel_tol=1e-4, abs_tol=1e-12)):
                 self._pending = None          # a gain change on trial: superseded
+                superseded = True
             else:
                 p["prev"] = _tuning_dict(Tuning(b.kp, b.ki, prev.td_s))
                 p["ref_osc"] = True
@@ -1260,6 +1264,7 @@ class Autotuner:
                if self.derivative_allowed else "")
             + (f"; {dropped} hold-run heat-up{'s' if dropped != 1 else ''} dropped"
                if dropped else "")
+            + ("; the gain change on trial ended with them" if superseded else "")
         )
 
     @property
@@ -1418,6 +1423,10 @@ class Autotuner:
             return None
         self._now = s.ts
         event: str | None = None
+        # A trial past its time ends first, so an episode judged in this
+        # cycle is no longer held back by it (a save taken back after days).
+        if self._pending is not None and s.ts - self._pending["ts"] > self.cfg.pending_timeout_s:
+            self._accept_timed_out(s.ts)
         sp = s.setpoint_c if _finite(s.setpoint_c) else None
         room = s.room_temp_c if _finite(s.room_temp_c) else None
         if room is not None:
@@ -1521,9 +1530,6 @@ class Autotuner:
         ):
             self._hold = _HoldTracker(s.ts, sp, self.cfg)
             self._hold.add(s)
-
-        if self._pending is not None and s.ts - self._pending["ts"] > self.cfg.pending_timeout_s:
-            self._accept_pending()
 
         self._prev_sp = sp
         self._prev_ts = s.ts
@@ -1692,17 +1698,32 @@ class Autotuner:
             notes.append(f"landed {os:+.2f} °C: on target, no vote")
 
         if self._pending is not None and now > self._pending["ts"]:
-            self._pending["overshoots"].append(os)
-            if len(self._pending["overshoots"]) >= self._pending["needs"]:
-                med = _median(self._pending["overshoots"])
-                ref = self._pending["ref_overshoot"]
-                if (ref is not None and med is not None
-                        and med > ref + c.rollback_margin_c and med > c.overshoot_target_c):
-                    reason = self._rollback(now, f"overshoot rose to {med:.2f} °C")
+            p = self._pending
+            p["overshoots"].append(os)
+            rose = self._trial_overshoot_rose(p)
+            if len(p["overshoots"]) >= p["needs"]:
+                if rose is not None:
+                    reason = self._rollback(now, f"overshoot rose to {rose:.2f} °C")
                     self._set_verdict(notes + [reason])
                     return reason
                 self._accept_pending()
                 notes.append("the last change passed its trial")
+            elif (os < -c.undershoot_sag_c and m.crossed and not m.truncated
+                  and rose is None):
+                # A short landing ends the trial early (2.27.3).  A trial
+                # guards against a "more heat" change making heat-ups
+                # overshoot; a room the braking stopped well short of its
+                # target under the change is the opposite, and waiting for a
+                # second judged heat-up (rare: the schedule, windows and
+                # changes by hand cut most short) blocked the very vote this
+                # landing cast for up to the trial's timeout.  Only when the
+                # overshoots judged so far would not roll it back.
+                judged = len(p["overshoots"])
+                self._accept_pending()
+                notes.append(
+                    f"the change on trial is kept: a landing {-os:.2f} °C short is not "
+                    f"what a trial guards against ({judged} of {p['needs']} heat-ups judged)"
+                )
         reason = self._maybe_update(now, "heat-up")
         self._set_verdict(notes)
         return reason
@@ -2017,9 +2038,40 @@ class Autotuner:
                 self._trim[name] = anchored[name]
             self._trim_by(name, 1.0)   # clamp into the trim bounds
 
+    def _trial_overshoot_rose(self, p: dict[str, Any]) -> float | None:
+        """The median overshoot of the heat-ups a trial has judged, if it
+        rose enough to roll the change back (``rollback_margin_c`` over the
+        reference and over ``overshoot_target_c``); else None."""
+        c = self.cfg
+        med = _median(p["overshoots"])
+        ref = p["ref_overshoot"]
+        if (ref is not None and med is not None
+                and med > ref + c.rollback_margin_c and med > c.overshoot_target_c):
+            return med
+        return None
+
     def _accept_pending(self) -> None:
         self._last_good = self._params
         self._pending = None
+
+    def _accept_timed_out(self, now: float) -> None:
+        """A trial with too few heat-ups judged ends after
+        ``pending_timeout_s`` (3 days since 2.27.3): the change is kept, and
+        the journal says so (the room's activity log), also when it happens
+        on the first cycle after a restart."""
+        p = self._pending or {}
+        prev = _tuning_from(p.get("prev"))
+        change = _change_text(prev, self._params) if prev is not None else "nothing"
+        if change == "nothing":
+            change = "the values on trial"
+        judged = len(p.get("overshoots") or [])
+        needs = p.get("needs", self.cfg.confirm_up)
+        days = (now - float(p.get("ts", now))) / 86400.0
+        self._accept_pending()
+        self.last_event = (
+            f"trial over after {days:.1f} days with {judged} of {needs} heat-ups "
+            f"judged: {change} kept"
+        )
 
     def _rollback(self, now: float, why: str) -> str:
         """Restore the values from before the change on trial.
@@ -2128,7 +2180,7 @@ class Autotuner:
         current = self._baseline
         if stored != _tuning_from(_tuning_dict(current)):
             if stored is None or not _same_td(stored, current):
-                self.last_event = "configured values changed – learning restarted"
+                self._restarted_on_load("configured values changed – learning restarted")
                 return
             # Taken back as saved (the trims and bounds were the old ones'),
             # then the gains restart under the new values.
@@ -2139,11 +2191,23 @@ class Autotuner:
                 self._baseline = current
             if not loaded:
                 self._reset_learning()
-                self.last_event = "configured values changed – learning restarted"
+                self._restarted_on_load("configured values changed – learning restarted")
                 return
             self._restart_gains()
+            # Also a line in the room's log (2.27.3): the journal's entries
+            # from a load count as old, so until then it showed only on the
+            # status sensor (19 Nov 2026, two rooms: only "Started").
+            self._load_notes.append((None, self.last_event))
             return
         self._load_saved(d)
+
+    def _restarted_on_load(self, text: str) -> None:
+        """The learning restarted on load (a new configured braking time, or
+        a save that could not be taken back under new gains): the tuner's
+        event, and a line for the room's log after its start line (the
+        journal's entries from a load count as old, :meth:`take_load_notes`)."""
+        self.last_event = text
+        self._load_notes.append((None, text))
 
     def _load_saved(self, d: dict[str, Any]) -> bool:
         """Take a save back as it is; False if there was nothing to take."""

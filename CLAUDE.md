@@ -643,7 +643,14 @@ be read.
   with the episode it judges. After each cycle `_activity_tuner` logs what
   is new, in order (`auto-tune: <episode> → <verdict>`, "possible from
   HH:MM" for a rate-limited change), so a heat-up judged and the next one
-  started in the same sample are both logged.
+  started in the same sample are both logged. The journal's entries from
+  taking a save back count as old (the entity skips them at start); what
+  the load itself changed is `take_load_notes`, logged after the start
+  line: the coast-rule re-checks and, since 2.27.3, a learning restart (a
+  new configured Kp or Ki, `_restart_gains`; a new braking time). 19 Nov
+  2026, two rooms: "configured Kp or Ki changed: gain learning restarted;
+  kept 5 full-power heat-ups and the braking time 35.0 min" was on the
+  status sensor, the activity log had only "Started".
 - The lines ride along in the restore-state extra data (`activity`), so a
   reload (an options change) keeps them; local times use HA's
   time zone (`dt_util.get_default_time_zone`).
@@ -1512,8 +1519,9 @@ doc `claude/roomstat-valve-lookahead-2026-10-30.md`.
   simulation below; holding the release until the slide slows was
   rejected (the room may cool too far). **A regular option since 2.24.0**
   (owner, 9 Nov 2026; it was labelled experimental until then): on in all
-  four of the owner's rooms by 2 Nov 2026, still off by default, its
-  behaviour unchanged.
+  four of the owner's rooms from 2 Nov 2026, **off in all four since 19 Nov
+  2026** (owner: "All look ahead should be off."); still off by default,
+  its behaviour unchanged.
 - **The mechanism (real data, living room, 36 releases 23-30 Oct 2026):** a
   Tado looks ahead on its own reading. Its first answer to a release follows
   push + 13 min × fall (r = 0.85; push alone 0.50; fit: first % = 16 + 38 ×
@@ -2107,6 +2115,71 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   - a watchdog rolls back a "more heat" change if overshoot rises or an
     oscillation appears. There is no freeze after a rollback and no blocked
     moves (owner's decision);
+  - **a trial and how it ends** (`_pending`; 2.27.3, owner, 19 Nov 2026:
+    "Do one and two"). A "more heat" change is on trial:
+    judged on the next `confirm_up` (2) heat-ups with a known overshoot
+    (`_on_heatup`; a hold-run one never counts, and a cut-short one only
+    with a known overshoot, which is then over the target), rolled back
+    if their median overshoot rose (`_trial_overshoot_rose`:
+    `rollback_margin_c` over the reference and over `overshoot_target_c`)
+    or on an oscillation (`_on_hold`, unchanged); meanwhile `_maybe_update`
+    refuses every change but an emergency. It ends, the change kept as a
+    passed trial (`_last_good`):
+    - early, on a judged heat-up that lands more than `undershoot_sag_c`
+      (0.2) short with the valve told to stop (`crossed`) and not cut
+      short, unless the overshoots the trial judged so far, this one
+      included, would roll it back (with `confirm_up` 2 that can't happen
+      on the first; it guards a larger `confirm_up`). The verdict says
+      `the change on trial is kept: a landing 0.51 °C short is not what a
+      trial guards against (1 of 2 heat-ups judged)`, and `_maybe_update`
+      runs in the same call, so the vote that landing cast is applied at
+      once, the rate limits as ever (12 h after the last change for more
+      heat: "possible from"). A landing not told to stop or cut short says
+      nothing about the braking or the gains, so it does not end it;
+    - after `pending_timeout_s` (**3 days**; 7 until 2.27.3) whatever was
+      judged, with a journal line (`_accept_timed_out`: `trial over after
+      3.0 days with 0 of 2 heat-ups judged: braking 35.0→29.8 min kept`),
+      on the first cycle after it, a restart's included.
+    Why: a trial guards against a change making heat-ups overshoot; a
+    short landing is the opposite, and judged heat-ups are rare (14–19 Nov
+    2026: 2, 1, 1 and 1 in the four rooms; the schedule, windows and
+    changes by hand cut most short), so every smoothed "less braking" step
+    cost about 7 days. Second bedroom: on trial from 15 Nov 07:27 (Ki
+    0.000513 → 0.000594, braking 36.1 → 35.0 min); 18 Nov 08:08 a heat-up
+    stopped 0.95 under (91 min to come within 0.1) and landed −0.51:
+    "stopped 0.51 °C short: less braking (×0.85, 2 of 2 votes); no change
+    while the last one is on trial (1 of 2 heat-ups judged)", braking 35.0
+    against a target of 15.1 (coast 17.2 min × 0.88). Replayed
+    (`tests/test_trial_rules.py`, the live numbers on a synthetic state)
+    and carried on with one episode a day and no further judged heat-up:
+    2.27.2 35.0 until 23 Nov, 29.8 until 1 Dec, 25.4 on 6 Dec; 2.27.3 29.8
+    at 08:08, 25.4 on 22 Nov, 22.3 on 26 Nov, 20.1 on 30 Nov, 18.6 on 4 Dec.
+    Saves taken back with a trial older than 3 days end it on their first
+    cycle (study since 14 Nov, master bedroom since 15 Nov). A new
+    configured Kp or Ki ends a gain change on trial (`_restart_gains`),
+    and says so since 2.27.3 (`; the gain change on trial ended with
+    them`): the second bedroom's, 19 Nov 2026, went without a word.
+    Simulated (`plant_sim`, the four rooms, mild 5–13 and cold −2–6 °C, 35
+    days, three seeds, people on half the heat-ups at +0.5–1.0 °C/h for
+    45–120 min from 15–75 min in, braking from 10 or 35 min, metrics from
+    day 7; a daily 18 → 20 schedule, and one cutting two heat-ups in three
+    short at 40 min as live; scratch `trialsim.py`), 2.27.2 → 2.27.3:
+    - a too-long braking time comes down sooner: from 35 min, under 20
+      min on day 7–8 → 3–4 (fitted living), 7–11 → 4–6 (fitted second
+      bedroom), the generic living room on the cut schedule 32–33 → 8–28;
+      on day 14 fitted second bedroom 11–13 → 7–9 min;
+    - rollbacks 49 → 38 (cut) and 65 → 52 (daily) in all, trials started
+      +18 % / +10 %, commands −1 a day, hold RMS +0.003 / +0.002;
+    - short landings (own peak under −0.05) 59 → 54 % / 56 → 52 %;
+    - the price, as for any less braking: peaks over +0.3 within 3 h 16.4
+      → 22.2 % on the cut schedule (median +0.08 → +0.10), almost all in
+      the generic living room with people (14–31 → 28–48 %; its braking
+      lower by 1–5 min); daily 16.7 → 17.0 %. The fitted living room up to
+      +7 points, the fitted second bedroom up to +4,
+      their medians ±0.01;
+    - worse once: the generic slow room, cold, cut, from 35 min ended at
+      25.5 min against 18.8 (a rollback more, 13 → 16 over three seeds):
+      a trial ended early let the next step go on trial and roll back.
   - emergency detune;
   - any tuner exception falls back to the configured values.
 - Learned values live **only** in the restore-state extra data (key
@@ -2140,7 +2213,8 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   time at the tuner's usual pace. Both paths: `set_baseline` (options
   updated in place) and `_load` (a save made under other gains, taken back
   under its own baseline, then restarted; an unreadable one starts
-  afresh). A new configured braking time still restarts everything, as
+  afresh; since 2.27.3 its event is an activity line after the start line,
+  `take_load_notes`). A new configured braking time still restarts everything, as
   does a save with no baseline. Until 2.19.0 any change restarted
   everything, and preheat fell back to its default heating rate and
   start-up delay until two heat-ups had been learned again.
@@ -2157,7 +2231,8 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   failed the owner's boiler-calls gate (10.5 → 15.4 a day, 31 Oct 2026),
   and after the live trial (the living room from 31 Oct, then the study
   and the second bedroom) they were switched off in every room on 2 Nov
-  2026, the valve look-ahead on in all four instead.
+  2026, the valve look-ahead on in all four instead (itself switched off
+  in all four on 19 Nov 2026, see "Valve look-ahead").
   - Gone: `dosing.py`, `climate_dosing.py` (`DosingMixin`,
     `PulseCoordinator`), `DoseConfig`, `RegulationConfig.dose`,
     `dose_zone_option`, the `dose` mode (`MODE_DOSE`), the regulator's
@@ -2297,6 +2372,16 @@ ruff check .
   `HoldMetrics` and older saves; closed loop, a generic living room whose
   stop/release cycle took Ki 0.0004 → 0.00005 in two days on the shape
   alone, left alone; through the entity, each cycle tells the integral).
+- `tests/test_trial_rules.py` (2.27.3: a short landing ends a trial, the
+  vote applied at once or after the 12-h limit, 0.15 short or exactly 0.2
+  does not, a cut-short, never-told-to-stop or hold-run heat-up does not,
+  not when the trial's overshoots so far would roll it back (`confirm_up`
+  3), the second judged one as before, an oscillation, a reload; the 3-day
+  timeout and its line, a stale save ended on its first cycle; a new
+  configured gain ending a gain change on trial says so; the second
+  bedroom's 15–18 Nov 2026 replayed; through the entity: a stale trial's
+  line, a fresh one carried on, a new configured Kp or braking time as a
+  line after "Started").
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

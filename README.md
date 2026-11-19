@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.27.2-blue)
+![Version](https://img.shields.io/badge/version-2.27.3-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -284,6 +284,13 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   ends early but keeps what it measured.
 - It changes values a little at a time, stays within safe limits around your
   own values, and undoes any change that makes things worse.
+- A change towards more heat (less braking, more Ki) is on trial: it is
+  judged on the next two heat-ups that run their course, and undone if they
+  overshoot more. Meanwhile nothing else changes. The trial ends, the change
+  kept, after 3 days (7 until 2.27.3), or at once when such a heat-up lands
+  more than 0.2 °C short of the target: an early stop is not what the trial
+  guards against, and the "less braking" that landing asks for can then
+  follow (since 2.27.3). The activity log says when a trial ends either way.
 - The braking time leans towards stopping early. More braking (a cooler
   landing, topped up after) is taken in full steps. Less braking (a warmer
   landing) moves only part of the way after each heat-up, about 1–2 minutes,
@@ -299,7 +306,9 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   time, heating rate, coast, the learned braking time, and so preheat's
   heat-up time): Kp and Ki play no part in them. It restarts only what the
   gains shaped: their own adjustments and the hold windows (heat-ups the
-  hold ran are not kept at all).
+  hold ran are not kept at all). The activity log says so after the room's
+  start line (since 2.27.3), and also when it ends a Kp or Ki change on
+  trial.
 
 You can set the braking time by hand instead, under **Configure →
 Controller → Heat-up braking time**, with **Learn heat-up braking** off.

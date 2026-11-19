@@ -433,10 +433,15 @@ class TestTunerVerdicts:
             "stopped 0.35 °C short: vote 1 of 2 for less braking; changed braking "
             "13.0→11.2 min, a step towards 7.0 (on trial: judged on the next 2 heat-ups); "
             "the braking time follows the learned coast, 7.0 min × 1.00")
+        # The second, 0.30 short, ends that trial early (2.27.3): the change is
+        # kept, and the step its vote wants follows at once (24 h > 12 h).
         t._on_heatup(_heatup(2 * DAY, -0.30), 2 * DAY)
         assert t.last_verdict == (
-            "stopped 0.30 °C short: less braking (×0.85, 2 of 2 votes); no change while "
-            "the last one is on trial (1 of 2 heat-ups judged)")
+            "stopped 0.30 °C short: less braking (×0.85, 2 of 2 votes); the change on "
+            "trial is kept: a landing 0.30 °C short is not what a trial guards against "
+            "(1 of 2 heat-ups judged); changed Ki 0.00100→0.00070, braking 11.2→9.6 min, "
+            "a step towards 6.0 (on trial: judged on the next 2 heat-ups); the braking "
+            "time follows the learned coast, 7.0 min × 0.85")
 
     def test_a_wanted_change_inside_the_rate_limit_says_when(self):
         t = self._tuner()

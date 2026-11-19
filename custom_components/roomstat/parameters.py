@@ -441,7 +441,12 @@ class AutotuneConfig:
     # After a rollback the tuner carries on straight away (no freeze, nothing
     # blocked); a retry needs fresh evidence and the normal rate limit.
     rollback_margin_c: float = 0.2
-    pending_timeout_s: float = 7 * 86400.0
+    # A trial ends, the change kept, after this long whatever was judged
+    # (2.27.3: 3 days; 7 until then).  Judged heat-ups are rare (14-19 Nov
+    # 2026: 1-2 a room in five days), so at 7 days every smoothed "less
+    # braking" step cost about a week.  It also ends early on a judged
+    # heat-up that lands undershoot_sag_c short (Autotuner._on_heatup).
+    pending_timeout_s: float = 3 * 86400.0
 
     # Plausibility of identified values; anything outside is discarded.
     theta_min_s: float = 180.0
