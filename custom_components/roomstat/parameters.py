@@ -380,6 +380,24 @@ class AutotuneConfig:
     osc_max_period_s: float = 12 * 3600.0
     # Emergency detune when the swing is this many times osc_amplitude_c.
     emergency_amplitude_factor: float = 2.0
+    # A swing is the gains' only when the hold's integral swung with it
+    # (2.27.2, AutotuneSample.integral_c, HoldMetrics.integral_swing_c): by
+    # at least this much a cycle, the lesser of its total rise and its
+    # total fall between the swing's first and last crossing.  In a gain
+    # limit cycle the integral is the state that cycles: it winds up while
+    # the room is under, opens the valve wide, and drains in the overshoot
+    # (the deadband decay), cycle after cycle.  Otherwise the swing is the
+    # hold's own stop/release cycle (the stop on its forecast, the room
+    # carried over by the radiator, people or the sun with the valve shut,
+    # a slow fall to the release line): no gain made it and no gain cut
+    # ends it.  Live, 12 and 16-17 Nov 2026, living room: three such swings
+    # (±0.23-0.29 °C) cut Kp 2.5 -> 2.12, 2.0 -> 1.7 and Ki 0.00036 ->
+    # 0.00025; the room was in stop 67-76 % of each window, the valve open
+    # 20-27 % (never over 58 %), every peak came with it shut, and the
+    # integral swung 0.01-0.03 °C a cycle (0.09 at most in any recorded
+    # swing, four rooms, 12-19 Nov).  In plant_sim's oscillating test room
+    # it swings 1.1-1.75 a cycle at Ki 0.01, 0.28 at 0.0012.
+    osc_integral_swing_c: float = 0.2
     # The hold's band (RegulationConfig.stop_over_c / release_below_c, an
     # option per room since 2.20.0).  The stop and the release swing the room
     # across it by design, so the swing thresholds above were set for a band

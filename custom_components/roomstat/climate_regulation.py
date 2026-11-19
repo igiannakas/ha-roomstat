@@ -321,6 +321,9 @@ class RegulationMixin:
                     # A heat-up episode that never ran so is the hold's, and
                     # the tuner counts nothing of it.
                     full_power=result.mode == MODE_HEAT or bool(result.full_push),
+                    # The hold's integral: a swing it did not swing with is
+                    # the stop/release cycle, not the gains (2.27.2).
+                    integral_c=result.new_state.integral_c,
                 )
             )
         except Exception:  # noqa: BLE001 - isolate the tuner from the control loop

@@ -300,6 +300,13 @@ class AutotuneSample:
     # cycles was at full power is the hold's, not the radiator's
     # (AutotuneConfig.full_power_demand_c).
     full_power: bool | None = None
+    # The hold's integral after this cycle (RegulationState.integral_c), in
+    # every mode: it moves only in hold (and decays outside the deadband).
+    # None: not told (a caller that does not know): a hold window's swing
+    # is then judged on its shape alone, as before 2.27.2.  A swing whose
+    # integral held steady is the stop/release cycle, not the gains
+    # (AutotuneConfig.osc_integral_swing_c).
+    integral_c: float | None = None
 
     @property
     def demand_c(self) -> float | None:
@@ -393,10 +400,21 @@ class HoldMetrics:
     period_s: float | None
     amplitude_c: float
     heating_fraction: float
+    # A swing that is the gains' (the shape below, and the integral swung
+    # with it, or was not told): Kp or Ki is cut for it.
     oscillating: bool
     kp: float = 0.0
     ki: float = 0.0
     td_s: float = 0.0
+    # The swing's shape alone (2.27.2): enough half-cycles, heating in the
+    # buffer, not slower than osc_max_period_s.  The stop/release cycle has
+    # it too; ``oscillating`` is False for it when the integral held steady.
+    # None: a save from before (its ``oscillating`` was the shape).
+    swinging: bool | None = None
+    # How far the hold's integral swung with the swing, a cycle (the lesser
+    # of its rise and its fall, _integral_swing), or None when not told (or
+    # no swing).
+    integral_swing_c: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {k: (round(v, 6) if isinstance(v, float) else v)
@@ -415,7 +433,18 @@ class HoldMetrics:
         if m.period_s is not None and (not _finite(m.period_s) or m.period_s <= 0):
             m.period_s = None
         m.oscillating = bool(m.oscillating)
+        if not isinstance(m.swinging, bool):
+            m.swinging = None
+        if m.integral_swing_c is not None and not (
+                _finite(m.integral_swing_c) and m.integral_swing_c >= 0):
+            m.integral_swing_c = None
         return m
+
+    @property
+    def swung(self) -> bool:
+        """The swing's shape (``swinging``; a save from before kept only
+        ``oscillating``, which was the shape then)."""
+        return self.oscillating if self.swinging is None else self.swinging
 
 
 # ---------------------------------------------------------------------------
@@ -677,24 +706,61 @@ def inferred_full_power(step_c: float, demand0_c: float | None,
     return demand0_c >= cfg.full_power_demand_c
 
 
+def _integral_swing(
+    ts: list[float], integrals: list[float | None], crossings: list[float],
+) -> float | None:
+    """How far the hold's integral swung with a swing, per cycle: between
+    the first and the last crossing, the lesser of its total rise and its
+    total fall, over the full cycles in between.  In a gain limit cycle the
+    integral is the state that cycles: it winds up while the room is under
+    (opening the valve wide) and drains in the overshoot it causes (the
+    deadband decay), every cycle, so it rises and falls by as much.  A rise
+    that stays (the room needed more heat: a sag after people left, a
+    colder night) or a fall that stays (the deadband decay in an overshoot
+    that people or the sun made) is the integral doing its job, not a
+    cycle.  None without two crossings or with no integral known between
+    them."""
+    if len(crossings) < 2:
+        return None
+    a, b = crossings[0], crossings[-1]
+    known = [i for t, i in zip(ts, integrals) if a <= t <= b and i is not None]
+    if len(known) < 2:
+        return None
+    rise = sum(max(0.0, y - x) for x, y in zip(known, known[1:]))
+    fall = sum(max(0.0, x - y) for x, y in zip(known, known[1:]))
+    return min(rise, fall) / ((len(crossings) - 1) / 2.0)
+
+
 def analyse_hold(
-    samples: list[tuple[float, float, float | None]],
+    samples: list[tuple[float, float, float | None]]
+    | list[tuple[float, float, float | None, float | None]],
     *,
     cfg: AutotuneConfig,
     tuning: Tuning,
 ) -> HoldMetrics | None:
     """Mean offset and oscillation while holding a steady setpoint.
 
-    ``samples`` are (ts, error, demand) covering up to ``hold_buffer_s``.
-    The mean offset and heating fraction use the most recent
-    ``hold_window_s``; oscillation is judged over the whole buffer, because
-    integral-driven cycles in a slow room can take many hours.  A swing is
-    counted with hysteresis: the filtered error must go from above +A to
-    below -A (around its mean) and back, so sensor noise cannot fake one.
+    ``samples`` are (ts, error, demand[, integral]) covering up to
+    ``hold_buffer_s``.  The mean offset and heating fraction use the most
+    recent ``hold_window_s``; oscillation is judged over the whole buffer,
+    because integral-driven cycles in a slow room can take many hours.  A
+    swing is counted with hysteresis: the filtered error must go from above
+    +A to below -A (around its mean) and back, so sensor noise cannot fake
+    one.
+
+    A swing is the gains' only when the integral swung with it (2.27.2,
+    ``osc_integral_swing_c``); with the integral known and steady it is the
+    stop/release cycle (``swinging`` without ``oscillating``).  Samples
+    without an integral (a caller that does not tell it) are judged on the
+    swing's shape alone, as before.
     """
     if len(samples) < 30:
         return None
     ts = [s[0] for s in samples]
+    integrals = [
+        (float(s[3]) if len(s) > 3 and s[3] is not None and _finite(s[3]) else None)
+        for s in samples
+    ]
     es = _median_filter(_median_filter([s[1] for s in samples], 5), 5)
     recent = [i for i, t in enumerate(ts) if ts[-1] - t <= cfg.hold_window_s]
     if len(recent) < 30:
@@ -726,17 +792,23 @@ def analyse_hold(
     if half_cycles >= 2:
         period = 2.0 * (crossings[-1] - crossings[0]) / (half_cycles - 1)
     swing = 0.5 * (max(es) - min(es))
+    # Any heating at all in the buffer makes a swing a control problem: a
+    # sawtooth of short bursts and long passive cool-downs is still a limit
+    # cycle.  Pure passive drift (no heating) is not.  Cycles slower than
+    # osc_max_period_s are weather or daily routine (sun, occupancy), not
+    # the controller.
+    swinging = (half_cycles >= cfg.osc_min_half_cycles and heating_all > 0.02
+                and (period is None or period <= cfg.osc_max_period_s))
+    integral_swing = _integral_swing(ts, integrals, crossings) if swinging else None
+    # Told and steady: the stop/release cycle.  Not told (or not between the
+    # swing's first and last crossing): the shape alone, as before 2.27.2.
+    gains = integral_swing is None or integral_swing >= cfg.osc_integral_swing_c
     return HoldMetrics(
         ts=ts[-1], mean_error_c=mean_recent, sd_c=sd, half_cycles=half_cycles,
         period_s=period, amplitude_c=swing, heating_fraction=heating,
-        # Any heating at all in the buffer makes a swing a control problem: a
-        # sawtooth of short bursts and long passive cool-downs is still a
-        # limit cycle.  Pure passive drift (no heating) is not.
-        # Cycles slower than osc_max_period_s are weather or daily routine
-        # (sun, occupancy), not the controller.
-        oscillating=(half_cycles >= cfg.osc_min_half_cycles and heating_all > 0.02
-                     and (period is None or period <= cfg.osc_max_period_s)),
+        oscillating=swinging and gains,
         kp=tuning.kp, ki=tuning.ki, td_s=tuning.td_s,
+        swinging=swinging, integral_swing_c=integral_swing,
     )
 
 
@@ -905,7 +977,8 @@ class _HoldTracker:
         self.start_ts = start_ts
         self.setpoint_c = setpoint_c
         self.cfg = cfg
-        self.samples: deque[tuple[float, float, float | None]] = deque()
+        # (ts, error, TRV demand, the hold's integral)
+        self.samples: deque[tuple[float, float, float | None, float | None]] = deque()
         self.last_eval_ts = start_ts
         self._last_cycle_ts = start_ts
 
@@ -921,7 +994,8 @@ class _HoldTracker:
             return _ABORT
         self._last_cycle_ts = s.ts
         if s.room_temp_c is not None:
-            self.samples.append((s.ts, self.setpoint_c - s.room_temp_c, s.demand_c))
+            self.samples.append((s.ts, self.setpoint_c - s.room_temp_c, s.demand_c,
+                                 s.integral_c))
         while self.samples and s.ts - self.samples[0][0] > self.cfg.hold_buffer_s:
             self.samples.popleft()
         if s.ts - self.last_eval_ts >= self.cfg.hold_window_s:
@@ -1352,7 +1426,8 @@ class Autotuner:
                            s.eligible and sp is not None, s.command_saturated,
                            s.room_temp_ts if _finite(s.room_temp_ts) else None,
                            window=bool(s.window), lookahead_c=s.lookahead_c,
-                           full_power=s.full_power if isinstance(s.full_power, bool) else None)
+                           full_power=s.full_power if isinstance(s.full_power, bool) else None,
+                           integral_c=s.integral_c if _finite(s.integral_c) else None)
         resumed = (
             self._prev_ts is not None
             and (not self._prev_eligible or s.ts - self._prev_ts > self.cfg.max_gap_s)
@@ -1388,7 +1463,7 @@ class Autotuner:
                 verdict = self._on_hold(analyse_hold(
                     list(hold.samples), cfg=self.cfg, tuning=self.active_tuning()), s.ts)
                 if verdict is not None or (self._holds and self._holds[-1].ts == s.ts
-                                           and self._holds[-1].oscillating):
+                                           and self._holds[-1].swung):
                     hold.clear(s.ts)   # judged: collect fresh evidence
                 event = verdict
             elif st == _ABORT:
@@ -1677,19 +1752,29 @@ class Autotuner:
         self._holds.append(m)
         del self._holds[:-4]
         self._counters["holds"] += 1
-        theta = self._model()["theta_s"] or 900.0
+        period = f", period {m.period_s / 60:.0f} min" if m.period_s else ""
         if m.oscillating:
-            fast = m.period_s is None or m.period_s < c.osc_fast_period_factor * theta
+            if m.integral_swing_c is not None:
+                # The integral swung with the room (2.27.2): the integral is
+                # the state that cycles, winding up under the target and
+                # draining in the overshoot.  Less Ki, whatever the period
+                # (the old split at 6 dead times leant on a default 15 min
+                # where none was learned).
+                fast = False
+                notes = [f"the integral swung with it ({m.integral_swing_c:.2f} °C a "
+                         "cycle): less Ki (×0.7)"]
+            else:
+                # Not told the integral (a caller from before 2.27.2): split
+                # by the period, as before.
+                theta = self._model()["theta_s"] or 900.0
+                fast = m.period_s is None or m.period_s < c.osc_fast_period_factor * theta
+                notes = [
+                    "a fast swing: less Kp (×0.85)" if fast
+                    else "a slow swing: less Ki (×0.7)"
+                ]
             self._trim_by("kp" if fast else "ki", 0.85 if fast else 0.7)
             self._votes["ki_up"] = self._votes["kp_up"] = 0
-            self.last_event = (
-                f"hold: oscillation ±{m.amplitude_c:.2f} °C"
-                + (f", period {m.period_s / 60:.0f} min" if m.period_s else "")
-            )
-            notes = [
-                "a fast swing: less Kp (×0.85)" if fast
-                else "a slow swing: less Ki (×0.7)"
-            ]
+            self.last_event = f"hold: oscillation ±{m.amplitude_c:.2f} °C{period}"
             emergency = m.amplitude_c >= (
                 c.emergency_amplitude_factor * c.osc_amplitude_c + c.band_widening_c()
             )
@@ -1712,6 +1797,22 @@ class Autotuner:
             reason = self._maybe_update(now, "oscillation", emergency=emergency)
             self._set_verdict(notes)
             return reason or rolled
+        if m.swung:
+            # The swing's shape with the integral steady (2.27.2): the hold's
+            # own stop/release cycle (the stop on its forecast, the room
+            # carried over by the radiator, people or the sun with the valve
+            # shut, then a slow fall to the release line), which no gain
+            # makes and no gain cut ends.  12 and 16-17 Nov 2026, living
+            # room: three such swings cut Kp 2.5 -> 2.12, 2.0 -> 1.7 and Ki
+            # 0.00036 -> 0.00025, with no way back up.
+            self._votes["ki_up"] = 0
+            self.last_event = f"hold: swing ±{m.amplitude_c:.2f} °C{period}"
+            notes = [f"the integral held steady ({m.integral_swing_c or 0.0:.2f} °C a cycle, "
+                     f"needs {c.osc_integral_swing_c:.2f}): the stop/release cycle, "
+                     "not the gains: no cut"]
+            reason = self._maybe_update(now, "hold")
+            self._set_verdict(notes)
+            return reason
         self.last_event = f"hold: mean error {m.mean_error_c:+.2f} °C, no oscillation"
         notes = ["no swing: Kp stays (it moves only on a swing)"]
         # Only a room that stays too *cold* while heating, with no swinging

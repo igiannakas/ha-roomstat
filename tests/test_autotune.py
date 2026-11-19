@@ -1415,7 +1415,14 @@ class TestClosedLoop:
         under the target, so this swinging room heats 6-7 % of the time at
         12 °C outside and the tuner stands back, by design (it did the same
         in the owner's rooms on a mild day).  At 0 °C it heats 21 % of the
-        time: Ki 0.01 → 0.0006, Kp 4 → 2.1, swing 0.80 → 0.58 in a week."""
+        time: Ki 0.01 → 0.00058, Kp 4 → 2.09 (emergency cuts), swing 0.80 →
+        0.65 in a week (the untuned room 0.82).  Since 2.27.2 a swing is the
+        gains' only while the integral swings with it (1.7 °C a cycle at Ki
+        0.01, 0.28 at 0.0012); from day 5 its integral moves 0.12-0.15 °C a
+        cycle and its ±0.3 swings are this room's stop/release cycle (a
+        valve fully open at +0.7 °C over its reading, an 8-min water delay,
+        no braking learned on a flat schedule): logged, not cut.  2.27.1
+        took one more cut on one of them (Kp 2.09 → 1.77, swing 0.63)."""
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8, mix_lag_min=6,
                      t_out_c=0.0)
         flat = schedule_from([(0, 20.0)])
@@ -1428,10 +1435,12 @@ class TestClosedLoop:
             return max(e) - min(e)
 
         assert p2p(tr, 0.5, 2) > 0.7
-        assert p2p(tr, 5, 7) < 0.65
+        assert p2p(tr, 5, 7) < 0.67
         assert p2p(tr, 5, 7) < p2p(fixed, 5, 7) - 0.15
         a = tuner.active_tuning()
-        assert a.kp < 4.0 and a.ki < 0.01
+        assert a.kp < 4.0 and a.ki < 0.001
+        late = [text for _, text, _ in tuner.journal_since(0)][-6:]
+        assert any("the stop/release cycle, not the gains: no cut" in x for x in late)
 
     @pytest.mark.parametrize("period", [30.0, 300.0])
     def test_coarse_sensor_still_calms_oscillation(self, period):

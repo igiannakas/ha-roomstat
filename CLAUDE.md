@@ -1654,8 +1654,9 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   inflated Td, which ended the next heat-up earlier, needing another top-up
   (a loop the simulator showed: Td 28 → 44 min in five days).
 - Kp bounds (`kp_min`/`kp_max` 0.5–8, and 0.25–2× the configured value)
-  are for the hold gain. In practice Kp only moves down (on oscillation):
-  it moves up only on stalls with no braking time set.
+  are for the hold gain. In practice Kp only moves down, and since 2.27.2
+  only in an emergency (a large swing the integral cycled with, below): it
+  moves up only on stalls with no braking time set.
 - **The hold's swing thresholds follow the hold's band** (2.20.0,
   `AutotuneConfig.band_widening_c` / `band_middle_c`): an oscillation is a
   swing beyond `osc_amplitude_c` (±0.15) plus however much the band is
@@ -1668,6 +1669,116 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   stop-to-release cycle is the band's own swing, not a gain problem: with
   the stock thresholds a ±0.2 band cut the generic living room's Ki to its
   floor in the simulator (see the `stop` mode above).
+- **A swing is the gains' only when the integral swung with it** (2.27.2,
+  `AutotuneSample.integral_c` = `RegulationState.integral_c` after each
+  cycle, `analyse_hold` → `HoldMetrics.swinging` / `integral_swing_c`,
+  `osc_integral_swing_c` 0.2 °C). A swing's shape (≥ 3 half-cycles beyond
+  the band-widened ±0.15 around the mean, heating in the buffer, not slower
+  than 12 h) is `swinging`; `oscillating` (a cut) needs also the
+  integral's swing per cycle between the first and last crossing, the
+  lesser of its total rise and its total fall over the full cycles
+  (`_integral_swing`), ≥ 0.2. In a gain limit cycle the integral is the
+  state that cycles: it winds up while the room is under, opens the valve
+  wide, and drains in the overshoot (the deadband decay), every cycle. The
+  lesser of rise and fall, not the range or the climb: a rise that stays
+  (16 Nov 2026 19:14–19:54, living room 0.25 under, the integral 0.23 →
+  0.42, which a climb would count 0.19 a cycle) or a drain that stays (the
+  decay in an overshoot people made, then a slow rebuild at Ki 0.00036,
+  which a range would count) is the integral doing its job. A swing
+  without it is the hold's stop/release cycle: logged (`hold: swing ±0.23
+  °C, period 79 min → the integral held steady (0.01 °C a cycle, needs
+  0.20): the stop/release cycle, not the gains: no cut`), the window
+  cleared as after an oscillation, the Ki vote reset, no cut, no
+  emergency, and no rollback of a change on trial (`ref_osc` and the
+  rollback look at `oscillating`). An integral cycle cuts Ki (×0.7)
+  whatever its period (`the integral swung with it (0.62 °C a cycle): less
+  Ki (×0.7)`): the old split, a period under 6 θ is Kp's, used θ = 15 min
+  where none was learned (the living room's 78-min swing read fast, the
+  97-min one slow). An emergency (amplitude ≥ 0.3 + widening) still cuts
+  both, for an integral cycle only. A caller that does not tell the
+  integral (None; a save's `HoldMetrics` without `swinging` reads its
+  `oscillating` as the shape, `swung`) is judged as before 2.27.2, the
+  period split included. Hold windows are not saved, so nothing migrates.
+  Evidence, living room (Kp 2.0–2.5, Ki 0.00036, band 0.1/0.2 on 12 Nov,
+  0.1/0.1 after): 12 Nov 19:19 `oscillation ±0.28 °C, period 69 min → a
+  fast swing: less Kp` 2.5 → 2.12; 17 Nov 00:21 ±0.23, 78 min, Kp 2.0 →
+  1.7; 06:21 ±0.26, 97 min, `a slow swing: less Ki` 0.00036 → 0.00025, with
+  no way back up (a cut is gentler, accepted at once). In those windows
+  the room was in stop 67–76 % of the time, the valve open 20–27 % (at
+  most 54–58 %), every peak (+0.2…+0.35) came in stop with the valve at
+  0 %, the lows were 0.05–0.24 under, the mean −0.07…−0.09 (so "0.15 from
+  the mean" was 0.06 under the target on that side), and the integral
+  moved 0.03 / 0.01 / 0.01 °C a cycle. The cycle: released about 0.05
+  under, a 13–33 min hold at 26–58 %, a stop on its forecast near the
+  target, the room carried over by the radiator and people (CO2 1060–1105
+  ppm) with the valve shut, a slow fall to the release line. The review's
+  night swing was 0.26–0.30 at Kp 1.5, 2.0 and 1.7 alike. Replayed minute by
+  minute through `observe` (recorder room error, the zone's setpoint and
+  the valve's reading for the demand, the integral from the decision
+  lines, restarts clearing the hold window; scratch `review_1119/
+  tuner_fix/`): 2.27.1 makes the three cuts at 19:18, 00:19 and 06:19
+  (±0.29 / 0.23 / 0.26, 69 / 79 / 97 min), 2.27.2 none. Every 3-h window
+  12–19 Nov (30-min steps, steady target, heating ≥ 20 %): living room 87,
+  2.27.1 flags 16 (one ±0.40 in the sun, 16 Nov 15:00, at emergency size),
+  2.27.2 none; study 22, second bedroom 5, master bedroom 22 (from 14 Nov):
+  none swung. The largest integral swing in any recorded swing is 0.09 a
+  cycle (12 Nov 19:00). No recorded window in any room looks like a gain
+  cycle. Simulated (`plant_sim`; the generic living and slow rooms on the
+  measured Tado controller, `TADO_V3`, the two fitted rooms, and
+  `test_calms_an_oscillating_room`'s room, whose valve opens fully at +0.7
+  over its reading; outdoor 0–5 or 8–12 °C day to day, the daily
+  schedule, people on alternate evenings at +0.2–0.6 °C/h, 14 days, two
+  seeds, from day 4, 180 s / 0.3 °C; starts Kp 4 / Ki 0.001, Ki 0.01, Kp
+  8; scratch `review_1119/tuner_fix/study.py`):
+  - the fitted rooms: identical in every metric (no swing reached a cut);
+  - generic living: 2.27.1 cut 7–11 times a pair of seeds in the cold (0–2
+    mild), 2.27.2 never; hold RMS ±0.004, commands ±5 a day;
+  - generic slow: 2.27.1 cut 18–28 times in the cold, 6–23 mild, Ki to its
+    floor (0.00005) from stock, Kp to 1.1–1.5 in mild weather; 2.27.2 0–1.
+    Cold: time > 0.2 under 28 → 15 %, 20 → 14 %, 20 → 12 % (by start), RMS
+    0.210 → 0.172, 0.178 → 0.162, 0.176 → 0.149, commands +8–15 a day.
+    Mild from stock: under 18.6 → 5.9 %, over 7.5 → 14.6 %, RMS 0.208 →
+    0.252 (Kp 4 instead of the cut 1.1–1.5 takes the people evenings over);
+  - the test's room (a valve fully open on a small push): from stock, cold,
+    RMS 0.207 → 0.265, over 19 → 39 %; elsewhere ±0.005.
+
+  Flat 20 °C at 0 °C (scratch `calmstudy.py`), from Ki 0.01: the test's
+  room calmed as before (RMS days 5–9 0.21–0.22 → 0.22–0.23, untuned 0.35;
+  Ki → 0.00058 both), the plain-PI valve room (`LIVING` in the tests) 0.15
+  both (untuned 0.21; Ki → 0.0008–0.0012, 2.27.1 0.00058). From Kp 8 / Ki
+  0.003: the plain-PI room 0.155 both; the test's room 0.23 → 0.30
+  (untuned 0.35; Kp 8 → 5.8 against 3.0). **The limit:** a swing the
+  proportional push makes (a valve that opens fully on a small push, so a
+  bigger Kp fills the radiator more before the stop) leaves the integral
+  steady, and the tuner, which does not know the valve's opening, cannot
+  tell it from the stop/release cycle: in the test's room at Ki 0.0005,
+  Kp 8 holds 0.31 RMS, Kp 2 0.21. In the four Tado rooms a lower Kp never
+  helped (equal or worse at every Ki tried), Tado valves throttle at +1…+3
+  (see "The Tado needs strong signals"), and live the swing did not follow
+  Kp. `test_calms_an_oscillating_room` now ends at Kp 2.09 (2.27.1: one
+  more emergency cut on a ±0.31 swing whose integral moved 0.14 a cycle,
+  1.77), swing 0.65 against 0.63 (untuned 0.82).
+  Rejected: (a) not counting a peak reached in stop or with the valve shut
+  (the review's first idea): the test room's integral cycle peaks in stop
+  with the valve shut too (its overshoot is the radiator's coast after a
+  hold that opened the valve wide), and the live rises began in hold; (b)
+  judging the swing against the band (under the release line and over the
+  stop line by a margin): a genuine integral cycle here is one-sided as
+  well (−0.6 / +0.15 in the test's room: the release and the heat-up keep
+  it from going deep under), so it would be missed; (c) the integral's
+  range or climb per cycle: a sag's rebuild (above, 0.19 a cycle) and a
+  drain after people overshoot; its swing relative to the P push ((1 + Kp)
+  × the deepest under): estimated, a 40-min 0.25-under sag at the master
+  bedroom's Ki 0.00084 scores as a Ki 0.0012 cycle does (0.57 / 0.56); (d) letting cuts relax back after clean
+  windows: with the false alarms gone a cut rests on a cycle, relaxing
+  would re-propose it (hunting) through a new "more heat" path, and the
+  existing Ki vote (≥ 0.15 under, ≤ 1 half-cycle, two windows) stays.
+  The 0.2: live at most 0.09; in the test's room the integral cycles
+  1.1–1.75 a cycle at Ki 0.01, 0.62 at 0.0049, 0.45 at 0.0034, 0.28 at
+  0.0012, and 0.12–0.24 once calmed at its Ki floor (four seeds: 0.15
+  calms them the same, 0.25 one seed less, 0.3 leaves three at Ki 0.0012,
+  their swing days 5–7 0.72–0.75 against 0.65–0.76 at 0.2). Cuts already made by the false alarm are not undone (the
+  owner restores the living room by hand).
 - The tuner learns only from everyday episodes, never from test signals:
   - **heat-ups** (setpoint step ≥ 0.5 °C with the room ≥ 0.4 °C below) give
     the dead time θ (tangent method), the heating rate, the coast and the
@@ -1688,7 +1799,8 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
     (2.7.1), a badly set room swings with the valve shut most of the time
     too, so it is only calmed on cold days (`test_calms_an_oscillating_room`
     runs at 0 °C: 21 % heating, Ki 0.01 → 0.0006 in a week; at 12 °C, 7 %
-    and nothing happens).
+    and nothing happens). Since 2.27.2 a swing cuts only when the integral
+    swung with it (above).
 
   Heat-ups cut short by the schedule are kept when they carry enough
   information. **No episode starts within `window_settle_s` (30 min) of a
@@ -2173,6 +2285,18 @@ ruff check .
   it pulled up, the trial's fallback); the 29 recorded heat-ups (four the
   hold's) and the 9 Nov saves; through the entity: each cycle's flag, and
   the re-check's activity lines).
+- `tests/test_hold_swing.py` (2.27.2: a swing is the gains' only when the
+  integral swung with it; the living room's three windows of 12 and 17 Nov
+  2026, `tests/fixtures/hold_swings_living_2026_11.json`, judged on their
+  shape as live and as the stop/release cycle with the integral, the
+  evidence in them (stop, valve, peaks), the night of 16–17 Nov through
+  `observe` with and without the integral (the live Kp and Ki cuts); the
+  rule on synthetic swings (cycling, rising, falling, the threshold, not
+  told); the verdicts (Ki only, the emergency, no emergency or rollback for
+  the stop/release cycle, no Ki vote, the window cleared); persistence of
+  `HoldMetrics` and older saves; closed loop, a generic living room whose
+  stop/release cycle took Ki 0.0004 → 0.00005 in two days on the shape
+  alone, left alone; through the entity, each cycle tells the integral).
 - `tests/test_preset_numbers.py` (2.21.0: the preset temperature numbers
   step and store tenths, as the thermostat does; a step of 0.5 refused a
   Comfort of 20.6 in the UI).

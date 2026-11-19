@@ -360,6 +360,8 @@ class RoomSim:
                 room_temp_ts=self.sensor_ts,
                 # As climate_regulation.py tells it (2.27.1).
                 full_power=res.mode == self.reg_mod.MODE_HEAT or bool(res.full_push),
+                # The hold's integral, as climate_regulation.py tells it (2.27.2).
+                integral_c=res.new_state.integral_c,
             ))
 
         tr = self.trace
