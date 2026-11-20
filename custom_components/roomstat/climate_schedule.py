@@ -11,6 +11,8 @@ schedule changes update the preset they will restore.
 A manual change (preset, temperature, boost) starts an *override*.  It ends at the next change
 of the schedule preset, or after the configured override duration –
 whichever comes first.  Duration 0 means "until the schedule changes".
+A Boost's override ends with the Boost instead (2.27.4), so the override
+and the Boost always show the same end.
 Selecting Away or Off (frost protection) by hand is sticky: it stays until
 the user changes it, or the home status changes: an Away picked at home
 becomes away mode when everyone leaves, and an Off ends when someone comes
@@ -24,9 +26,10 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import time
 
-from homeassistant.components.climate import PRESET_AWAY, PRESET_COMFORT
+from homeassistant.components.climate import PRESET_AWAY, PRESET_BOOST, PRESET_COMFORT
 from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 
@@ -96,6 +99,10 @@ class ScheduleMixin:
         # home status (see the module docstring).
         if preset_mode in (PRESET_AWAY, PRESET_FROST_PROTECTION):
             self._schedule_start_override(sticky=True)
+        elif preset_mode == PRESET_BOOST:
+            # Its override starts with the Boost and ends with it
+            # (_schedule_override_with_boost, called by _route_preset).
+            return
         elif preset_mode == ctrl.schedule_preset:
             if ctrl.override_active:
                 self._log(_LOGGER).info(
@@ -142,9 +149,69 @@ class ScheduleMixin:
             "sticky" if sticky else (f"{duration} min" if duration else "until next change"),
         )
 
+    def _schedule_override_with_boost(self, end_ts: float, now: float) -> None:
+        """A Boost picked by hand overrides the schedule until the Boost ends
+        (2.27.4), whatever the override's own length.
+
+        Until 2.27.3 it started an ordinary override of
+        ``schedule_override_min``: the Boost's end took the room back to the
+        schedule and cleared it, so the override's own end was never acted
+        on, but it was what the card, the "schedule override remaining"
+        sensor and ``schedule_override_until`` showed (owner, 20 Nov 2026,
+        living room, Boost 15 min with the override at 30: "Override ·
+        Boost · 27 min"); and with a Boost longer than the override, the
+        override's end took the room back to the schedule mid-Boost.  One
+        end now, the Boost's: both timers fire at it, and whichever comes
+        first ends both (:meth:`_async_schedule_override_expired`)."""
+        if not self.schedule_configured:
+            return
+        self._schedule_ctrl.start_override(
+            self.hass, 0.0, now, self._async_schedule_override_expired, until=end_ts,
+        )
+        self._log(_LOGGER).info(
+            "schedule override started (until the Boost ends, %d min)",
+            max(0, math.ceil((end_ts - now) / 60)),
+        )
+
+    def _schedule_takes_boost_end(self) -> bool:
+        """A Boost ending now goes back to the schedule's preset (a schedule
+        with a known preset; :meth:`_async_boost_expired`)."""
+        return self.schedule_configured and bool(self._schedule_ctrl.schedule_preset)
+
+    def _startup_boost_override(self, *, resumed: bool) -> None:
+        """At startup in Boost: its override ends with it, as when it was
+        picked (:meth:`_schedule_override_with_boost`).  Resumed, the
+        override's end is the Boost's (one saved by 2.27.3 or older ran to
+        the override's own length); over while Home Assistant was down, the
+        override is over too, and the schedule is followed
+        (:meth:`_startup_schedule`), as the Boost's own end would have done.
+        A non-sticky override while in Boost can only be the Boost's: any
+        other change since would have left the Boost."""
+        ctrl = self._schedule_ctrl
+        if not self.schedule_configured or not ctrl.override_active or ctrl.override_sticky:
+            return
+        if not resumed:
+            ctrl.clear_override()
+            return
+        moved = ctrl.override_until is None or abs(ctrl.override_until - self._boost_end_ts) >= 1.0
+        ctrl.override_until = self._boost_end_ts   # one end, to the microsecond
+        if moved:
+            self._log(_LOGGER).info(
+                "Startup: the schedule override now ends with the Boost"
+            )
+
     async def _async_schedule_override_expired(self, _now) -> None:
-        """Override timer ran out: return to the schedule."""
+        """Override timer ran out: return to the schedule.
+
+        During a Boost the override is the Boost's and ends at the same time
+        (:meth:`_schedule_override_with_boost`): the Boost is over, and ends
+        as its own timer would end it (whichever timer fires first)."""
         self._schedule_ctrl.timer_fired()
+        if self._boost_cancel is not None:
+            self._boost_cancel()
+            self._boost_cancel = None
+            await self._async_boost_expired(_now)
+            return
         self._log(_LOGGER).info("schedule override expired")
         await self._async_follow_schedule(trigger="override_expired")
 

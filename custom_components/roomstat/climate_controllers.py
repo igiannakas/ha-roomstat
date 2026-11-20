@@ -2325,6 +2325,8 @@ class ScheduleController:
     - A *sticky* override (Away or Off picked by hand) ignores schedule
       changes and has no timer; it ends when the user changes the preset or
       resumes, or with the home status (see climate_schedule.py).
+    - A Boost's override ends when the Boost does (``until``, 2.27.4),
+      whatever ``duration_min`` is.
     """
 
     def __init__(self) -> None:
@@ -2353,17 +2355,25 @@ class ScheduleController:
         on_expire: Callable,
         *,
         sticky: bool = False,
+        until: float | None = None,
         call_later: _CallLaterFn | None = None,
     ) -> None:
-        """Start (or restart) a manual override."""
+        """Start (or restart) a manual override.
+
+        ``until``: the override ends then, not ``duration_min`` from now (a
+        Boost's, which ends with the Boost)."""
         self.cancel_timer()
         self.override_active = True
         self.override_sticky = sticky
-        if sticky or duration_min <= 0:
+        if sticky or (until is None and duration_min <= 0):
             self.override_until = None
             return
-        delay_s = duration_min * 60
-        self.override_until = now + delay_s
+        if until is not None:
+            delay_s = max(0.0, until - now)
+            self.override_until = until
+        else:
+            delay_s = duration_min * 60
+            self.override_until = now + delay_s
         _cl = call_later or _get_call_later()
         self._timer = _cl(hass, delay_s, on_expire)
 

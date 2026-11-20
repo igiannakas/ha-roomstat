@@ -112,7 +112,30 @@ Build new logic in the HA-free modules first (`parameters.py`,
   change by hand while nobody is home, see "Presence" below). Its log lines,
   and the schedule's, name the room.
 - `climate_schedule.py`: follows an `input_select` schedule helper, with
-  manual overrides that expire.
+  manual overrides that expire. **A Boost's override ends with the Boost**
+  (2.27.4, `_schedule_override_with_boost`, `ScheduleController.start_override(until=…)`):
+  a Boost picked by hand starts its override in `_route_preset`, with the
+  Boost's own end (`_boost_end_ts`), whatever `schedule_override_min` is (0
+  included); `_schedule_note_manual_preset` leaves Boost alone. Both timers
+  fire at that end and whichever comes first ends both, as the Boost's end
+  (`_async_schedule_override_expired` hands a running Boost to
+  `_async_boost_expired`, which clears the override in every branch). Pressed
+  again, both restart (`Boost restarted for 15 min (9 min were left)`). At
+  startup (`_startup_boost_override`) a resumed Boost's override takes its
+  end (a 2.27.3 save ran to its own length: `Startup: the schedule override
+  now ends with the Boost`), and one over while HA was down takes its
+  override with it, so the schedule follows, as its own end would. A window
+  or away mode that ends a Boost leaves its override to the Boost's planned
+  end. Owner, 20 Nov 2026 ("This call out is wrong" … "Look at the
+  inconsistency"), living room, Boost 15 min, override 30: the dialog said
+  "then goes back to its schedule" (true), the card read "Override · Boost ·
+  27 min" from the override's `until`, which the Boost's end cleared 15 min
+  early; a Boost longer than the override was cut back to the schedule at
+  the override's end. The same day's "Startup: boost resumed, 10 min
+  remaining" then "Schedule override started (30.0 min)" and "Boost started
+  for 15 min" was a second `set_preset_mode` (the only path that writes
+  both), not a restart restarting it; a reload keeps both ends
+  (`tests/test_boost_override.py`).
 - `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
 - `preheat.py`: preheat on the way home, HA-free (see "Preheat on the way
   home" below): `PreheatController` (the decision per evaluation, the
@@ -156,7 +179,19 @@ Build new logic in the HA-free modules first (`parameters.py`,
   (`custom:roomstat-card`). Served by `async_setup` and added as a dashboard
   resource (a frontend module when resources are in YAML). It registers only
   after `home-assistant` is defined (scoped registry), and reads
-  `boost_duration_min` and `source_entity_id` from the climate attributes.
+  `boost_duration_min` and `source_entity_id` from the climate attributes,
+  and (card 1.5.5) `boost_until` (the running Boost's end; status `Override ·
+  Boost · 13 min`, `Boost · 8 min` without a schedule, the earlier of it and
+  `presence_override_until` while nobody is home, `<1 min` once due) and
+  `boost_returns_to` / `boost_returns_to_c` (`_boost_returns_to`: `schedule`,
+  the preset or temperature it ends on, None while a window or away mode
+  holds the room) for the confirmation (`boostConfirmText`: `then goes back
+  to Night.`; running, `Boost is running, 9 min left. Restarts it for 15
+  minutes, …`). Until 1.5.4 it said `then switches to Day.` without a
+  schedule, where the Boost goes back to the preset before it. The resource
+  URL carries a hash of the file (`card.py`), so any change to the card
+  reaches browsers after the update; `CARD_VERSION` is only the console
+  banner, bumped with each change.
 - `const.py`: DOMAIN, option keys, custom preset names, `safe_float()`.
 - `strings.json` + `translations/en.json`: UI texts, English only (owner,
   1 Nov 2026: no other languages, to save tokens; German was removed in

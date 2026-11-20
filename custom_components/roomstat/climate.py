@@ -760,8 +760,9 @@ class RoomstatClimate(
                 self._apply_saved_preset(boost.fallback)
                 self._log(_LOGGER).info(
                     "Startup: boost ended while HA was down, reverting to %s",
-                    boost.fallback.preset,
+                    "the schedule" if self._schedule_takes_boost_end() else boost.fallback.preset,
                 )
+            self._startup_boost_override(resumed=boost.resume)
 
         # If the active preset is COMFORT, the comfort_target in options is
         # authoritative (may have changed via the number entity while HA was down).
@@ -1541,6 +1542,9 @@ class RoomstatClimate(
             # Read by the dashboard card: boost length for its confirmation
             # text, and the Tado entity whose device holds the heating % sensor.
             "boost_duration_min": self._config.presets.boost_duration_min,
+            # The running Boost's end and what it ends on (the card's status
+            # line and confirmation text, 2.27.4).
+            **self._boost_attributes(),
             "source_entity_id": self._config_entry.data.get("source_entity_id"),
             **self._schedule_attributes(),
             # Preheat on the way home (shadow: what it would do).

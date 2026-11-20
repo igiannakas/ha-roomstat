@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.4";
+const CARD_VERSION = "1.5.5";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -114,6 +114,42 @@ function windowStatus(a) {
   return "Window";
 }
 
+// Time left until an ISO time, for a status line: "13 min", "1 h 5 min", or
+// "<1 min" once it is due (the integration ends it at that moment; a bare
+// mode would read as if nothing were running).
+const timeLeft = (iso) => {
+  const mins = minsUntil(iso);
+  return mins !== null ? fmtMins(mins) : "<1 min";
+};
+
+// The earlier of two ISO times (either may be missing).
+const earlier = (a, b) => (!a ? b : !b ? a : Date.parse(a) <= Date.parse(b) ? a : b);
+
+// The Boost's confirmation text (card 1.5.5).  What it ends on is the
+// integration's own word (boost_returns_to: its schedule, a preset, or a
+// temperature set by hand; unknown while a window or away mode holds the
+// room), and a Boost already running is restarted at full length.
+function boostConfirmText(s) {
+  const parts = [];
+  if (s.current !== null && s.current !== undefined) parts.push(`Currently ${fmt1(s.current)} °C.`);
+  const to = s.boostTarget !== null && s.boostTarget !== undefined ? `${fmtG(s.boostTarget)} °C` : "its boost temperature";
+  const forMins = s.boostMinutes ? `for ${fmtG(s.boostMinutes)} minutes` : "for the boost period";
+  const back = s.boostReturnsTo;
+  let after;
+  if (back === "schedule") after = "then goes back to its schedule.";
+  else if (back === "none" && s.boostReturnsToC !== null && s.boostReturnsToC !== undefined)
+    after = `then goes back to ${fmtG(s.boostReturnsToC)} °C.`;
+  else if (back && MODE_NAMES[back]) after = `then goes back to ${MODE_NAMES[back]}.`;
+  else after = "then goes back to what it was on before.";
+  if (s.preset === "boost" && s.boostUntil) {
+    parts.push(`Boost is running, ${timeLeft(s.boostUntil)} left.`);
+    parts.push(`Restarts it ${forMins}, ${after}`);
+  } else {
+    parts.push(`Heats to ${to} ${forMins}, ${after}`);
+  }
+  return parts.join(" ");
+}
+
 /* ------------------------------------------------------------------------ */
 /* Room state – everything the card shows, derived from hass in one place    */
 /* ------------------------------------------------------------------------ */
@@ -141,6 +177,10 @@ function roomState(hass, config, ids) {
   // Following the schedule: not overridden, and someone is home (while
   // nobody is, Schedule takes the room back to Away).
   const followsSchedule = Boolean(schedPreset) && !override && !awayHeld && !a.presence_away_active;
+  // A running Boost shows its own time left (card 1.5.5): the override it
+  // starts ends with it, and so does the room's hold while nobody is home
+  // whenever that comes first.
+  const boostUntil = preset === "boost" ? a.boost_until || null : null;
 
   let status;
   if (summer) status = "Summer lock";
@@ -154,13 +194,16 @@ function roomState(hass, config, ids) {
     // integration is about to take it back, so no time is shown.
     const mins = minsUntil(a.presence_override_until);
     status = `Nobody home · ${modeLabel(preset, target)}`;
-    if (!a.presence_override_until) status += " · until home";
+    if (boostUntil) status += ` · ${timeLeft(earlier(boostUntil, a.presence_override_until))}`;
+    else if (!a.presence_override_until) status += " · until home";
     else if (mins !== null) status += ` · ${fmtMins(mins)}`;
   } else if (override) {
     status = `Override · ${modeLabel(preset, target)}`;
     const mins = minsUntil(a.schedule_override_until);
-    if (mins !== null) status += ` · ${mins} min`;
-  } else if (schedPreset) status = `Schedule · ${MODE_NAMES[schedPreset] || schedPreset}`;
+    if (boostUntil) status += ` · ${timeLeft(boostUntil)}`;
+    else if (mins !== null) status += ` · ${mins} min`;
+  } else if (boostUntil) status = `${MODE_NAMES.boost} · ${timeLeft(boostUntil)}`;
+  else if (schedPreset) status = `Schedule · ${MODE_NAMES[schedPreset] || schedPreset}`;
   else status = MODE_NAMES[preset] || preset || "–";
 
   let color = COLORS.grey;
@@ -188,6 +231,9 @@ function roomState(hass, config, ids) {
     scheduleActive: followsSchedule,
     boostTarget: ids.boost ? num(hass.states[ids.boost]?.state) : null,
     boostMinutes: num(a.boost_duration_min),
+    boostUntil,
+    boostReturnsTo: a.boost_returns_to ?? null,
+    boostReturnsToC: num(a.boost_returns_to_c),
   };
 }
 
@@ -554,20 +600,13 @@ class RoomstatCard extends HTMLElement {
     const def = BUTTONS.find((b) => b.preset === btn.dataset.preset);
     this._haptic("light");
     if (def.confirm) {
-      const s = this._state || {};
-      const parts = [];
-      if (s.current !== null && s.current !== undefined) parts.push(`Currently ${fmt1(s.current)} °C.`);
-      const to = s.boostTarget !== null && s.boostTarget !== undefined ? `${fmtG(s.boostTarget)} °C` : "its boost temperature";
-      const forMins = s.boostMinutes ? `for ${fmtG(s.boostMinutes)} minutes` : "for the boost period";
-      const after = s.schedPreset ? "then goes back to its schedule." : "then switches to Day.";
-      parts.push(`Heats to ${to} ${forMins}, ${after}`);
       const ok = await confirmDialog({
         title: "Boost heating",
         icon: def.icon,
         color: def.color,
         bodyIcon: this._roomIcon,
         primary: this._roomName,
-        secondary: parts.join(" "),
+        secondary: boostConfirmText(this._state || {}),
         confirmLabel: "Boost heating",
       });
       if (!ok) return;

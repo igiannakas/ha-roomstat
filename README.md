@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.27.3-blue)
+![Version](https://img.shields.io/badge/version-2.27.4-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -509,7 +509,8 @@ scheduler sets to `comfort`, `night`, `away` or `frost_protection`.
 - The room switches to whatever the helper says.
 - A manual change (preset, temperature or Boost) wins until the next schedule
   change, or until the **Override duration** has passed. 0 means until the
-  next schedule change.
+  next schedule change. A Boost wins until it ends, whatever the Override
+  duration, then the room goes back to the schedule.
 - **Resume schedule** (a button, and a preset) ends a manual change straight
   away.
 
@@ -620,7 +621,10 @@ entity: climate.living_room_thermostat
 | `heating_entity` | The valve's heating % sensor, if it isn't found automatically. |
 
 It shows the room and target temperature, the heating %, and what the room is
-doing. Buttons: Off, Night, Day, Boost and Schedule.
+doing. Buttons: Off, Night, Day, Boost and Schedule. During a Boost it shows
+the minutes the Boost has left (`Override · Boost · 13 min`). Boost asks first
+and says what the room goes back to after it, or that a running Boost starts
+again at full length.
 
 ## License
 

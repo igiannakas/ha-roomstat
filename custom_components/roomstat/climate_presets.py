@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 import math
 import time
@@ -64,6 +65,45 @@ class PresetMixin:
             return 0
         remaining = max(0.0, self._boost_end_ts - time.time())
         return math.ceil(remaining / 60)
+
+    def _boost_returns_to(self) -> SavedState | None:
+        """What a Boost ends on (:meth:`_async_boost_expired`): None for the
+        schedule's preset; else, for a Boost running, the state it saved,
+        and for one picked now the room's current preset and temperature.
+        Unknown (``SavedState()``) while a window or away mode holds the
+        room: a Boost picked then first takes the room back to what they
+        saved (:meth:`_end_window_by_hand`, :meth:`_presence_takeover`)."""
+        if self._schedule_takes_boost_end():
+            return None
+        if self._boost_cancel is not None:
+            return SavedState(self._boost_saved_preset, self._boost_saved_temp)
+        if self._window_ctrl.is_active or self._presence_ctrl.is_active:
+            return SavedState()
+        return SavedState(self._preset_mode, self._target_temp)
+
+    def _boost_attributes(self) -> dict:
+        """For the dashboard card (2.27.4): when the running Boost ends
+        (``boost_until``, None when none runs: the card's "Boost · 13 min"),
+        and what it ends on (``boost_returns_to``: ``schedule``, a preset,
+        or None while unknown; ``boost_returns_to_c`` for a temperature set
+        by hand), for its confirmation text.  Both change only when a Boost
+        or the preset does: recorded like the override's ``until``."""
+        until = None
+        if self._boost_cancel is not None and self._boost_end_ts > 0:
+            until = datetime.datetime.fromtimestamp(
+                self._boost_end_ts, tz=datetime.UTC
+            ).isoformat()
+        back = self._boost_returns_to()
+        if back is None:
+            returns_to, returns_to_c = "schedule", None
+        else:
+            returns_to = back.preset
+            returns_to_c = back.temp if back.preset == PRESET_NONE else None
+        return {
+            "boost_until": until,
+            "boost_returns_to": returns_to,
+            "boost_returns_to_c": returns_to_c,
+        }
 
     # ------------------------------------------------------------------
     # Window sensor
@@ -1051,7 +1091,9 @@ class PresetMixin:
         self._preset_mode = preset_mode
 
         # Cancel any running boost timer
+        boost_left_s = 0.0
         if self._boost_cancel is not None:
+            boost_left_s = max(0.0, self._boost_end_ts - time.time())
             self._boost_cancel()
             self._boost_cancel = None
             self._boost_end_ts = 0.0
@@ -1069,13 +1111,25 @@ class PresetMixin:
                 self._boost_saved_preset = old_preset
                 self._boost_saved_temp = self._target_temp
             duration_s = self._config.presets.boost_duration_min * 60
-            self._boost_end_ts = time.time() + duration_s
+            now = time.time()
+            self._boost_end_ts = now + duration_s
             self._boost_cancel = async_call_later_boost(
                 self.hass, duration_s, self._async_boost_expired
             )
-            self._log(_LOGGER).info(
-                "boost started for %d min", self._config.presets.boost_duration_min
-            )
+            if old_preset == PRESET_BOOST and boost_left_s > 0:
+                # Pressed again while one runs: a new full length.
+                self._log(_LOGGER).info(
+                    "boost restarted for %d min (%d min were left)",
+                    self._config.presets.boost_duration_min,
+                    math.ceil(boost_left_s / 60),
+                )
+            else:
+                self._log(_LOGGER).info(
+                    "boost started for %d min", self._config.presets.boost_duration_min
+                )
+            if manual:
+                # Picked by hand: it overrides the schedule until it ends.
+                self._schedule_override_with_boost(self._boost_end_ts, now)
 
         if preset_mode != old_preset:
             self._log(_LOGGER).info(
@@ -1088,11 +1142,13 @@ class PresetMixin:
         """Called when the boost timer expires – revert to previous preset."""
         self._boost_cancel = None
         self._boost_end_ts = 0.0
-
-        # With a schedule, boost ends back on the schedule (and ends the
-        # override the boost started).
-        if self.schedule_configured and self._schedule_ctrl.schedule_preset:
+        # The override the Boost started ends with it (it ends now too:
+        # climate_schedule._schedule_override_with_boost).
+        if self.schedule_configured:
             self._schedule_ctrl.clear_override()
+
+        # With a schedule, boost ends back on the schedule.
+        if self._schedule_takes_boost_end():
             self._log(_LOGGER).info(
                 "boost over, returning to the schedule (%s)", self._schedule_ctrl.schedule_preset,
             )

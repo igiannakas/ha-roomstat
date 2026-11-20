@@ -1,7 +1,8 @@
 """The card's status line, run in Node (skipped when Node is not installed).
 
 ``roomState`` in ``www/roomstat-card.js`` turns the climate attributes into
-what the card shows.  Only the pure part of the file (constants, helpers and
+what the card shows, and ``boostConfirmText`` into the Boost button's
+confirmation text.  Only the pure part of the file (constants, helpers and
 ``roomState``) is evaluated; nothing touches the DOM.
 """
 from __future__ import annotations
@@ -22,19 +23,21 @@ const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8");
 const start = src.indexOf("const CARD_VERSION");
 const end = src.indexOf("\n}\n", src.indexOf("function roomState")) + 3;
-const roomState = new Function(src.slice(start, end) + "\nreturn roomState;")();
+const { roomState, boostConfirmText } = new Function(
+  src.slice(start, end) + "\nreturn { roomState, boostConfirmText };")();
 const cases = JSON.parse(fs.readFileSync(0, "utf8"));
 const now = Date.now();
 const out = cases.map((c) => {
   const a = { current_temperature: 17.4, temperature: 20, hvac_action: "idle", ...c.attrs };
   for (const key of ["presence_override_until", "schedule_override_until",
-                     "window_heat_earliest", "window_heat_latest"]) {
+                     "window_heat_earliest", "window_heat_latest", "boost_until"]) {
     if (typeof a[key] === "number") a[key] = new Date(now + a[key] * 1000).toISOString();
   }
   const hass = { states: { "climate.x": { state: c.state || "heat", attributes: a } },
                  ...(c.hass || {}) };
   const s = roomState(hass, { entity: "climate.x" }, {});
-  return { status: s.status, badge: s.badge, scheduleActive: s.scheduleActive };
+  return { status: s.status, badge: s.badge, scheduleActive: s.scheduleActive,
+           confirm: boostConfirmText({ ...s, boostTarget: c.boostTarget ?? null }) };
 });
 process.stdout.write(JSON.stringify(out));
 """
@@ -130,6 +133,45 @@ _CASES = [
      "Override · Day · 60 min", "mdi:window-open-variant", False),
     ({"preset_mode": "comfort", "window_overridden": True, "schedule_preset": "comfort"},
      "Schedule · Day", "mdi:window-open-variant", True),
+    # A running Boost shows its own time left (2.27.4, card 1.5.5).  The
+    # owner's case, 20 Nov 2026: Boost 15 min, the override 30 min; the card
+    # read "Override · Boost · 27 min" from the override.  The override now
+    # ends with the Boost, and the card reads the Boost's end even from an
+    # integration whose override still runs longer.
+    ({"preset_mode": "boost", "temperature": 22.0, "schedule_preset": "comfort",
+      "schedule_override_active": True, "schedule_override_until": 27 * 60 - 1,
+      "boost_until": 13 * 60 - 1},
+     "Override · Boost · 13 min", "mdi:hand-back-right", False),
+    ({"preset_mode": "boost", "schedule_preset": "comfort",
+      "schedule_override_active": True, "schedule_override_until": 90 * 60 - 1,
+      "boost_until": 90 * 60 - 1},
+     "Override · Boost · 1 h 30 min", "mdi:hand-back-right", False),
+    # Its end just passed: the integration is ending it.
+    ({"preset_mode": "boost", "schedule_preset": "comfort",
+      "schedule_override_active": True, "schedule_override_until": -20,
+      "boost_until": -20},
+     "Override · Boost · <1 min", "mdi:hand-back-right", False),
+    # No schedule: no override, the Boost's own time (none shown before).
+    ({"preset_mode": "boost", "boost_until": 8 * 60 - 1},
+     "Boost · 8 min", None, False),
+    # Resumed after a reload: the end saved with it, the rest of the time.
+    ({"preset_mode": "boost", "schedule_preset": "eco", "schedule_override_active": True,
+      "schedule_override_until": 10 * 60 - 1, "boost_until": 10 * 60 - 1},
+     "Override · Boost · 10 min", "mdi:hand-back-right", False),
+    # Nobody home: the Boost's time, not the hold's 4 h (the Boost ends
+    # first, then the hold carries on with what it ends on) ...
+    ({"preset_mode": "boost", "presence_override_active": True,
+      "presence_override_until": 240 * 60 - 1, "schedule_preset": "comfort",
+      "schedule_override_active": True, "schedule_override_until": 15 * 60 - 1,
+      "boost_until": 15 * 60 - 1},
+     "Nobody home · Boost · 15 min", "mdi:hand-back-right", False),
+    ({"preset_mode": "boost", "presence_override_active": True,
+      "presence_override_until": None, "boost_until": 12 * 60 - 1},
+     "Nobody home · Boost · 12 min", "mdi:hand-back-right", False),
+    # ... unless the hold's limit comes first: back to away ends the Boost.
+    ({"preset_mode": "boost", "presence_override_active": True,
+      "presence_override_until": 5 * 60 - 1, "boost_until": 60 * 60 - 1},
+     "Nobody home · Boost · 5 min", "mdi:hand-back-right", False),
 ]
 
 # The clock in the user's language, 24-hour choice and the server's time zone.
@@ -148,6 +190,7 @@ def test_status_lines(tmp_path):
     )
     results = json.loads(proc.stdout)
     for (_attrs, status, badge, schedule_active), got in zip(_CASES, results, strict=True):
+        got.pop("confirm")
         assert got == {"status": status, "badge": badge, "scheduleActive": schedule_active}
 
 
@@ -204,3 +247,53 @@ def test_the_system_choice_is_the_browsers(tmp_path, browser, language, expected
     )
     (got,) = json.loads(proc.stdout)
     assert got["status"] == f"Nobody home · Preheating to 20 °C · ETA {expected}"
+
+
+# The Boost button's confirmation text (2.27.4, card 1.5.5): what the Boost
+# ends on is the integration's ``boost_returns_to``; one already running is
+# restarted at full length.
+_CONFIRM_CASES = [
+    # The owner's case: a schedule, so back to it.
+    ({"current_temperature": 21.3, "preset_mode": "comfort", "schedule_preset": "comfort",
+      "boost_duration_min": 15, "boost_returns_to": "schedule"},
+     "Currently 21.3 °C. Heats to 22 °C for 15 minutes, then goes back to its schedule."),
+    # Pressed again while one runs: it says so, and what is left.
+    ({"current_temperature": 21.3, "preset_mode": "boost", "schedule_preset": "comfort",
+      "schedule_override_active": True, "boost_duration_min": 15,
+      "boost_until": 9 * 60 - 1, "boost_returns_to": "schedule"},
+     "Currently 21.3 °C. Boost is running, 9 min left. Restarts it for 15 minutes, "
+     "then goes back to its schedule."),
+    # No schedule: the preset it was on (until 2.27.3 always "then switches
+    # to Day.", while the Boost went back to the preset before it).
+    ({"current_temperature": 18.0, "preset_mode": "eco", "boost_duration_min": 15,
+      "boost_returns_to": "eco"},
+     "Currently 18.0 °C. Heats to 22 °C for 15 minutes, then goes back to Night."),
+    ({"current_temperature": 18.0, "preset_mode": "none", "temperature": 19.5,
+      "boost_duration_min": 15, "boost_returns_to": "none", "boost_returns_to_c": 19.5},
+     "Currently 18.0 °C. Heats to 22 °C for 15 minutes, then goes back to 19.5 °C."),
+    ({"current_temperature": 18.0, "preset_mode": "boost", "boost_duration_min": 15,
+      "boost_until": -10, "boost_returns_to": "frost_protection"},
+     "Currently 18.0 °C. Boost is running, <1 min left. Restarts it for 15 minutes, "
+     "then goes back to Off."),
+    # Nobody home, no schedule: away mode first takes the room back to what
+    # it saved, which the integration does not guess.
+    ({"current_temperature": 16.0, "preset_mode": "away", "presence_away_active": True,
+      "boost_duration_min": 15, "boost_returns_to": None},
+     "Currently 16.0 °C. Heats to 22 °C for 15 minutes, then goes back to what it was on before."),
+]
+
+
+@pytest.mark.skipif(_NODE is None, reason="Node is not installed")
+def test_boost_confirmation_text(tmp_path):
+    runner = tmp_path / "runner.js"
+    runner.write_text(_RUNNER)
+    payload = json.dumps(
+        [{"attrs": attrs, "hass": _HASS, "boostTarget": 22} for attrs, _ in _CONFIRM_CASES]
+    )
+    proc = subprocess.run(
+        [_NODE, str(runner), str(_CARD)], input=payload, capture_output=True,
+        text=True, timeout=30, check=True,
+    )
+    results = json.loads(proc.stdout)
+    for (_attrs, text), got in zip(_CONFIRM_CASES, results, strict=True):
+        assert got["confirm"] == text
