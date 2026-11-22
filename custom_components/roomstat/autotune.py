@@ -406,9 +406,9 @@ class HoldMetrics:
     kp: float = 0.0
     ki: float = 0.0
     td_s: float = 0.0
-    # The swing's shape alone (2.27.2): enough half-cycles, heating in the
-    # buffer, not slower than osc_max_period_s.  The stop/release cycle has
-    # it too; ``oscillating`` is False for it when the integral held steady.
+    # The swing's shape alone (2.27.2): enough half-cycles inside the
+    # buffer, heating in it.  The stop/release cycle has it too;
+    # ``oscillating`` is False for it when the integral held steady.
     # None: a save from before (its ``oscillating`` was the shape).
     swinging: bool | None = None
     # How far the hold's integral swung with the swing, a cycle (the lesser
@@ -740,13 +740,21 @@ def analyse_hold(
 ) -> HoldMetrics | None:
     """Mean offset and oscillation while holding a steady setpoint.
 
-    ``samples`` are (ts, error, demand[, integral]) covering up to
-    ``hold_buffer_s``.  The mean offset and heating fraction use the most
-    recent ``hold_window_s``; oscillation is judged over the whole buffer,
-    because integral-driven cycles in a slow room can take many hours.  A
-    swing is counted with hysteresis: the filtered error must go from above
-    +A to below -A (around its mean) and back, so sensor noise cannot fake
-    one.
+    ``samples`` are (ts, error, demand[, integral]); only the last
+    ``hold_buffer_s`` (6 h, 2.27.5) of them is judged, the most the hold
+    tracker keeps.  The mean offset and heating fraction use the most
+    recent ``hold_window_s``; oscillation is judged over the buffer, which
+    holds three crossings of a cycle up to 3.5 h wherever it starts, of one
+    of 4.5 h in about half the windows, and so bounds the slowest period
+    counted (plant_sim's integral cycles: 2.4-4.4 h in its oscillating test
+    room, 5.6-6.8 h in its coarse-sensor variant on a 20-min release
+    look-ahead, no longer seen).  Until 2.27.5 the buffer was 24 h and
+    slower "cycles" were cut off at 12 h: a window that changes nothing is
+    not cleared, so a day's unrelated events (an evening of people, a sag,
+    a top-up) could make one swing (22 Nov 2026, see
+    ``AutotuneConfig.hold_buffer_s``).  A swing is counted with hysteresis:
+    the filtered error must go from above +A to below -A (around its mean)
+    and back, so sensor noise cannot fake one.
 
     A swing is the gains' only when the integral swung with it (2.27.2,
     ``osc_integral_swing_c``); with the integral known and steady it is the
@@ -754,6 +762,9 @@ def analyse_hold(
     without an integral (a caller that does not tell it) are judged on the
     swing's shape alone, as before.
     """
+    if samples:
+        newest = samples[-1][0]
+        samples = [s for s in samples if newest - s[0] <= cfg.hold_buffer_s]
     if len(samples) < 30:
         return None
     ts = [s[0] for s in samples]
@@ -794,11 +805,9 @@ def analyse_hold(
     swing = 0.5 * (max(es) - min(es))
     # Any heating at all in the buffer makes a swing a control problem: a
     # sawtooth of short bursts and long passive cool-downs is still a limit
-    # cycle.  Pure passive drift (no heating) is not.  Cycles slower than
-    # osc_max_period_s are weather or daily routine (sun, occupancy), not
-    # the controller.
-    swinging = (half_cycles >= cfg.osc_min_half_cycles and heating_all > 0.02
-                and (period is None or period <= cfg.osc_max_period_s))
+    # cycle.  Pure passive drift (no heating) is not.  A cycle too slow for
+    # three crossings in the buffer is not judged (``hold_buffer_s``).
+    swinging = half_cycles >= cfg.osc_min_half_cycles and heating_all > 0.02
     integral_swing = _integral_swing(ts, integrals, crossings) if swinging else None
     # Told and steady: the stop/release cycle.  Not told (or not between the
     # swing's first and last crossing): the shape alone, as before 2.27.2.

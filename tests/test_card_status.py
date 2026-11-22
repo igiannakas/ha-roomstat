@@ -172,6 +172,13 @@ _CASES = [
     ({"preset_mode": "boost", "presence_override_active": True,
       "presence_override_until": 5 * 60 - 1, "boost_until": 60 * 60 - 1},
      "Nobody home · Boost · 5 min", "mdi:hand-back-right", False),
+    # The schedule moved on mid-Boost (2.27.5): the thermostat's next state
+    # is the schedule's preset, its override and boost_until cleared, so the
+    # line reads the schedule at once, with no time left shown.
+    ({"preset_mode": "eco", "temperature": 18.0, "schedule_preset": "eco",
+      "schedule_override_active": False, "schedule_override_until": None,
+      "boost_until": None, "boost_returns_to": "schedule"},
+     "Schedule · Night", None, True),
 ]
 
 # The clock in the user's language, 24-hour choice and the server's time zone.
@@ -253,16 +260,19 @@ def test_the_system_choice_is_the_browsers(tmp_path, browser, language, expected
 # ends on is the integration's ``boost_returns_to``; one already running is
 # restarted at full length.
 _CONFIRM_CASES = [
-    # The owner's case: a schedule, so back to it.
+    # The owner's case: a schedule, so back to it; and the schedule's next
+    # change ends it too, at a time the integration does not know (card
+    # 1.5.6; 20 Nov 2026, second bedroom: a 30-min Boost ended 10 min early).
     ({"current_temperature": 21.3, "preset_mode": "comfort", "schedule_preset": "comfort",
       "boost_duration_min": 15, "boost_returns_to": "schedule"},
-     "Currently 21.3 °C. Heats to 22 °C for 15 minutes, then goes back to its schedule."),
+     "Currently 21.3 °C. Heats to 22 °C for 15 minutes, or until the schedule next "
+     "changes, then goes back to its schedule."),
     # Pressed again while one runs: it says so, and what is left.
     ({"current_temperature": 21.3, "preset_mode": "boost", "schedule_preset": "comfort",
       "schedule_override_active": True, "boost_duration_min": 15,
       "boost_until": 9 * 60 - 1, "boost_returns_to": "schedule"},
      "Currently 21.3 °C. Boost is running, 9 min left. Restarts it for 15 minutes, "
-     "then goes back to its schedule."),
+     "or until the schedule next changes, then goes back to its schedule."),
     # No schedule: the preset it was on (until 2.27.3 always "then switches
     # to Day.", while the Boost went back to the preset before it).
     ({"current_temperature": 18.0, "preset_mode": "eco", "boost_duration_min": 15,

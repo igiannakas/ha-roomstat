@@ -365,7 +365,31 @@ class AutotuneConfig:
 
     # Hold windows (steady setpoint, room near target, heating active).
     hold_window_s: float = 3 * 3600.0  # evaluated every window
-    hold_buffer_s: float = 24 * 3600.0 # oscillation judged over up to this much
+    # A swing is judged over the last 6 h of the hold (2.27.5; 24 h until
+    # then).  A window that changes nothing is not cleared, so while the
+    # target stands its samples run on, and with 24 h a cycle could be
+    # pieced together from unrelated events: 22 Nov 2026 03:20, living room
+    # (one target, 21.0, day and night), the buffer reached back to 18:20
+    # and its three crossings were an evening of people (+0.54 at 21:29,
+    # the valve shut, the deadband decay draining the integral +0.29 ->
+    # +0.03), its rebuild over 4 h (0.14 under at 01:40) and an ordinary
+    # top-up (+0.37 at 02:44): "oscillation ±0.39 °C, period 318 min, the
+    # integral swung with it (0.27 °C a cycle)", an emergency, Kp 2.20 ->
+    # 1.87 and Ki 0.00046 -> 0.00032 -> 0.00023.  Replayed, a buffer of
+    # 7.5 h or more flags it, 7.25 h or less does not (8 h would not have
+    # fixed it).  Three crossings take one and a half periods after the
+    # first excursion: 6 h holds them for a cycle up to 3.5 h wherever the
+    # window starts, 4.5 h in about half the windows (they slide every 3 h),
+    # 6 h never.  plant_sim's integral cycles: the oscillating test room
+    # 2.4-3.0 h at 0 °C and 3.4-4.4 h at 8 °C (Ki 0.001-0.01), still seen
+    # and calmed as fast; none in the four Tado rooms at any Ki up to 0.01.
+    # The price: the coarse-sensor variant of that room with the 20-min
+    # release look-ahead (2.20's; an option) cycles in 5.6-6.8 h, which 24
+    # h calmed (swing 0.86 -> 0.47) and 6 h leaves as it is; with the stock
+    # 10 min it is never judged at all.  Three half-cycles inside the
+    # buffer also bound the slowest period counted, so the 12-h cap
+    # (osc_max_period_s) is gone: it could no longer be reached.
+    hold_buffer_s: float = 6 * 3600.0
     hold_settle_s: float = 3600.0      # setpoint unchanged this long first
     hold_after_heatup_s: float = 1800.0  # and this long after a heat-up ended
     hold_start_max_error_c: float = 0.5
@@ -376,8 +400,6 @@ class AutotuneConfig:
     # Oscillation faster than this many dead times is blamed on Kp, slower
     # on Ki (an integrating loop with too much P rings at ~4 theta).
     osc_fast_period_factor: float = 6.0
-    # Slower "cycles" are weather or routine (sun, occupancy), not control.
-    osc_max_period_s: float = 12 * 3600.0
     # Emergency detune when the swing is this many times osc_amplitude_c.
     emergency_amplitude_factor: float = 2.0
     # A swing is the gains' only when the hold's integral swung with it

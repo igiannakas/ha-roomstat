@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.5";
+const CARD_VERSION = "1.5.6";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -128,7 +128,11 @@ const earlier = (a, b) => (!a ? b : !b ? a : Date.parse(a) <= Date.parse(b) ? a 
 // The Boost's confirmation text (card 1.5.5).  What it ends on is the
 // integration's own word (boost_returns_to: its schedule, a preset, or a
 // temperature set by hand; unknown while a window or away mode holds the
-// room), and a Boost already running is restarted at full length.
+// room), and a Boost already running is restarted at full length.  With a
+// schedule, the schedule's next change ends it too, at a time the
+// integration does not know (an input_select's changes are events), so it
+// promises no more than that (card 1.5.6; 20 Nov 2026, second bedroom: a
+// 30-min Boost ended by the schedule 10 min early).
 function boostConfirmText(s) {
   const parts = [];
   if (s.current !== null && s.current !== undefined) parts.push(`Currently ${fmt1(s.current)} °C.`);
@@ -136,7 +140,7 @@ function boostConfirmText(s) {
   const forMins = s.boostMinutes ? `for ${fmtG(s.boostMinutes)} minutes` : "for the boost period";
   const back = s.boostReturnsTo;
   let after;
-  if (back === "schedule") after = "then goes back to its schedule.";
+  if (back === "schedule") after = "or until the schedule next changes, then goes back to its schedule.";
   else if (back === "none" && s.boostReturnsToC !== null && s.boostReturnsToC !== undefined)
     after = `then goes back to ${fmtG(s.boostReturnsToC)} °C.`;
   else if (back && MODE_NAMES[back]) after = `then goes back to ${MODE_NAMES[back]}.`;

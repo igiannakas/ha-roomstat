@@ -427,12 +427,17 @@ class TestAnalyseHold:
         assert not m.oscillating
 
     def test_slow_sawtooth_with_bursts_is_oscillation(self):
-        """Short heating bursts + long passive cool-downs (seen in sims)."""
+        """Short heating bursts + long passive cool-downs (seen in sims).
+        A 9-h one over a day was one until 2.27.5; a swing is judged over
+        the last 6 h now (hold_buffer_s, test_hold_buffer.py), so a 3-h
+        one."""
+        period = 10800
+
         def e(t):
-            ph = (t % 32400) / 32400
+            ph = (t % period) / period
             return -0.7 + 1.3 * ph if ph < 0.9 else 0.6 - 13 * (ph - 0.9)
-        s = [(t, e(t), (1.0 if (t % 32400) / 32400 > 0.9 else -1.0))
-             for t, _, _ in self._samples(lambda t: 0.0, hours=24)]
+        s = [(t, e(t), (1.0 if (t % period) / period > 0.9 else -1.0))
+             for t, _, _ in self._samples(lambda t: 0.0, hours=6)]
         m = A.analyse_hold(s, cfg=CFG, tuning=A.Tuning(0.6, 0.002))
         assert m.oscillating
 
@@ -1443,18 +1448,30 @@ class TestClosedLoop:
         assert any("the stop/release cycle, not the gains: no cut" in x for x in late)
 
     @pytest.mark.parametrize("period", [30.0, 300.0])
-    def test_coarse_sensor_still_calms_oscillation(self, period):
+    def test_coarse_sensor_oscillation_is_slower_than_the_buffer(self, period):
         """0.1 °C sensor whose HA timestamp only changes with the value.
 
         This room's valve keeps heating long after a stop (a 2000-min Tado
         integrator, from the days of 5 °C stops; real valves are switched
         off since 2.8.4), so it sits in stop 85-90 % of the time.  With the
         20-min release look-ahead of 2.20 it was in hold ~23 % of the time,
-        over the 20 % a hold window needs to be judged, and the tuner calmed
-        it; with today's 10 min ~17 %, so every window is a passive
-        cool-down to the tuner (by design: hold_min_heating_fraction) at
-        any outdoor temperature.  The look-ahead itself leaves the swing as
-        it was: no worse than the untuned room on 20 min (3 Nov 2026)."""
+        over the 20 % a hold window needs to be judged; with today's 10 min
+        ~17 %, so every window is a passive cool-down to the tuner (by
+        design: hold_min_heating_fraction) at any outdoor temperature.  The
+        look-ahead itself leaves the swing as it was: no worse than the
+        untuned room on 20 min (3 Nov 2026).
+
+        Its integral cycle is slow: untuned (Kp 4, Ki 0.01) a 5.6-6.8 h
+        period, the integral swinging 0.4-1.1 °C a cycle.  Until 2.27.5 the
+        24-h hold buffer saw it and the tuner calmed it with the 20-min
+        look-ahead (swing 0.86 -> 0.47 / 1.05 -> 0.52, Kp 2.09, Ki
+        0.00058); since 2.27.5 a swing is judged over the last 6 h
+        (test_hold_buffer.py: a 24-h buffer pieced an evening of people,
+        its rebuild and a top-up into one), which three crossings of a
+        6-h cycle do not fit, so it is left as it is, the untuned swing
+        (8 h calms it most of the way, 0.57 / 0.63, but 7.5 h already
+        flags the 22 Nov 2026 night).  The price of that fix, kept here as
+        a test."""
         plant = dict(LIVING, tado_ti_min=2000, tado_kp=1.5, water_delay_min=8,
                      mix_lag_min=6, sensor_resolution_c=0.1, sensor_period_s=period)
         flat = schedule_from([(0, 20.0)])
@@ -1465,10 +1482,15 @@ class TestClosedLoop:
             return max(e) - min(e)
 
         tuner, tr = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, release_lead_s=1200.0)
-        assert swing(tr) < 0.7
         assert tuner.summary()["holds_analysed"] > 5
+        assert tuner.active_tuning().kp == 4.0 and tuner.active_tuning().ki == 0.01
         _, untuned = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, tune=False,
                                   release_lead_s=1200.0)
+        assert swing(tr) <= swing(untuned) + 0.02
+        old, tr24 = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat, release_lead_s=1200.0,
+                                 cfg=P.AutotuneConfig(hold_buffer_s=24 * 3600.0))
+        assert swing(tr24) < 0.6 < swing(untuned) - 0.2
+        assert old.active_tuning().ki < 0.001
         _, today = _closed_loop(plant, 4.0, 0.01, days=7, sched=flat)
         assert swing(today) <= swing(untuned) + 0.02
 

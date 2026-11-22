@@ -484,3 +484,63 @@ class TestWindow:
         assert "Schedule override expired" in _lines(ent)
         _window(ent, "off")
         assert ent.preset_mode == "eco"
+
+
+@e2e
+class TestTheScheduleEndsABoost:
+    """The schedule moving on ends a running Boost, before its own end
+    (owner, 22 Nov 2026: keep it so).  Roomstat cannot know when the
+    schedule will next change (an ``input_select``'s changes are events, it
+    has no "next change" to read), so the card counts down the Boost's own
+    end (``boost_until``); when the schedule ends it early the thermostat
+    says so at once: the preset is the schedule's, ``boost_until`` is
+    cleared, and the activity log names it.  20 Nov 2026, second bedroom:
+    a Boost restarted at 19:39:52 for 30 min, "Schedule switching to eco"
+    at 20:00:00 with 10 min left, and nothing said it had ended the Boost."""
+
+    def test_the_20_nov_boost(self):
+        ent = _entity("comfort", override_min=30, boost_min=30)
+        _preset(ent, "boost")
+        ent._boost_end_ts -= 28 * 60          # 28 min in: 2 min left
+        ent._schedule_ctrl.override_until = ent._boost_end_ts
+        _preset(ent, "boost")                 # 19:39:52, restarted for 30 min
+        assert "Boost restarted for 30 min (2 min were left)" in _lines(ent)
+        ent._boost_end_ts -= 20 * 60 + 8      # 20:00:00
+        ent._schedule_ctrl.override_until = ent._boost_end_ts
+        _schedule(ent, "night")
+        attrs = ent.extra_state_attributes
+        assert ent.preset_mode == "eco"
+        assert attrs["boost_until"] is None
+        assert attrs["schedule_preset"] == "eco"
+        assert attrs["schedule_override_active"] is False
+        assert attrs["boost_returns_to"] == "schedule"
+        assert _timers("_async_boost_expired") == []
+        assert _timers("_async_schedule_override_expired") == []
+        lines = _lines(ent)
+        at = lines.index("Schedule switching to eco")
+        assert lines[at + 1] == "Boost ended by the schedule (10 min were left)"
+        assert lines[at + 2] == "Preset Boost → Night"
+
+    def test_not_when_the_boost_ends_by_itself(self):
+        ent = _entity("comfort")
+        _preset(ent, "boost")
+        _fire(ent, "_async_boost_expired")
+        assert not any(line.startswith("Boost ended by the schedule") for line in _lines(ent))
+
+    def test_not_when_a_preset_is_picked_by_hand(self):
+        ent = _entity("comfort")
+        _preset(ent, "boost")
+        _preset(ent, "eco")
+        assert ent.preset_mode == "eco"
+        assert not any(line.startswith("Boost ended by the schedule") for line in _lines(ent))
+
+    def test_not_while_the_window_holds_the_room(self):
+        """The window ended the Boost first; the schedule then only changes
+        what the close restores."""
+        ent = _entity("comfort")
+        _preset(ent, "boost")
+        _window(ent, "on")
+        _fire(ent, "_async_window_action")
+        _schedule(ent, "night")
+        assert ent.preset_mode == "frost_protection"
+        assert not any(line.startswith("Boost ended by the schedule") for line in _lines(ent))

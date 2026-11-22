@@ -135,7 +135,20 @@ Build new logic in the HA-free modules first (`parameters.py`,
   remaining" then "Schedule override started (30.0 min)" and "Boost started
   for 15 min" was a second `set_preset_mode` (the only path that writes
   both), not a restart restarting it; a reload keeps both ends
-  (`tests/test_boost_override.py`).
+  (`tests/test_boost_override.py`). **The schedule moving on still ends a
+  running Boost** (its override is not sticky; owner, 22 Nov 2026: "Don't
+  fix 3 but make sure the card shows how long till it finishes"), and since
+  2.27.5 says so: `_route_preset(trigger="schedule")` logs `Boost ended by
+  the schedule (10 min were left)` between `Schedule switching to eco` and
+  `Preset Boost → Night`; the state written with the preset clears
+  `boost_until`, so the card reads `Schedule · Night` at once. Roomstat
+  cannot know when the schedule will next change (the helper's changes are
+  events; nothing it reads holds the next one), so the card counts down
+  the Boost's own end and the confirmation says `or until the schedule
+  next changes` (card 1.5.6). 20 Nov 2026, second bedroom: a Boost
+  restarted at 19:39:52 for 30 min, ended by the 20:00:00 change with 10
+  min left; the log read only the schedule and preset lines. Not logged for
+  a Boost's own end, a preset by hand, or a window that ended it first.
 - `climate_summer.py`: summer lock (valve off, service calls refused, TRV held).
 - `preheat.py`: preheat on the way home, HA-free (see "Preheat on the way
   home" below): `PreheatController` (the decision per evaluation, the
@@ -187,8 +200,11 @@ Build new logic in the HA-free modules first (`parameters.py`,
   the preset or temperature it ends on, None while a window or away mode
   holds the room) for the confirmation (`boostConfirmText`: `then goes back
   to Night.`; running, `Boost is running, 9 min left. Restarts it for 15
-  minutes, …`). Until 1.5.4 it said `then switches to Day.` without a
-  schedule, where the Boost goes back to the preset before it. The resource
+  minutes, …`; with a schedule, card 1.5.6, `for 15 minutes, or until the
+  schedule next changes, then goes back to its schedule.`, as the schedule's
+  next change ends it at a time Roomstat does not know). Until 1.5.4 it said
+  `then switches to Day.` without a schedule, where the Boost goes back to
+  the preset before it. The resource
   URL carries a hash of the file (`card.py`), so any change to the card
   reaches browsers after the update; `CARD_VERSION` is only the console
   banner, bumped with each change.
@@ -1822,6 +1838,91 @@ Read this before changing `autotune.py` or `AutotuneConfig`.
   calms them the same, 0.25 one seed less, 0.3 leaves three at Ki 0.0012,
   their swing days 5–7 0.72–0.75 against 0.65–0.76 at 0.2). Cuts already made by the false alarm are not undone (the
   owner restores the living room by hand).
+- **A swing is judged over the last 6 h** (2.27.5, `hold_buffer_s` 24 h →
+  6 h; owner, 22 Nov 2026: "Fix 1 & 2"). A hold window is judged every 3 h,
+  and one that ends in "no change" is not cleared, so while the target
+  stands its samples ran on for up to 24 h. 22 Nov 2026 03:20, living room
+  (Kp 2.2, Ki 0.00046, band 0.1/0.1, one target 21.0 day and night):
+  `hold: oscillation ±0.39 °C, period 318 min → the integral swung with it
+  (0.27 °C a cycle): less Ki (×0.7); a large swing: emergency cut of Kp and
+  Ki; changed Kp 2.20→1.87, Ki 0.00046→0.00032`, then 06:20 `no
+  oscillation … changed Ki 0.00032→0.00023`. The buffer reached back to
+  21 Nov 18:20; its crossings were people at 21:29 (+0.54, the valve shut,
+  CO2 1,055 → 1,333 ppm; the deadband decay took the integral +0.29 →
+  +0.03), the rebuild over 4 h (0.14 under at 01:40) and an ordinary top-up
+  (+0.37 at 02:44, 81 % before): one people-driven drain and its rebuild,
+  read as the integral swinging. Replayed through `observe` from the
+  recorder and the decision lines (`tests/fixtures/hold_window_living_2026_11_22.json`,
+  the integral carried between holds with the deadband decay): 24 h as
+  live (3 half-cycles, ±0.39, 318 min, 0.27); 6 h from 21:20, 2
+  half-cycles, no swing. **The number:** every buffer from 7.5 h up flags
+  that night, 7.25 h and less do not, so 8 h would not have fixed it;
+  three crossings take one and a half periods after the first excursion,
+  so 6 h holds them for a cycle up to 3.5 h wherever the window starts,
+  4.5 h in about half the windows (they slide every 3 h), 6 h never.
+  plant_sim's integral-driven cycles (untuned, flat 20 °C, Kp 4, Ki
+  0.001–0.01; scratch `review_1122/tuner_window/characterize*.py`): the
+  oscillating test room 2.4–3.0 h at 0 °C, 3.4–4.4 h at 8 °C, the integral
+  0.16–1.8 °C a cycle; slower variants of it (slower radiator or room)
+  4–7 h, mostly under the 20 % heating bar; none in the four Tado rooms
+  at any Ki to 0.01 (the fitted ones do not swing; the generic ones'
+  swing is the stop/release cycle, as large at every Ki, its integral
+  under 0.2 a cycle but at Ki 0.01 in the generic slow room, 0.22, which
+  24 h flagged in 14 of 24 windows and 6 h in 1). **The price:** the
+  coarse-sensor variant (0.1 °C, 30 or 300 s) with the 20-min release
+  look-ahead (2.20's, an option) cycles in 5.6–6.8 h, the integral 0.4–1.1
+  a cycle: 24 h calmed
+  it (swing 0.86 → 0.47, 1.05 → 0.52, Ki 0.01 → 0.00058), 6 h leaves it as
+  untuned (8 h 0.57/0.63, 10 h as 24 h); on the stock 10 min it is never
+  judged at any buffer (`test_coarse_sensor_oscillation_is_slower_than_the_buffer`).
+  `osc_max_period_s` (12 h) is gone: three crossings inside the buffer
+  bound the period counted, and `analyse_hold` itself judges only the last
+  `hold_buffer_s` of what it is given (the tracker keeps no more). Hold
+  windows are not saved (a restart starts a new one), so nothing migrates;
+  the living room's cut stays until the owner re-enters the gains.
+  **The 06:20 step is intended:** the integral verdict trims Ki ×0.7 and
+  the emergency, anchored to the values in use, ×0.7 again (×0.49), and a
+  change moves Ki one `ki_step_down` (×0.7) towards its target; the rest
+  came with the next window's `_maybe_update`, a gentler change, at the
+  3-h `min_interval_down_s`, whatever that window showed. Rejected: (a)
+  an emergency that cuts each gain once (no double Ki trim, no follow-on
+  step): in `test_calms_an_oscillating_room`'s room (seeds 3, 7, 11) Ki
+  ended 0.0049 / 0.00058 / 0.0034 against 0.00058 in all three, the swing
+  days 5–7 0.84 / 0.79 / 0.83 against 0.65 / 0.75 / 0.76 (untuned 0.82):
+  the double cut is what calms an integral-heavy room within a week (the
+  first cut is also already taken back when a trial is rolled back, which
+  re-anchors the trims; left as it is); (b) 8 h (above); (c) clearing the
+  window after every verdict (a 3-h buffer: nothing slower than about 2
+  h); (d) two
+  integral cycles (five half-cycles, or two flagged windows in a row)
+  before a cut, with a longer buffer: a 6-h cycle then needs 12–18 h, where
+  pieced-together days come back, and it is a new rule the owner did not
+  ask for. Simulated (`plant_sim`, 14 days, seeds 3 and 7, metrics from
+  day 4; generic living and slow, the two fitted rooms, the oscillating
+  test room; mild 8–12 and cold 0–5 °C day to day; one target all day
+  (20.0) and the daily schedule; people every evening, +0.3–0.6 °C/h for
+  1–2 h from 18:30–21:00; from Kp 4 / Ki 0.001, Ki 0.01 and Kp 8; 180 s /
+  0.3 °C; scratch `review_1122/tuner_window/study.py`), 2.27.4 → 2.27.5:
+  - the fitted rooms: identical in every run; the daily schedule:
+    identical but for the generic slow room (cuts 8 → 7, cold from Kp 8);
+  - one target all day: cuts in the generic living room 19 → 6
+    (emergencies 5 → 0), hold RMS 0.146 → 0.135, over 14.3 → 12.7 %;
+    generic slow 45 → 21 (27 → 7), RMS 0.174 → 0.156, under 10.6 → 7.7 %,
+    over 11.8 → 10.1 %, commands 121 → 127 a day; from Ki 0.01 the generic
+    slow room keeps Ki 0.0049 (2.27.4: 0.00058), RMS 0.156 → 0.131 cold,
+    under 11.4 → 5.9 %, and the generic living room mild RMS 0.197 →
+    0.149, over 26 → 15 %;
+  - worse: generic living mild from Kp 8 RMS 0.179 → 0.182, over 18.2 →
+    20.8 %; generic slow cold from Kp 8 0.120 → 0.125; generic slow, one
+    target, 4–10 more commands a day in four of its six cases;
+  - still cut: in the generic slow room with people the 6 h still holds an
+    evening's drain and rebuild now and then (cold from stock, 8 cuts, 2
+    emergencies, Ki 0.001 → 0.00017; none without people), and the lower
+    Kp then leaves the integral swinging 0.16–0.24 a cycle, cut again;
+  - the oscillating test room: 7 → 6 cuts, RMS equal (from Ki 0.01 at 180
+    s / 0.3 its windows seldom reach the 20 % heating bar, 0–1 judged in
+    14 days); in its own test (60 s / 0.1, seeds 3, 7, 11) calmed exactly
+    as before (Kp 2.09, Ki 0.00058, swing days 5–7 0.65 / 0.75 / 0.76).
 - The tuner learns only from everyday episodes, never from test signals:
   - **heat-ups** (setpoint step ≥ 0.5 °C with the room ≥ 0.4 °C below) give
     the dead time θ (tangent method), the heating rate, the coast and the
@@ -2407,6 +2508,20 @@ ruff check .
   `HoldMetrics` and older saves; closed loop, a generic living room whose
   stop/release cycle took Ki 0.0004 → 0.00005 in two days on the shape
   alone, left alone; through the entity, each cycle tells the integral).
+- `tests/test_hold_buffer.py` (2.27.5: a swing is judged over the last 6
+  h; the living room's night of 21–22 Nov 2026,
+  `tests/fixtures/hold_window_living_2026_11_22.json`, as live with a 24-h
+  buffer (the 03:20 cut and the 06:20 follow-on step, the trim and its
+  steps) and no swing with 6 h, where a buffer starts to flag it (7.5 h),
+  the evidence in it (people, the valve shut, the drain and the rebuild),
+  through `observe` both ways; the 20 Nov 03:35 window still the
+  stop/release cycle; `analyse_hold` judging only the last 6 h, how slow a
+  cycle 6 h sees, the tracker's 6 h, hold windows not saved). With it,
+  `tests/test_boost_override.py`'s `TestTheScheduleEndsABoost` (the 20 Nov
+  second bedroom's Boost ended by the schedule, the line and the
+  attributes; not for its own end, a preset by hand or a window) and the
+  card's `Schedule · Night` after it and its confirmation text
+  (`tests/test_card_status.py`).
 - `tests/test_trial_rules.py` (2.27.3: a short landing ends a trial, the
   vote applied at once or after the 12-h limit, 0.15 short or exactly 0.2
   does not, a cut-short, never-told-to-stop or hold-run heat-up does not,

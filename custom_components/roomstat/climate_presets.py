@@ -1016,7 +1016,7 @@ class PresetMixin:
         ``manual``: picked by the user, so it takes effect while nobody is
         home (see :meth:`_presence_takeover`).
         """
-        if self._route_preset(preset_mode, manual=manual):
+        if self._route_preset(preset_mode, manual=manual, trigger=trigger):
             self._write_state_with_binary_sensor()
             await self._async_regulation_cycle(trigger=trigger)
         else:
@@ -1026,13 +1026,17 @@ class PresetMixin:
             self._preheat_refresh(trigger, write=False)
             self._write_state_with_binary_sensor()
 
-    def _route_preset(self, preset_mode: str, *, manual: bool = False) -> bool:
+    def _route_preset(
+        self, preset_mode: str, *, manual: bool = False, trigger: str | None = None
+    ) -> bool:
         """Apply *preset_mode* now, or save it while an automation is active.
 
         Returns True when the preset was applied (the caller regulates), False
         when it was saved for later restore by window / presence automation.
         No state is written here.  A preset picked by hand (``manual``) is
-        held back neither by away mode nor by a window (2.22.0).
+        held back neither by away mode nor by a window (2.22.0).  ``trigger``
+        is the caller's (``schedule``: the schedule moved on, which ends a
+        running Boost before its own end, and the activity log says so).
         """
         # A preset picked by hand ends the window's hold on the room, open
         # (2.22.0) or in its close delay: the user wants it now
@@ -1097,6 +1101,17 @@ class PresetMixin:
             self._boost_cancel()
             self._boost_cancel = None
             self._boost_end_ts = 0.0
+            if trigger == "schedule" and preset_mode != PRESET_BOOST:
+                # The schedule moving on ends a running Boost (its override
+                # is not sticky; owner, 22 Nov 2026: keep it so), and the
+                # card shows the schedule's preset at once.  Say so, with
+                # what was left: 20 Nov 2026, second bedroom, a Boost
+                # restarted at 19:39 for 30 min read only "Schedule
+                # switching to eco" and "Preset Boost → Night" at 20:00.
+                self._log(_LOGGER).info(
+                    "boost ended by the schedule (%d min were left)",
+                    math.ceil(boost_left_s / 60),
+                )
 
         # When switching to COMFORT, restore the stored comfort target
         if preset_mode == PRESET_COMFORT:

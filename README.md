@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.27.4-blue)
+![Version](https://img.shields.io/badge/version-2.27.5-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -271,7 +271,10 @@ Turn it on per room: **Configure → Auto-tune → Enable auto-tune**.
   carried over by the radiator, people or the sun with the valve shut,
   heating again just under the target) is shown in the activity log as
   "the stop/release cycle, not the gains: no cut" (since 2.27.2). Until then
-  such evenings cut Kp and Ki a little at a time, with no way back up.
+  such evenings cut Kp and Ki a little at a time, with no way back up. A
+  swing is judged over the last 6 hours (since 2.27.5; a whole day until
+  then, which could piece an evening of people, the night's sag and a
+  top-up into one "swing" and cut both gains for it).
 - Saved heat-ups are checked once against those rules when the room starts
   (since 2.23.2, 2.24.2 and 2.27.1). A braking time that such a heat-up had
   pulled up goes back to what the room's other heat-ups give. A dead time or
@@ -510,7 +513,9 @@ scheduler sets to `comfort`, `night`, `away` or `frost_protection`.
 - A manual change (preset, temperature or Boost) wins until the next schedule
   change, or until the **Override duration** has passed. 0 means until the
   next schedule change. A Boost wins until it ends, whatever the Override
-  duration, then the room goes back to the schedule.
+  duration, or until the next schedule change if that comes first, then the
+  room follows the schedule. The activity log says when the schedule ended a
+  Boost early, and how much was left.
 - **Resume schedule** (a button, and a preset) ends a manual change straight
   away.
 
@@ -624,7 +629,9 @@ It shows the room and target temperature, the heating %, and what the room is
 doing. Buttons: Off, Night, Day, Boost and Schedule. During a Boost it shows
 the minutes the Boost has left (`Override · Boost · 13 min`). Boost asks first
 and says what the room goes back to after it, or that a running Boost starts
-again at full length.
+again at full length. With a schedule it says the next schedule change ends
+the Boost too: Roomstat can't know when that comes, so the minutes shown are
+the Boost's own, and the line shows the schedule as soon as it takes over.
 
 ## License
 
