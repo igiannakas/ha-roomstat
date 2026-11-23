@@ -30,7 +30,8 @@ const now = Date.now();
 const out = cases.map((c) => {
   const a = { current_temperature: 17.4, temperature: 20, hvac_action: "idle", ...c.attrs };
   for (const key of ["presence_override_until", "schedule_override_until",
-                     "window_heat_earliest", "window_heat_latest", "boost_until"]) {
+                     "window_heat_earliest", "window_heat_latest", "boost_until",
+                     "presence_home_at"]) {
     if (typeof a[key] === "number") a[key] = new Date(now + a[key] * 1000).toISOString();
   }
   const hass = { states: { "climate.x": { state: c.state || "heat", attributes: a } },
@@ -179,6 +180,50 @@ _CASES = [
       "schedule_override_active": False, "schedule_override_until": None,
       "boost_until": None, "boost_returns_to": "schedule"},
      "Schedule · Night", None, True),
+    # Someone counted home, the home delay running (2.27.6, card 1.5.7).
+    # The owner's case, 23 Nov 2026: preheat had the room at the restore
+    # target ("Someone close"), and every card read "Nobody home · Someon…"
+    # for the 30 s.  Now what it goes back to, and when.
+    ({"preset_mode": "away", "presence_away_active": True, "schedule_preset": "comfort",
+      "temperature": 20.5, "preheat_mode": "on", "preheat_state": "close",
+      "preheat_heating_to_c": 20.5, "presence_arriving": True, "presence_home_at": 29,
+      "presence_returns_to": "comfort", "presence_returns_to_c": 20.5},
+     "Home · Day in <1 min", None, False),
+    ({"preset_mode": "away", "presence_away_active": True, "presence_arriving": True,
+      "presence_home_at": 2 * 60 - 1, "presence_returns_to": "eco",
+      "presence_returns_to_c": 18.5},
+     "Home · Night in 2 min", None, False),
+    ({"preset_mode": "away", "presence_away_active": True, "presence_arriving": True,
+      "presence_home_at": 10, "presence_returns_to": "none", "presence_returns_to_c": 21.5},
+     "Home · 21.5° in <1 min", None, False),
+    # Its time just passed: the restore is running.
+    ({"preset_mode": "away", "presence_away_active": True, "presence_arriving": True,
+      "presence_home_at": -2, "presence_returns_to": "comfort"},
+     "Home · Day in <1 min", None, False),
+    # A change by hand while nobody was home simply stays: that mode, now.
+    ({"preset_mode": "eco", "presence_override_active": True,
+      "presence_override_until": 200 * 60, "presence_arriving": True,
+      "presence_home_at": 29, "presence_returns_to": None},
+     "Home · Night", "mdi:hand-back-right", False),
+    ({"preset_mode": "boost", "presence_override_active": True,
+      "presence_override_until": None, "boost_until": 12 * 60 - 1,
+      "presence_arriving": True, "presence_home_at": 29},
+     "Home · Boost · 12 min", "mdi:hand-back-right", False),
+    # An Off picked by hand while nobody was home ends: the schedule's Day.
+    ({"preset_mode": "frost_protection", "presence_override_active": True,
+      "presence_override_until": None, "schedule_preset": "comfort",
+      "schedule_override_active": True, "presence_arriving": True,
+      "presence_home_at": 29, "presence_returns_to": "comfort",
+      "presence_returns_to_c": 20.5},
+     "Home · Day in <1 min", "mdi:hand-back-right", False),
+    # A window still holds the room: its status wins.
+    ({"preset_mode": "frost_protection", "presence_away_active": True,
+      "window_open_active": True, "presence_arriving": True, "presence_home_at": 29},
+     "Window open", "mdi:window-open-variant", False),
+    # Off and summer win as ever.
+    ({"preset_mode": "away", "presence_away_active": True, "presence_arriving": True,
+      "presence_home_at": 29, "presence_returns_to": "comfort"},
+     "Off", None, False, "off"),
 ]
 
 # The clock in the user's language, 24-hour choice and the server's time zone.
@@ -190,13 +235,18 @@ _HASS = {"locale": {"language": "en-GB", "time_format": "24", "time_zone": "serv
 def test_status_lines(tmp_path):
     runner = tmp_path / "runner.js"
     runner.write_text(_RUNNER)
-    payload = json.dumps([{"attrs": attrs, "hass": _HASS} for attrs, *_ in _CASES])
+    payload = json.dumps([
+        {"attrs": attrs, "hass": _HASS, "state": rest[3] if len(rest) > 3 else "heat"}
+        for attrs, *rest in _CASES
+    ])
     proc = subprocess.run(
         [_NODE, str(runner), str(_CARD)], input=payload, capture_output=True,
         text=True, timeout=30, check=True,
     )
     results = json.loads(proc.stdout)
-    for (_attrs, status, badge, schedule_active), got in zip(_CASES, results, strict=True):
+    for (_attrs, status, badge, schedule_active, *_state), got in zip(
+        _CASES, results, strict=True
+    ):
         got.pop("confirm")
         assert got == {"status": status, "badge": badge, "scheduleActive": schedule_active}
 

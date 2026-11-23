@@ -15,7 +15,7 @@
  * Served and registered by the roomstat integration; no resource to add.
  */
 
-const CARD_VERSION = "1.5.6";
+const CARD_VERSION = "1.5.7";
 
 const MODE_NAMES = {
   comfort: "Day",
@@ -91,6 +91,23 @@ const preheatStatus = (hass, a) => {
   if (a.preheat_state === "nearby") return `Nobody home · Someone nearby · ${temp}`;
   const eta = a.preheat_state === "due" ? fmtClock(hass, a.preheat_arrival_at) : null;
   return `Nobody home · Preheating to ${temp}` + (eta ? ` · ETA ${eta}` : "");
+};
+// Someone counted home, the home delay still running (card 1.5.7): the room
+// is still held by away mode (or a change by hand) for a few seconds more.
+// What it goes back to and when ("Home · Day in <1 min"), or, after
+// a change by hand that simply stays, that mode now.  Never "Nobody home":
+// 23 Nov 2026, every card read "Nobody home · Someon…" for the 30 s after
+// the owner was counted home ("Home · Day in <1 min" fits a half-width card).
+const arrivingStatus = (a, preset, target, boostUntil) => {
+  if (a.presence_returns_to) {
+    const to = modeLabel(a.presence_returns_to, num(a.presence_returns_to_c));
+    // The delay is seconds (30 here): "<1 min" until a whole minute is left.
+    const ms = Date.parse(a.presence_home_at) - Date.now();
+    const when = ms >= 60000 ? fmtMins(Math.ceil(ms / 60000)) : "<1 min";
+    return `Home · ${to} in ${when}`;
+  }
+  const now = `Home · ${modeLabel(preset, target)}`;
+  return boostUntil ? `${now} · ${timeLeft(boostUntil)}` : now;
 };
 const tint = (color, pct) => `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 const esc = (s) =>
@@ -190,6 +207,7 @@ function roomState(hass, config, ids) {
   if (summer) status = "Summer lock";
   else if (off) status = "Off";
   else if (windowOpen) status = windowStatus(a);
+  else if (a.presence_arriving) status = arrivingStatus(a, preset, target, boostUntil);
   else if (a.presence_away_active) status = preheatStatus(hass, a) || "Away · nobody home";
   else if (awayHeld) {
     // Set by hand while nobody is home: it holds until someone is home,

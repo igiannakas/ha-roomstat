@@ -1,7 +1,7 @@
 # Roomstat
 
 [![Tests](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml/badge.svg)](https://github.com/igiannakas/ha-roomstat/actions/workflows/tests.yml)
-![Version](https://img.shields.io/badge/version-2.27.5-blue)
+![Version](https://img.shields.io/badge/version-2.27.6-blue)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2026.11%2B-41BDF5)
 
 Roomstat heats each room to the temperature measured by a sensor in the room,
@@ -177,7 +177,10 @@ changes.
 - **Away and Off stay** until you change them, also when the schedule moves on.
   An Off ends when someone comes home after everyone was out (below).
 - **Eco is called Night.**
-- **Presence** can be an `input_boolean` as well as a binary sensor.
+- **Presence** can be an `input_boolean` as well as a binary sensor. While
+  the home delay runs after someone is counted home, the card reads
+  `Home · Day in <1 min` (what comes back, and when), not
+  `Nobody home` (since 2.27.6).
 - **A change by hand while nobody is home takes effect.** Pick a mode or a
   temperature on your way home and the room heats straight away. The change
   lasts until someone is home, or at most **Configure → Presence sensor →
@@ -502,7 +505,8 @@ The 800 m and the near-home radius are Home ETA's.
   preheat: heading home`.
 - The card, in mode On: `Nobody home · Preheating to 20 °C · ETA 18:42`,
   `Nobody home · Someone close · 20 °C` or `Nobody home · Someone nearby ·
-  19.4 °C` while it heats; `Away · nobody home` otherwise.
+  19.4 °C` while it heats; `Away · nobody home` otherwise. Once someone is
+  counted home: `Home · Day in <1 min` until the home delay ends.
 
 ## Schedule
 

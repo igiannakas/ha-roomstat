@@ -44,6 +44,15 @@ from .parameters import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# While the home delay runs (2.27.6): someone is home, the room is still held
+# by away mode or a change by hand, and when and to what it goes back.  The
+# card's "Someone home · Day in <1 min" and nothing else; display only, and
+# on for half a minute an arrival: not recorded.
+PRESENCE_ARRIVING_ATTRIBUTES = frozenset({
+    "presence_arriving", "presence_home_at", "presence_returns_to",
+    "presence_returns_to_c",
+})
+
 
 def async_call_later_boost(hass, delay_s, callback):
     """Thin wrapper so boost timer scheduling stays in this module."""
@@ -523,6 +532,7 @@ class PresetMixin:
         if new_state is None or new_state.state in ("unavailable", "unknown"):
             return
 
+        was_arriving = self._presence_ctrl.arriving
         if new_state.state == "off":  # nobody home
             delay = self._config_entry.options.get(CONF_PRESENCE_AWAY_DELAY_S, 600)
             self._presence_ctrl.handle_presence_away(
@@ -534,6 +544,101 @@ class PresetMixin:
                 self.hass, home_delay, self._async_presence_home_action,
             ):
                 self._restore_presence_state()
+        self._presence_arrival_changed(was_arriving, away=new_state.state == "off")
+
+    def _presence_arrival_changed(self, was_arriving: bool, *, away: bool) -> None:
+        """Say so when the home delay starts or is called off (2.27.6).
+
+        Display only: an event line and the thermostat's state at once, so
+        the card stops reading "Nobody home" the moment someone is counted
+        home (owner, 23 Nov 2026).  Nothing here touches the delay, what it
+        restores, or the regulation.
+        """
+        arriving = self._presence_ctrl.arriving
+        if arriving == was_arriving:
+            return
+        if arriving:
+            delay_s = max(0.0, (self._presence_ctrl.home_at or 0.0) - time.time())
+            self._log(_LOGGER).info(
+                "someone is home: %s after the home delay (%d s)",
+                self._presence_arrival_words(), round(delay_s),
+            )
+        elif away:
+            self._log(_LOGGER).info(
+                "nobody home again within the home delay: nothing restored, "
+                "the room stays as it was",
+            )
+        self.async_write_ha_state()
+
+    def _presence_returns_to(self) -> SavedState | None:
+        """What the room goes to once the home delay ends, as
+        :meth:`_restore_presence_state` will restore it: away mode's saved
+        preset (a Boost as the schedule's preset), the schedule's preset after
+        an Off picked by hand while nobody was home.  None when nothing
+        changes (a change by hand stays; nothing saved) or a window holds the
+        room (what it restores is saved for the close)."""
+        ctrl = self._presence_ctrl
+        if not ctrl.nobody_home or self._window_ctrl.is_active:
+            return None
+        if ctrl.override_active:
+            if not ctrl.off_until_home:
+                return None
+            preset = self._fallback_preset()
+            return SavedState(preset, self._get_preset_target(preset))
+        saved = ctrl.get_saved()
+        if saved.preset is None:
+            return None
+        preset = self._fallback_preset() if saved.preset == PRESET_BOOST else saved.preset
+        if preset == PRESET_COMFORT:
+            temp = self._comfort_target()
+        elif saved.temp is not None:
+            temp = saved.temp
+        else:
+            temp = self._target_temp
+        return SavedState(preset, temp)
+
+    def _presence_arrival_words(self) -> str:
+        """'back to Comfort', for the event and the decision line."""
+        back = self._presence_returns_to()
+        if back is not None:
+            what = (
+                f"{back.temp:.1f} °C" if back.preset == PRESET_NONE and back.temp is not None
+                else preset_name(back.preset)
+            )
+            return f"back to {what}"
+        if self._presence_ctrl.override_active:
+            return "the change by hand stays"
+        if self._window_ctrl.is_active:
+            return "away ends (the window's close restores the room)"
+        return "away ends"
+
+    def _presence_arriving(self) -> bool:
+        """The home delay runs while the room is held by away mode or a
+        change by hand (summer mode ends both)."""
+        return self._presence_ctrl.arriving and not self._summer_active
+
+    def _presence_arrival_attributes(self) -> dict:
+        """PRESENCE_ARRIVING_ATTRIBUTES: ``presence_arriving``,
+        ``presence_home_at`` (when the home delay ends), and what the room
+        goes to then (``presence_returns_to``, a preset, None when nothing
+        changes; ``presence_returns_to_c`` its temperature).  All None (False)
+        outside the delay."""
+        out: dict = {
+            "presence_arriving": False, "presence_home_at": None,
+            "presence_returns_to": None, "presence_returns_to_c": None,
+        }
+        if not self._presence_arriving():
+            return out
+        home_at = self._presence_ctrl.home_at
+        out["presence_arriving"] = True
+        out["presence_home_at"] = datetime.datetime.fromtimestamp(
+            home_at, tz=datetime.UTC
+        ).isoformat()
+        back = self._presence_returns_to()
+        if back is not None:
+            out["presence_returns_to"] = back.preset
+            out["presence_returns_to_c"] = back.temp
+        return out
 
     async def _async_presence_away_action(self, _now, *, unknown_is_away: bool = False) -> bool:
         """Switch to AWAY preset after presence-away delay.
@@ -634,6 +739,8 @@ class PresetMixin:
 
     async def _async_presence_home_action(self, _now) -> None:
         """Restore previous preset after presence-home delay."""
+        was_arriving = self._presence_arriving()
+        self._presence_ctrl.home_timer_fired()
         # Revalidate: only proceed if presence sensor is still "on"
         presence_sensor = self._config_entry.options.get(CONF_PRESENCE_SENSOR_ID)
         if presence_sensor:
@@ -643,8 +750,15 @@ class PresetMixin:
                     "presence home action skipped, the sensor is now %s",
                     current.state if current else "unavailable",
                 )
+                if was_arriving:
+                    self.async_write_ha_state()
                 return
         self._restore_presence_state()
+        # The restore writes the state when it changes the room; a change by
+        # hand that stays, a window that holds the room or nothing saved
+        # write none, and the card must stop saying someone is arriving.
+        if was_arriving:
+            self.async_write_ha_state()
 
     def _restore_presence_state(self, notify: bool = True) -> None:
         """Restore preset after presence returns.

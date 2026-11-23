@@ -85,6 +85,10 @@ def _entity(*, mode="shadow", options=None, schedule="comfort", start=True):
         **(options or {}),
     }
     ent = _make_entity(opts, window=True, presence=True, schedule=True)
+    # A whole outing's lines: the sensor keeps the last 30, and an outing
+    # fills them (with the arrival's own line, 2.27.6, the first preheat
+    # line fell off the end).
+    ent._activity = type(ent._activity)(max_lines=100)
     ent.hass.keep_tasks = True
     for entity_id, state in (
         (SCHEDULE, schedule), (PRESENCE, "on"), (WINDOW, "off"),

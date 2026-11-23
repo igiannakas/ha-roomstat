@@ -149,6 +149,33 @@ class TestControllerOverride:
         # Only the limit is left: no away timer, the home timer cancelled.
         assert [e["delay"] for e in cl.active] == [600]
 
+    def test_the_home_delay_is_arriving_until_it_ends(self):
+        """2.27.6: when the home delay ends, while it runs (display only)."""
+        c, cl = self._away(), _FakeCallLater()
+        assert not c.arriving and c.home_at is None
+        c.handle_presence_home(None, 30, _noop, call_later=cl, now=1000.0)
+        assert c.arriving and c.home_at == 1030.0 and c.is_active
+        c.handle_presence_home(None, 30, _noop, call_later=cl, now=1010.0)
+        assert c.home_at == 1040.0 and len(cl.active) == 1   # restarted, as before
+        c.handle_presence_away(None, 60, _noop, call_later=cl)   # a flicker
+        assert not c.arriving and c.home_at is None and c.is_active
+        c.handle_presence_home(None, 30, _noop, call_later=cl, now=1100.0)
+        c.home_timer_fired()
+        assert not c.arriving and c.home_at is None and c.is_active
+        c.handle_presence_home(None, 30, _noop, call_later=cl, now=1200.0)
+        c.restore()
+        assert not c.arriving and c.home_at is None
+        c.activate("comfort", 20.0)
+        c.handle_presence_home(None, 30, _noop, call_later=cl, now=1300.0)
+        c.cancel_timer()
+        assert c.home_at is None
+        # No delay, or someone already home: no delay to show.
+        assert c.handle_presence_home(None, 0, None, now=1400.0) is True
+        assert c.home_at is None
+        c.restore()
+        assert c.handle_presence_home(None, 30, _noop, call_later=cl, now=1500.0) is False
+        assert not c.arriving and c.home_at is None
+
     def test_timer_fired_and_end(self):
         c = self._away()
         c.start_override(None, 1000.0, 600, _noop, call_later=_FakeCallLater())

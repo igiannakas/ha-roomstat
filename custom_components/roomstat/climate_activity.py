@@ -246,7 +246,15 @@ class ActivityMixin:
         if self._window_ctrl.is_active or self._window_ctrl.close_delay_active:
             return "window"
         label = preset_name(self._preset_mode)
-        if self._presence_ctrl.is_active:
+        if self._presence_arriving():
+            # Someone counted home, the home delay running (2.27.6): still
+            # away mode's (or the change's) target, but not "nobody home".
+            # A clock time, not a countdown: the line's key stays put.
+            words = self._presence_arrival_words()
+            label += f", someone home: {words}"
+            if words.startswith("back to") and self._presence_ctrl.home_at is not None:
+                label += f" at {local_hhmm(self._presence_ctrl.home_at)}"
+        elif self._presence_ctrl.is_active:
             label += ", nobody home"
             preheat = self._preheat_target_c()
             if preheat is not None:

@@ -548,12 +548,20 @@ class PresenceAutomationController:
     the room was in when everyone left, is an override with no limit that
     ends when someone is home (``off_until_home``): the room then goes back
     to the schedule instead of keeping the Off (owner, 27 Oct 2026).
+
+    While the home delay runs (``home_pending``) the room is still held by
+    away mode or the override, but someone has been counted home:
+    ``home_at`` is when the delay ends and ``arriving`` says so (2.27.6,
+    display only: the card and the activity line say someone is home rather
+    than nobody; the delay and what it restores are unchanged).
     """
 
     def __init__(self) -> None:
         self.is_active: bool = False
         self._away_timer: _CancelFn | None = None
         self._home_timer: _CancelFn | None = None
+        # Wall-clock end of the home delay while its timer runs (else None).
+        self.home_at: float | None = None
         self._saved: SavedState = SavedState()
         # Override: nobody is home, but a change by hand holds away off.
         self.override_active: bool = False
@@ -571,6 +579,23 @@ class PresenceAutomationController:
     def nobody_home(self) -> bool:
         """True while the room is away, or held off away by a change by hand."""
         return self.is_active or self.override_active
+
+    @property
+    def arriving(self) -> bool:
+        """Someone has been counted home and the home delay runs: the room
+        is still held by away mode or the override until ``home_at``."""
+        return self.home_at is not None and self.nobody_home
+
+    def _cancel_home_timer(self) -> None:
+        if self._home_timer is not None:
+            self._home_timer()
+            self._home_timer = None
+        self.home_at = None
+
+    def home_timer_fired(self) -> None:
+        """The home-delay timer has fired (its action is running)."""
+        self._home_timer = None
+        self.home_at = None
 
     def handle_presence_away(
         self,
@@ -591,9 +616,8 @@ class PresenceAutomationController:
         """
         # Cancel any pending home-delay timer (flicker protection)
         if self._home_timer is not None:
-            self._home_timer()
-            self._home_timer = None
             _LOGGER.debug("Presence away during home delay – cancelled restore, staying away")
+        self._cancel_home_timer()
 
         # Already in away mode: nothing more to do.  Starting a new away
         # timer would cause _async_presence_away_action to overwrite the
@@ -616,6 +640,7 @@ class PresenceAutomationController:
         on_home_action: Callable | None = None,
         *,
         call_later: _CallLaterFn | None = None,
+        now: float | None = None,
     ) -> bool:
         """React to a presence-home event; cancel any pending away timer.
 
@@ -629,6 +654,8 @@ class PresenceAutomationController:
 
         An override is ended the same way (after the home delay, so a flicker
         back to away keeps it): the caller's restore then keeps the change.
+        ``home_at`` is when the delay ends (*now*, default the clock, plus
+        *delay_s*).
         """
         if self._away_timer is not None:
             self._away_timer()
@@ -639,10 +666,10 @@ class PresenceAutomationController:
 
         if delay_s > 0 and on_home_action is not None:
             # Cancel any previously pending home timer
-            if self._home_timer is not None:
-                self._home_timer()
+            self._cancel_home_timer()
             _cl = call_later or _get_call_later()
             self._home_timer = _cl(hass, delay_s, on_home_action)
+            self.home_at = (time.time() if now is None else now) + delay_s
             _LOGGER.debug("Presence home – restoring preset in %ds", delay_s)
             return False
 
@@ -670,9 +697,7 @@ class PresenceAutomationController:
         An override ends too; it has nothing saved (the change by hand is
         the room's state), so an empty snapshot comes back.
         """
-        if self._home_timer is not None:
-            self._home_timer()
-            self._home_timer = None
+        self._cancel_home_timer()
         self.end_override()
         saved = SavedState(preset=self._saved.preset, temp=self._saved.temp)
         self._saved = SavedState()
@@ -838,9 +863,7 @@ class PresenceAutomationController:
         if self._away_timer is not None:
             self._away_timer()
             self._away_timer = None
-        if self._home_timer is not None:
-            self._home_timer()
-            self._home_timer = None
+        self._cancel_home_timer()
         self._cancel_override_timer()
 
 

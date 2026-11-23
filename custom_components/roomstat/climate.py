@@ -66,7 +66,7 @@ from .climate_controllers import (
 )
 from .climate_lookahead import LookaheadMixin
 from .climate_preheat import PREHEAT_LIVE_ATTRIBUTES, PreheatMixin
-from .climate_presets import PresetMixin
+from .climate_presets import PRESENCE_ARRIVING_ATTRIBUTES, PresetMixin
 from .climate_regulation import RegulationMixin
 from .climate_schedule import ScheduleMixin
 from .climate_summer import SummerMixin
@@ -261,7 +261,7 @@ class RoomstatClimate(
     _unrecorded_attributes = frozenset(
         {
             "activity", "valve_lookahead_c", *PREHEAT_LIVE_ATTRIBUTES,
-            *WINDOW_WAIT_ATTRIBUTES,
+            *WINDOW_WAIT_ATTRIBUTES, *PRESENCE_ARRIVING_ATTRIBUTES,
         }
     )
     # The native temperature API (HA 2026.11; the old temperature_unit,
@@ -1532,6 +1532,9 @@ class RoomstatClimate(
                 if self._presence_ctrl.override_until is not None
                 else None
             ),
+            # Someone counted home, the home delay running (2.27.6): the
+            # card's "Someone home · Day in <1 min".
+            **self._presence_arrival_attributes(),
             "sensor_degraded": self._sensor_degraded,
             "summer_mode_active": self._summer_active,
             "overlay_refresh_s": self._overlay_refresh_s,

@@ -204,7 +204,11 @@ Build new logic in the HA-free modules first (`parameters.py`,
   schedule next changes, then goes back to its schedule.`, as the schedule's
   next change ends it at a time Roomstat does not know). Until 1.5.4 it said
   `then switches to Day.` without a schedule, where the Boost goes back to
-  the preset before it. The resource
+  the preset before it. While the home delay runs (card 1.5.7,
+  `arrivingStatus`, ahead of away mode and preheat, after a window, Off and
+  summer) it reads `presence_arriving`, `presence_home_at`,
+  `presence_returns_to` and `presence_returns_to_c`
+  (`PRESENCE_ARRIVING_ATTRIBUTES`, unrecorded; see "Presence"). The resource
   URL carries a hash of the file (`card.py`), so any change to the card
   reaches browsers after the update; `CARD_VERSION` is only the console
   banner, bumped with each change.
@@ -1356,6 +1360,37 @@ Read this before changing the presence logic (`PresenceAutomationController`,
   (`presence_override_active`, `presence_override_until`); while nobody is
   home the Schedule button is not shown as active (pressing it goes back to
   Away). `tests/test_card_status.py` runs the card's `roomState` in Node.
+- **Someone counted home: the words, not the delay (2.27.6;** owner, 23
+  Nov 2026: "Stopped ignoring but why it's still away??"). The sensor
+  (`input_boolean.home_master`) read home at 16:56:18 and the rooms left
+  away mode about 16:56:48, after the home delay (30 s); meanwhile every
+  card read `Nobody home · Someon…` (preheat's "Someone close", already at
+  the restore target). The delay stays as it was; while it runs the
+  controller keeps its end (`home_at`, set in `handle_presence_home`,
+  cleared by a flicker, the restore, `home_timer_fired`, `cancel_timer`;
+  `arriving` = `home_at` set and `nobody_home`), and the thermostat shows
+  it (`_presence_arrival_attributes`, unrecorded, not persisted: a reload
+  inside the delay restores at once, as before): `presence_arriving`,
+  `presence_home_at`, and what comes back then (`_presence_returns_to`,
+  mirroring `_restore_presence_state`: away mode's saved preset, a Boost
+  as the schedule's, the schedule's after an Off by hand; None when a
+  change by hand stays or a window holds the room) as
+  `presence_returns_to` / `presence_returns_to_c`. The card reads `Home · Day
+  in <1 min` (`<1 min` under a whole minute, then `2 min`), after a change
+  by hand that stays `Home · Night` (a Boost with its own time); never
+  `Nobody home`, and preheat's text does not win. `Home`, not `Someone
+  home`: a half-width iPhone card shows 19–20 characters, and the
+  complaint began with a cut line (review, 23 Nov 2026). The
+  start writes the state and an event line (`Someone is home: back to
+  Comfort after the home delay (30 s)`; `the change by hand stays`), a
+  flicker another (`Nobody home again within the home delay: nothing
+  restored, …`), and the decision line's label reads `Away, someone home:
+  back to Comfort at 16:56` (a clock time, so the line's key stays put;
+  `Night, someone home: the change by hand stays`). Display only: in
+  `tests/test_presence_arriving.py` an arrival with preheat on sends the
+  same commands at the same setpoints with the display path switched off.
+  A presence sensor gone unavailable within the delay leaves it shown: the
+  home action restores unless the sensor reads off.
 
 ## Preheat on the way home
 
@@ -2522,6 +2557,16 @@ ruff check .
   attributes; not for its own end, a preset by hand or a window) and the
   card's `Schedule · Night` after it and its confirmation text
   (`tests/test_card_status.py`).
+- `tests/test_presence_arriving.py` (2.27.6: someone counted home while
+  the home delay runs, through the entity: from away mode shown then
+  cleared at the restore, the schedule moving on meanwhile, a repeated
+  "on", a flicker, a home action that finds the sensor off, a reload
+  inside the delay, summer mode, a window; a change by hand that stays and
+  an Off by hand that ends; the event and decision lines; preheat on with
+  someone close (the owner's 23 Nov 2026 case); the same commands and
+  setpoints with the display path off). With it, the controller's
+  `home_at` (`tests/test_presence_override.py`) and the card's
+  `Home · …` lines (`tests/test_card_status.py`).
 - `tests/test_trial_rules.py` (2.27.3: a short landing ends a trial, the
   vote applied at once or after the 12-h limit, 0.15 short or exactly 0.2
   does not, a cut-short, never-told-to-stop or hold-run heat-up does not,
